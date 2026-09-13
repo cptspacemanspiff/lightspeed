@@ -8,9 +8,9 @@
 
 <p align="center"><strong>Run thousands of agents. Efficient, durable, auditable.</strong></p>
 
-Lightspeed is open-source infrastructure for running long-lived agent fleets as durable workflows.
+Lightspeed is open-source infrastructure for running managed agent fleets as durable workflows.
 
-Agents survive restarts, can run for months, and stay cheap when idle. When they
+"Managed agents" is an emerging pattern that separates the core agent loops from the VM or sandbox they use. Agents survive restarts, can run for months, and stay cheap when idle. When they
 need an operating system, they borrow a real machine for as long as the task
 requires.
 
@@ -22,7 +22,7 @@ requires.
 
 Lightspeed's Rust core runs on [Temporal](https://temporal.io/) today and stores
 production data in Postgres with optional S3. The frontend is TypeScript and
-React. Support for other durable workflow engines is planned.
+React.
 
 ## Why Lightspeed?
 
@@ -107,8 +107,10 @@ Lightspeed covers the table stakes of a modern agent harness. Everything below w
   non-Anthropic routes
 - [x] **Catalogs**: one keyed text representation for VFS, skill, sub-agent,
   and client catalogs, with independent source data and version history
-- [x] **Environment tool grants**: independent Off/Read only/Edit file tools,
-  command execution, and durable jobs; transfers respect file grants.
+- [x] **Environment attachments**: a session attaches the machines it may use,
+  each with a read/edit/exec/jobs access level, optional working directory,
+  and one default; the toolset is the union of those grants and transfers
+  respect them.
 - [x] **Filesystem sources**: independent VFS/environment working directories,
   opt-in prompt instructions from direct `.md`/`.txt` files in filename order,
   skill discovery, and optional root overrides
@@ -145,7 +147,8 @@ Lightspeed covers the table stakes of a modern agent harness. Everything below w
 **Borrowed compute**
 
 - [x] **Dedicated VMs**: attach an existing machine or provision one through the
-  included Incus provider
+  included Incus provider; environment lifecycles remain independent of sessions.
+  Session selection checks attachment membership and registry state without waking or connecting to the machine
 - [x] **Bring your own compute**: start `lightspeed-envd` anywhere with a
   registration key and it dials in and registers itself, so NATed VMs,
   Kubernetes pods, and benchmark sandboxes need no inbound address
@@ -173,7 +176,7 @@ Lightspeed covers the table stakes of a modern agent harness. Everything below w
 **Interfaces**
 
 - [x] **Web app**: manage universes, sessions, profiles, bots, and channels
-  from the browser
+  from the browser, with per-resource attachment access and MCP tool subsets
 - [x] **Progressive transcripts**: open at recent activity and automatically
   load earlier history as you scroll, while live updates continue
 - [x] **Input origin metadata**: distinguish direct human input from event deliveries

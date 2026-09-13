@@ -78,18 +78,12 @@ const profileSourceSchema = z.discriminatedUnion("kind", [
 /// the reserved prefix; the schema only keeps the shape honest.
 const metadataSchema = z.record(z.string().min(1).max(64), z.string().min(1).max(256));
 
-const sessionEnvironmentOverrideSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("none") }),
-  z.object({ type: z.literal("existing"), environmentId: z.string().min(1) }),
-]);
-
-const sessionCreateSchema = z.object({
+export const sessionCreateSchema = z.object({
   displayName: z.string().trim().min(1).max(200).optional(),
   metadata: metadataSchema.optional(),
   deleteAfterCloseMs: z.number().int().positive().nullable().optional(),
   profile: profileSourceSchema,
-  environment: sessionEnvironmentOverrideSchema.optional(),
-});
+}).strict();
 
 /// Put replaces the whole map; an empty map clears it.
 const sessionMetadataPutSchema = z.object({
@@ -604,7 +598,6 @@ export function gatewayRoutes(ctx: AppContext) {
           ? { deleteAfterCloseMs: input.deleteAfterCloseMs }
           : {}),
         profile: input.profile as ProfileSource,
-        ...(input.environment ? { environment: input.environment } : {}),
       });
       const current = await client.call("session/read", {
         sessionId: response.result.session.id,
@@ -1556,10 +1549,7 @@ export function gatewayRoutes(ctx: AppContext) {
       if (status) {
         params.status = status as EnvironmentListParams["status"];
       }
-      const originSessionId = c.req.query("originSessionId");
-      if (originSessionId) {
-        params.originSessionId = originSessionId;
-      }
+
       const registrationKeyId = c.req.query("registrationKeyId");
       if (registrationKeyId) {
         params.registrationKeyId = registrationKeyId;
@@ -2025,8 +2015,8 @@ export function mcpServerInputWithOAuthGrant(
     allowedTools: server.allowedTools,
     execution: server.execution,
     exposure: server.exposure,
-    approvalDefault: server.approvalDefault,
-    deferLoadingDefault: server.deferLoadingDefault,
+    approval: server.approval,
+    deferLoading: server.deferLoading,
     allowPrivateNetwork: server.allowPrivateNetwork,
     authPolicy: server.authPolicy,
     credential: { type: "authGrant", grantId },

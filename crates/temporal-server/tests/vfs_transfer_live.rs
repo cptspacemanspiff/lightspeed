@@ -87,10 +87,11 @@ async fn temporal_live_vfs_transfers_follow_profile_grants_and_publish_large_fil
         .await?;
     // The sourced development URL names the normal gateway. This fixture
     // binds an ephemeral port, while retaining the deployment's route token.
-    let gateway_config = temporal_server::environment_gateway::EnvironmentGatewayClientConfig::new(
-        &base_url,
-        runtime.environment_gateway().deployment_token(),
-    );
+    let gateway_config =
+        temporal_server::environments::gateway::EnvironmentGatewayClientConfig::new(
+            &base_url,
+            runtime.environment_gateway().deployment_token(),
+        );
     let state = Arc::new(GatewayState::multi(
         GatewayAuthMode::Single { universe_id },
         runtime.clone(),
@@ -299,28 +300,34 @@ async fn run_case(
     ] {
         std::fs::write(prompts.join(name), body)?;
     }
-    let mut features = json!({"vfs": {
-        "workspaceLinks": [{"path":"/workspace","target":{"type":"workspace","workspaceId":workspace.workspace_id},"access":"readWrite"}]
-    }});
-    if mode != "sourcing" {
-        features["vfs"]["tools"] = json!(if mode == "readonly" {
-            "readOnly"
-        } else {
-            "edit"
-        });
+    // Prompt and skill sourcing needs only read access on both attachments.
+    let vfs_access = if matches!(mode, "readonly" | "sourcing") {
+        "read"
     } else {
+        "edit"
+    };
+    let mut features = json!({"vfs": {
+        "workspaces": [{"path":"/workspace","workspaceId":workspace.workspace_id,"access":vfs_access}]
+    }});
+    if mode == "sourcing" {
         features["vfs"]["skills"] = json!({"roots": ["/workspace"]});
         features["vfs"]["prompts"] = json!({});
     }
     if mode != "noenv" {
-        features["environments"] = if mode == "sourcing" {
-            json!({})
-        } else {
-            json!({"tools":"edit"})
-        };
+        let access = if mode == "sourcing" { "read" } else { "edit" };
+        features["environments"] = json!({
+            "environments": [{"environmentId": environment, "default": true, "access": access}]
+        });
     }
     if mode == "sourcing" {
-        features["environments"]["workingDirectory"] = json!(root);
+        let skills = root.join(".agents/skills/review");
+        std::fs::create_dir_all(&skills)?;
+        std::fs::write(
+            skills.join("SKILL.md"),
+            "---\nname: review\ndescription: Review the live fixture.\n---\nReview the files.",
+        )?;
+        features["environments"]["skills"] = json!({"roots":[".agents/skills"]});
+        features["environments"]["environments"][0]["workingDirectory"] = json!(root);
         features["environments"]["prompts"] = json!({"roots":[".agents/prompts"]});
     }
     let mut model = temporal_server::default_model_from_env();
@@ -329,7 +336,6 @@ async fn run_case(
         profile_id: api::ProfileId::new(format!("profile_{session}")), display_name: None, description: None,
         document: api::ProfileDocument {
             config: Some(serde_json::from_value(json!({"model": api_projection::model_to_api(&model), "features": features}))?),
-            environment: (mode != "noenv").then(|| api::ProfileEnvironment::Existing { environment_id: environment.into() }),
             ..Default::default()
         },
     }}).await?.result.profile;
@@ -493,10 +499,18 @@ impl CoreAgentLlm for TransferLlm {
         if mode == "sourcing" {
             let mut vfs_prompts = Vec::new();
             let mut environment_prompts = Vec::new();
+            let mut environment_skills = Vec::new();
             for entry in &request.request.context.entries {
                 let key = entry.key.as_ref().map(|key| key.as_str()).unwrap_or("");
                 if key.starts_with("instructions.100.prompts") {
                     vfs_prompts.push(
+                        self.blobs
+                            .read_text(&entry.content.content_ref)
+                            .await
+                            .unwrap(),
+                    );
+                } else if key == "runtime.catalog.skills.environment" {
+                    environment_skills.push(
                         self.blobs
                             .read_text(&entry.content.content_ref)
                             .await
@@ -511,6 +525,12 @@ impl CoreAgentLlm for TransferLlm {
                     );
                 }
             }
+            assert_eq!(
+                environment_skills.len(),
+                1,
+                "environment skills and prompts must both reach the model"
+            );
+            assert!(environment_skills[0].contains("Review the live fixture."));
             assert_eq!(vfs_prompts, vec!["VFS first", "VFS second", "VFS last"]);
             assert_eq!(
                 environment_prompts,

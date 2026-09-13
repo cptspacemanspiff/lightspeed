@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -8,100 +7,32 @@ use async_trait::async_trait;
 use engine::{
     BlobRef, ContextConfig, ContextEntryInput, ContextEntryKind, ContextMessageRole,
     CoreAgentCommand, CoreAgentEvent, ModelSelection, ProviderApiKind, RunConfig, RunStatus,
-    SessionConfig, SessionId, WorkspaceLink, WorkspaceLinkAccess, WorkspaceLinkTarget,
+    SessionConfig, SessionId, WorkspaceAccess, WorkspaceAttachment, WorkspaceAttachmentTarget,
     storage::{BlobStore, CreateSession, InMemoryBlobStore, InMemorySessionStore, SessionStore},
 };
-use llm_clients::openai::responses::{Client, Config};
 use llm_runtime::{LlmAdapterRegistry, LlmRuntime, OpenAiResponsesLlmAdapter};
 use test_support::{DriveCommand, RunnerQuiescence, RunnerStores, SessionRunner};
 use tools::{
     fs::tools::ReadFileResult,
-    fs::{FsPath, FsToolContext, LinkedVfsFileSystem},
+    fs::{AttachedVfsFileSystem, FsPath, FsToolContext},
     runtime::InlineToolRuntime,
     toolset::{ToolsetConfig, register_toolset},
 };
 use vfs::{
     CompareAndSetVfsWorkspaceHead, CreateInlineSnapshotRequest, CreateVfsWorkspaceRecord,
-    InlineFile, ResolvedWorkspaceLink, ResolvedWorkspaceLinkTarget, VfsCatalogError, VfsPath,
-    VfsWorkspaceId, VfsWorkspaceRecord, VfsWorkspaceStore, create_inline_snapshot,
+    InlineFile, ResolvedWorkspaceAttachment, ResolvedWorkspaceAttachmentTarget, VfsCatalogError,
+    VfsPath, VfsWorkspaceId, VfsWorkspaceRecord, VfsWorkspaceStore, create_inline_snapshot,
 };
 
 mod support;
 
+use support::{
+    openai_responses_live_client as live_client, openai_responses_live_model as live_model,
+};
+
 use support::retrying_openai_responses_client;
 
 const LIVE_MARKER: &str = "LIVE-SKILL-MATRIX-7392";
-
-fn live_model() -> String {
-    env_or_dotenv_var("OPENAI_RESPONSES_MODEL")
-        .or_else(|_| env_or_dotenv_var("OPENAI_LIVE_MODEL"))
-        .unwrap_or_else(|_| "gpt-5.5".to_string())
-}
-
-fn live_client() -> Client {
-    let api_key = env_or_dotenv_var("OPENAI_API_KEY").expect(
-        "OPENAI_API_KEY must be set in env or root .env to run llm-runtime skills live tests",
-    );
-    assert!(
-        !api_key.trim().is_empty(),
-        "OPENAI_API_KEY is set but empty"
-    );
-
-    let mut config = Config::new(api_key);
-    if let Ok(base_url) = env_or_dotenv_var("OPENAI_BASE_URL") {
-        config.base_url = base_url;
-    }
-    if let Ok(org_id) = env_or_dotenv_var("OPENAI_ORG_ID") {
-        config.organization = Some(org_id);
-    }
-    if let Ok(project) = env_or_dotenv_var("OPENAI_PROJECT_ID") {
-        config.project = Some(project);
-    }
-
-    Client::new(config).expect("OpenAI Responses client")
-}
-
-fn env_or_dotenv_var(name: &str) -> Result<String, std::env::VarError> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(env_error) => dotenv_var(name).ok_or(env_error),
-    }
-}
-
-fn dotenv_var(name: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(root_dotenv_path()).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line.split_once('=')?;
-        if key.trim() == name {
-            return Some(unquote_dotenv_value(value.trim()));
-        }
-    }
-    None
-}
-
-fn root_dotenv_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("repo root")
-        .join(".env")
-}
-
-fn unquote_dotenv_value(value: &str) -> String {
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-        {
-            return value[1..value.len() - 1].to_string();
-        }
-    }
-    value.to_string()
-}
 
 #[derive(Default)]
 struct LiveVfsCatalog {
@@ -247,27 +178,27 @@ async fn openai_responses_live_selects_and_reads_the_matching_skill() {
     )
     .await
     .expect("create skill snapshot");
-    let workspace_links = vec![WorkspaceLink {
+    let workspace_attachments = vec![WorkspaceAttachment {
         path: "/skills/system".to_owned(),
-        target: WorkspaceLinkTarget::Snapshot {
+        target: WorkspaceAttachmentTarget::Snapshot {
             snapshot_ref: snapshot.snapshot_ref.to_string(),
         },
-        access: WorkspaceLinkAccess::ReadOnly,
+        access: WorkspaceAccess::Read,
     }];
 
-    let linked_fs = LinkedVfsFileSystem::new(
+    let attached_fs = AttachedVfsFileSystem::new(
         blobs.clone(),
         vfs.clone(),
-        vec![ResolvedWorkspaceLink {
+        vec![ResolvedWorkspaceAttachment {
             path: VfsPath::parse("/skills/system").unwrap(),
-            target: ResolvedWorkspaceLinkTarget::AvailableSnapshot {
+            target: ResolvedWorkspaceAttachmentTarget::AvailableSnapshot {
                 snapshot_ref: snapshot.snapshot_ref,
             },
-            access: WorkspaceLinkAccess::ReadOnly,
+            access: WorkspaceAccess::Read,
         }],
     )
-    .expect("linked fs");
-    let fs_ctx = FsToolContext::new(Arc::new(linked_fs), blobs.clone()).with_cwd(FsPath::root());
+    .expect("attached fs");
+    let fs_ctx = FsToolContext::new(Arc::new(attached_fs), blobs.clone()).with_cwd(FsPath::root());
     let model = ModelSelection {
         api_kind: ProviderApiKind::OpenAiResponses,
         provider_id: "openai".to_string(),
@@ -296,7 +227,7 @@ async fn openai_responses_live_selects_and_reads_the_matching_skill() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
-                config: session_config(model, workspace_links),
+                config: session_config(model, workspace_attachments),
             },
             max_steps: None,
         })
@@ -395,7 +326,10 @@ async fn openai_responses_live_selects_and_reads_the_matching_skill() {
     );
 }
 
-fn session_config(model: ModelSelection, workspace_links: Vec<WorkspaceLink>) -> SessionConfig {
+fn session_config(
+    model: ModelSelection,
+    workspace_attachments: Vec<WorkspaceAttachment>,
+) -> SessionConfig {
     SessionConfig {
         model,
         generation: engine::GenerationConfig {
@@ -411,14 +345,13 @@ fn session_config(model: ModelSelection, workspace_links: Vec<WorkspaceLink>) ->
             vfs: Some(engine::VfsFeature {
                 skills: Some(engine::VfsSkillsConfig {
                     roots: Some(
-                        workspace_links
+                        workspace_attachments
                             .iter()
-                            .map(|link| link.path.clone())
+                            .map(|attachment| attachment.path.clone())
                             .collect(),
                     ),
                 }),
-                workspace_links,
-                tools: Some(engine::VfsToolSurface::ReadOnly),
+                workspaces: workspace_attachments,
                 ..engine::VfsFeature::default()
             }),
             ..engine::FeaturesConfig::default()

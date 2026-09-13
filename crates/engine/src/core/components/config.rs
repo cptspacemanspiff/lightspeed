@@ -151,12 +151,11 @@ impl FeaturesConfig {
     }
 }
 
-/// Grants the session virtual filesystem. Workspace links declare the
+/// Grants the session virtual filesystem. Workspace attachments declare the
 /// session-visible namespace and the VFS catalog is surfaced to the session.
-/// The sub-blocks grant the agent tool
-/// surface and prompt/skill sourcing independently — `{}` grants a VFS with
-/// no tools and no sourcing. Environment sources belong to the independent
-/// environment capability.
+/// The agent tool surface is derived from the attachments: any attachment
+/// installs the read tools and any `edit` attachment adds the write tools.
+/// Prompt/skill sourcing is granted independently.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VfsFeature {
     #[serde(default = "default_feature_version")]
@@ -166,16 +165,7 @@ pub struct VfsFeature {
     pub working_directory: Option<String>,
     /// Catalog resources exposed in the session's workspace namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_links: Vec<WorkspaceLink>,
-    /// Agent-facing filesystem tool surface: absent = no fs tools (a
-    /// sourcing-only VFS is valid); `read_only` installs the read surface;
-    /// `edit` adds the write tools. Per-path writability is defined and
-    /// enforced by each workspace link's own access — this field shapes which tools
-    /// exist, not path permissions.
-    /// With environments granted, read-only tools also expose materialize;
-    /// editing tools additionally expose capture into writable workspace links.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<VfsToolSurface>,
+    pub workspaces: Vec<WorkspaceAttachment>,
     /// Prompt-instruction sourcing from the VFS; absent = prompts are not
     /// sourced from the VFS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,48 +180,58 @@ impl Default for VfsFeature {
     fn default() -> Self {
         Self {
             version: CURRENT_FEATURE_VERSION,
-            workspace_links: Vec::new(),
+            workspaces: Vec::new(),
             working_directory: None,
-            tools: None,
             prompts: None,
             skills: None,
         }
     }
 }
 
+impl VfsFeature {
+    /// The widest access any workspace attachment grants; `None` without
+    /// attachments, which installs no filesystem tools.
+    pub fn tool_access(&self) -> Option<WorkspaceAccess> {
+        self.workspaces
+            .iter()
+            .map(|attachment| attachment.access)
+            .max()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceLink {
+pub struct WorkspaceAttachment {
     pub path: String,
-    pub target: WorkspaceLinkTarget,
-    pub access: WorkspaceLinkAccess,
+    pub target: WorkspaceAttachmentTarget,
+    pub access: WorkspaceAccess,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum WorkspaceLinkTarget {
+pub enum WorkspaceAttachmentTarget {
     Workspace { workspace_id: String },
     Snapshot { snapshot_ref: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Per-attachment VFS access. Ordered: `edit` implies `read`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkspaceLinkAccess {
-    ReadOnly,
-    ReadWrite,
+pub enum WorkspaceAccess {
+    Read,
+    Edit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VfsToolSurface {
-    ReadOnly,
-    Edit,
+impl WorkspaceAccess {
+    pub fn allows_edit(self) -> bool {
+        self == Self::Edit
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VfsPromptsConfig {
     /// Absent searches .agents/prompts and .lightspeed/prompts beneath each
-    /// workspace link. Explicit roots replace these defaults and must be
-    /// non-empty absolute paths contained in workspace links.
+    /// workspace attachment. Explicit roots replace these defaults and must be
+    /// non-empty absolute paths contained in workspace attachments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<String>>,
 }
@@ -239,8 +239,8 @@ pub struct VfsPromptsConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VfsSkillsConfig {
     /// Absent searches .agents/skills and .lightspeed/skills beneath each
-    /// workspace link. Explicit roots replace these defaults and must be
-    /// non-empty absolute paths contained in workspace links.
+    /// workspace attachment. Explicit roots replace these defaults and must be
+    /// non-empty absolute paths contained in workspace attachments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<String>>,
 }
@@ -401,68 +401,122 @@ impl Default for TimersFeature {
     }
 }
 
-/// Grants active session environments. Filesystem tools, commands, selection,
-/// durable jobs, prompts, and skills are independent, default-off sub-grants.
+/// Grants session environments. The attachment list is the allowed set:
+/// the session can only select, read, or run jobs on a listed machine, and
+/// each attachment carries its own access grant and working directory. The
+/// installed tool surface is the union of every attachment's grant; a call
+/// the active machine's grant does not cover is rejected at execution, so
+/// switching machines never changes the toolset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentsFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
-    /// Filesystem tool surface. Absent installs no filesystem tools; sources
-    /// remain independent. Read-only does not restrict commands or durable jobs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<EnvironmentToolSurface>,
-    /// Grants command execution and process continuation. Commands may modify
-    /// files even when filesystem tools are read-only or disabled.
-    #[serde(default)]
-    pub commands: bool,
-    /// Absolute machine working directory for file tools, commands, jobs, and sources; absent uses the endpoint default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_directory: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub providers: Option<Vec<String>>,
-    /// Registration keys whose registered environments the session may use;
-    /// absent allows every key. Independent of `providers`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registration_keys: Option<Vec<String>>,
     /// Installs model-facing list/activate/deactivate tools. Environment read
     /// is present whenever the environments feature is granted.
     #[serde(default)]
-    pub selection_tools: bool,
-    /// Installs the session's durable-job workflow binding. Actual tool
-    /// execution remains gated by active environment capabilities.
-    #[serde(default)]
-    pub jobs: bool,
+    pub selection: bool,
     /// Independent environment prompt loading; absent disables sourced instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompts: Option<EnvironmentPromptsConfig>,
     /// Independent environment skill discovery. Absent disables discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<EnvironmentSkillsConfig>,
+    /// The environments this session may use, each with its own grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentAttachment>,
 }
 
 impl Default for EnvironmentsFeature {
     fn default() -> Self {
         Self {
             version: CURRENT_FEATURE_VERSION,
-            tools: None,
-            commands: false,
-            providers: None,
-            working_directory: None,
+            selection: false,
             prompts: None,
-            registration_keys: None,
-            selection_tools: false,
-            jobs: false,
             skills: None,
+            environments: Vec::new(),
         }
     }
 }
 
-/// Agent-facing environment filesystem tools; independent of execution grants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl EnvironmentsFeature {
+    pub fn attachment(&self, environment_id: &str) -> Option<&EnvironmentAttachment> {
+        self.environments
+            .iter()
+            .find(|attachment| attachment.environment_id == environment_id)
+    }
+
+    pub fn is_attached(&self, environment_id: &str) -> bool {
+        self.attachment(environment_id).is_some()
+    }
+
+    /// The attachment activated when a profile is applied and nothing is
+    /// active; validation admits at most one.
+    pub fn default_attachment(&self) -> Option<&EnvironmentAttachment> {
+        self.environments
+            .iter()
+            .find(|attachment| attachment.default)
+    }
+
+    /// The widest grant across attachments; the installed tool surface.
+    pub fn tool_access(&self) -> Option<EnvironmentAccess> {
+        self.environments
+            .iter()
+            .map(|attachment| attachment.access)
+            .max()
+    }
+}
+
+/// One environment the session may use. Access and working directory are
+/// properties of the pairing, not of the machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentAttachment {
+    pub environment_id: String,
+    /// Activated when a profile is applied while nothing is active; never
+    /// overrides a live selection.
+    #[serde(default)]
+    pub default: bool,
+    pub access: EnvironmentAccess,
+    /// Absolute machine working directory for file tools, commands, jobs,
+    /// and sources; absent uses the machine's advertised default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+}
+
+/// Per-attachment environment access. Ordered: each level implies the ones
+/// before it. `exec` grants processes, which can write files regardless of
+/// file-tool level, so a read-only file surface with commands is not a
+/// meaningful restriction and is not expressible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EnvironmentToolSurface {
-    ReadOnly,
+pub enum EnvironmentAccess {
+    Read,
     Edit,
+    Exec,
+    Jobs,
+}
+
+impl EnvironmentAccess {
+    pub fn allows_edit(self) -> bool {
+        self >= Self::Edit
+    }
+
+    pub fn allows_exec(self) -> bool {
+        self >= Self::Exec
+    }
+
+    pub fn allows_jobs(self) -> bool {
+        self >= Self::Jobs
+    }
+
+    /// The ladder as the model sees it, e.g. `read, edit, exec`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "read, edit",
+            Self::Exec => "read, edit, exec",
+            Self::Jobs => "read, edit, exec, jobs",
+        }
+    }
 }
 
 /// Prompt loading scope resolved on the selected machine, never on the worker.
@@ -487,17 +541,16 @@ pub struct EnvironmentSkillsConfig {
     pub roots: Option<Vec<String>>,
 }
 
-/// Grants remote MCP tools by declaring linked servers from the universe MCP
+/// Grants remote MCP tools by declaring attached servers from the universe MCP
 /// catalog. Reconciliation into tool specs happens in the runtime
 /// materialization layer, not in the engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
-    /// Must be non-empty with unique server ids; omit the feature instead of
-    /// linking zero servers.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub servers: Vec<McpServerLink>,
+    /// Attached servers have unique ids. An empty list grants no MCP tools.
+    #[serde(default)]
+    pub servers: Vec<McpServerAttachment>,
 }
 
 impl Default for McpFeature {
@@ -509,11 +562,16 @@ impl Default for McpFeature {
     }
 }
 
-/// A selected universe MCP server. Its catalog record owns all connection and
-/// behavior configuration.
+/// A selected universe MCP server. Its catalog record owns connection,
+/// execution, exposure, approval, and auth; the attachment may only narrow the
+/// record's tool allowlist for this session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpServerLink {
+pub struct McpServerAttachment {
     pub server_id: String,
+    /// Subset of the record's allowed tools exposed to this session; absent
+    /// exposes the record's full allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 fn default_feature_version() -> u32 {
@@ -654,21 +712,21 @@ fn validate_features(
 ) -> Result<(), DomainError> {
     if let Some(vfs) = &features.vfs {
         validate_feature_version("vfs", vfs.version)?;
-        let link_paths = validate_workspace_links(&vfs.workspace_links)?;
+        let attachment_paths = validate_workspace_attachments(&vfs.workspaces)?;
         if let Some(cwd) = &vfs.working_directory
             && cwd != "/"
         {
             validate_source_roots(
                 "vfs working directory",
                 Some(std::slice::from_ref(cwd)),
-                &link_paths,
+                &attachment_paths,
             )?;
         }
         if let Some(prompts) = &vfs.prompts {
-            validate_source_roots("vfs prompts", prompts.roots.as_deref(), &link_paths)?;
+            validate_source_roots("vfs prompts", prompts.roots.as_deref(), &attachment_paths)?;
         }
         if let Some(skills) = &vfs.skills {
-            validate_source_roots("vfs skills", skills.roots.as_deref(), &link_paths)?;
+            validate_source_roots("vfs skills", skills.roots.as_deref(), &attachment_paths)?;
         }
     }
     if let Some(web) = &features.web {
@@ -684,13 +742,7 @@ fn validate_features(
     }
     if let Some(environments) = &features.environments {
         validate_feature_version("environments", environments.version)?;
-        if let Some(cwd) = &environments.working_directory
-            && (!cwd.starts_with('/') || cwd.contains('\0'))
-        {
-            return Err(DomainError::InvariantViolation(
-                "environment working directory must be absolute".into(),
-            ));
-        }
+        validate_environment_attachments(&environments.environments)?;
         for roots in [
             environments
                 .skills
@@ -757,10 +809,47 @@ fn validate_subagents_feature(subagents: &SubagentsFeature) -> Result<(), Domain
     Ok(())
 }
 
-fn validate_workspace_links(links: &[WorkspaceLink]) -> Result<Vec<String>, DomainError> {
-    let mut paths = Vec::with_capacity(links.len());
-    for link in links {
-        let path = canonical_workspace_link_path(&link.path)?;
+fn validate_environment_attachments(
+    attachments: &[EnvironmentAttachment],
+) -> Result<(), DomainError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut defaults = 0;
+    for attachment in attachments {
+        crate::EnvironmentId::try_new(attachment.environment_id.clone()).map_err(|error| {
+            DomainError::InvariantViolation(format!("invalid environment attachment: {error}"))
+        })?;
+        if !seen.insert(attachment.environment_id.as_str()) {
+            return Err(DomainError::InvariantViolation(format!(
+                "environment {} is attached more than once",
+                attachment.environment_id
+            )));
+        }
+        if attachment.default {
+            defaults += 1;
+        }
+        if let Some(cwd) = &attachment.working_directory
+            && (!cwd.starts_with('/') || cwd.contains('\0'))
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "environment {} working directory must be absolute",
+                attachment.environment_id
+            )));
+        }
+    }
+    if defaults > 1 {
+        return Err(DomainError::InvariantViolation(
+            "at most one environment attachment may be the default".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_attachments(
+    attachments: &[WorkspaceAttachment],
+) -> Result<Vec<String>, DomainError> {
+    let mut paths = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let path = canonical_workspace_attachment_path(&attachment.path)?;
         if paths.iter().any(|existing: &String| {
             existing == &path
                 || existing == "/"
@@ -769,26 +858,26 @@ fn validate_workspace_links(links: &[WorkspaceLink]) -> Result<Vec<String>, Doma
                 || path.starts_with(&format!("{existing}/"))
         }) {
             return Err(DomainError::InvariantViolation(format!(
-                "workspace link path {path:?} overlaps another workspace link"
+                "workspace attachment path {path:?} overlaps another workspace attachment"
             )));
         }
-        match &link.target {
-            WorkspaceLinkTarget::Workspace { workspace_id } => {
+        match &attachment.target {
+            WorkspaceAttachmentTarget::Workspace { workspace_id } => {
                 if workspace_id.trim().is_empty() {
                     return Err(DomainError::InvariantViolation(
-                        "workspace link workspace_id must not be empty".to_owned(),
+                        "workspace attachment workspace_id must not be empty".to_owned(),
                     ));
                 }
             }
-            WorkspaceLinkTarget::Snapshot { snapshot_ref } => {
+            WorkspaceAttachmentTarget::Snapshot { snapshot_ref } => {
                 if snapshot_ref.trim().is_empty() {
                     return Err(DomainError::InvariantViolation(
-                        "workspace link snapshot_ref must not be empty".to_owned(),
+                        "workspace attachment snapshot_ref must not be empty".to_owned(),
                     ));
                 }
-                if link.access != WorkspaceLinkAccess::ReadOnly {
+                if attachment.access != WorkspaceAccess::Read {
                     return Err(DomainError::InvariantViolation(format!(
-                        "snapshot workspace link at {path:?} must be read_only"
+                        "snapshot workspace attachment at {path:?} must be read"
                     )));
                 }
             }
@@ -798,15 +887,15 @@ fn validate_workspace_links(links: &[WorkspaceLink]) -> Result<Vec<String>, Doma
     Ok(paths)
 }
 
-fn canonical_workspace_link_path(path: &str) -> Result<String, DomainError> {
+fn canonical_workspace_attachment_path(path: &str) -> Result<String, DomainError> {
     if path.is_empty() || !path.starts_with('/') {
         return Err(DomainError::InvariantViolation(format!(
-            "workspace link path {path:?} must be absolute"
+            "workspace attachment path {path:?} must be absolute"
         )));
     }
     if path.len() > 1 && path.ends_with('/') {
         return Err(DomainError::InvariantViolation(format!(
-            "workspace link path {path:?} must be canonical"
+            "workspace attachment path {path:?} must be canonical"
         )));
     }
     if path
@@ -815,7 +904,7 @@ fn canonical_workspace_link_path(path: &str) -> Result<String, DomainError> {
         .any(|part| part.is_empty() || part == "." || part == ".." || part.contains('\0'))
     {
         return Err(DomainError::InvariantViolation(format!(
-            "workspace link path {path:?} must be canonical"
+            "workspace attachment path {path:?} must be canonical"
         )));
     }
     Ok(path.to_owned())
@@ -835,7 +924,7 @@ fn validate_feature_version(feature: &str, version: u32) -> Result<(), DomainErr
 fn validate_source_roots(
     feature: &str,
     roots: Option<&[String]>,
-    link_paths: &[String],
+    attachment_paths: &[String],
 ) -> Result<(), DomainError> {
     let Some(roots) = roots else {
         return Ok(());
@@ -848,17 +937,19 @@ fn validate_source_roots(
     }
     let mut seen = std::collections::BTreeSet::new();
     for root in roots {
-        let root = canonical_workspace_link_path(root)?;
+        let root = canonical_workspace_attachment_path(root)?;
         if !seen.insert(root.clone()) {
             return Err(DomainError::InvariantViolation(format!(
                 "{feature} root {root:?} is declared more than once"
             )));
         }
-        if !link_paths.iter().any(|link_path| {
-            root == *link_path || link_path == "/" || root.starts_with(&format!("{link_path}/"))
+        if !attachment_paths.iter().any(|attachment_path| {
+            root == *attachment_path
+                || attachment_path == "/"
+                || root.starts_with(&format!("{attachment_path}/"))
         }) {
             return Err(DomainError::InvariantViolation(format!(
-                "{feature} root {root:?} is not under a workspace link"
+                "{feature} root {root:?} is not under a workspace attachment"
             )));
         }
     }
@@ -917,23 +1008,41 @@ fn validate_web_feature(web: &WebFeature, api_kind: &ProviderApiKind) -> Result<
 }
 
 fn validate_mcp_feature(mcp: &McpFeature) -> Result<(), DomainError> {
-    if mcp.servers.is_empty() {
-        return Err(DomainError::InvariantViolation(
-            "mcp feature links zero servers; omit the feature instead".to_owned(),
-        ));
-    }
     let mut seen = std::collections::BTreeSet::new();
-    for link in &mcp.servers {
-        if link.server_id.trim().is_empty() {
+    for attachment in &mcp.servers {
+        if attachment.server_id.trim().is_empty() {
             return Err(DomainError::InvariantViolation(
-                "mcp server link requires a non-empty server_id".to_owned(),
+                "mcp server attachment requires a non-empty server_id".to_owned(),
             ));
         }
-        if !seen.insert(link.server_id.as_str()) {
+        if !seen.insert(attachment.server_id.as_str()) {
             return Err(DomainError::InvariantViolation(format!(
-                "mcp server {} is linked more than once",
-                link.server_id
+                "mcp server {} is attached more than once",
+                attachment.server_id
             )));
+        }
+        if let Some(tools) = &attachment.tools {
+            if tools.is_empty() {
+                return Err(DomainError::InvariantViolation(format!(
+                    "mcp server {} tools subset must be non-empty; omit it to expose the record's allowlist",
+                    attachment.server_id
+                )));
+            }
+            let mut names = std::collections::BTreeSet::new();
+            for tool in tools {
+                if tool.trim().is_empty() {
+                    return Err(DomainError::InvariantViolation(format!(
+                        "mcp server {} tools subset contains an empty tool name",
+                        attachment.server_id
+                    )));
+                }
+                if !names.insert(tool.as_str()) {
+                    return Err(DomainError::InvariantViolation(format!(
+                        "mcp server {} tools subset lists {tool} twice",
+                        attachment.server_id
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -1291,11 +1400,16 @@ mod tests {
     fn domain_working_directories_and_source_overrides_validate_independently() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.environments = Some(EnvironmentsFeature {
-            working_directory: Some("/project".into()),
             prompts: Some(Default::default()),
             skills: Some(EnvironmentSkillsConfig {
                 roots: Some(vec!["./custom".into()]),
             }),
+            environments: vec![EnvironmentAttachment {
+                environment_id: "env_a".into(),
+                default: true,
+                access: EnvironmentAccess::Exec,
+                working_directory: Some("/project".into()),
+            }],
             ..Default::default()
         });
         config.features.vfs = Some(VfsFeature {
@@ -1303,30 +1417,21 @@ mod tests {
             ..Default::default()
         });
         config.validate().unwrap();
-        config
-            .features
-            .environments
-            .as_mut()
-            .unwrap()
-            .working_directory = Some("relative".into());
+        config.features.environments.as_mut().unwrap().environments[0].working_directory =
+            Some("relative".into());
         assert!(config.validate().is_err());
-        config
-            .features
-            .environments
-            .as_mut()
-            .unwrap()
-            .working_directory = None;
+        config.features.environments.as_mut().unwrap().environments[0].working_directory = None;
         config.features.environments.as_mut().unwrap().prompts = Some(EnvironmentPromptsConfig {
             roots: Some(vec![]),
         });
         assert!(config.validate().is_err());
         config.features.environments.as_mut().unwrap().prompts = None;
-        config.features.vfs.as_mut().unwrap().working_directory = Some("/unlinked".into());
+        config.features.vfs.as_mut().unwrap().working_directory = Some("/unattached".into());
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn empty_vfs_source_blocks_enable_defaults_without_links() {
+    fn empty_vfs_source_blocks_enable_defaults_without_attachments() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.vfs = Some(VfsFeature {
             skills: Some(VfsSkillsConfig::default()),
@@ -1361,20 +1466,19 @@ mod tests {
     }
 
     #[test]
-    fn vfs_skills_require_linked_roots_and_are_independent_of_environment_skills() {
+    fn vfs_skills_require_attached_roots_and_are_independent_of_environment_skills() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.environments = Some(EnvironmentsFeature {
             skills: Some(EnvironmentSkillsConfig::default()),
             ..Default::default()
         });
         config.features.vfs = Some(VfsFeature {
-            tools: Some(VfsToolSurface::ReadOnly),
-            workspace_links: vec![WorkspaceLink {
+            workspaces: vec![WorkspaceAttachment {
                 path: "/workspace".into(),
-                target: WorkspaceLinkTarget::Workspace {
+                target: WorkspaceAttachmentTarget::Workspace {
                     workspace_id: "project".into(),
                 },
-                access: WorkspaceLinkAccess::ReadOnly,
+                access: WorkspaceAccess::Read,
             }],
             ..Default::default()
         });
@@ -1408,31 +1512,33 @@ mod tests {
     }
 
     #[test]
-    fn workspace_links_validate_topology_access_and_explicit_roots() {
-        let workspace = WorkspaceLink {
+    fn workspace_attachments_validate_topology_access_and_explicit_roots() {
+        let workspace = WorkspaceAttachment {
             path: "/workspace".to_owned(),
-            target: WorkspaceLinkTarget::Workspace {
+            target: WorkspaceAttachmentTarget::Workspace {
                 workspace_id: "workspace_1".to_owned(),
             },
-            access: WorkspaceLinkAccess::ReadWrite,
+            access: WorkspaceAccess::Edit,
         };
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.vfs = Some(VfsFeature {
-            workspace_links: vec![workspace.clone()],
+            workspaces: vec![workspace.clone()],
             prompts: Some(VfsPromptsConfig {
                 roots: Some(vec!["/workspace/.agents/prompts".to_owned()]),
             }),
             ..VfsFeature::default()
         });
-        config.validate().expect("valid workspace link topology");
+        config
+            .validate()
+            .expect("valid workspace attachment topology");
 
         config
             .features
             .vfs
             .as_mut()
             .unwrap()
-            .workspace_links
-            .push(WorkspaceLink {
+            .workspaces
+            .push(WorkspaceAttachment {
                 path: "/workspace/nested".to_owned(),
                 ..workspace.clone()
             });
@@ -1441,19 +1547,19 @@ mod tests {
             Err(DomainError::InvariantViolation(_))
         ));
 
-        config.features.vfs.as_mut().unwrap().workspace_links = vec![WorkspaceLink {
+        config.features.vfs.as_mut().unwrap().workspaces = vec![WorkspaceAttachment {
             path: "/skills".to_owned(),
-            target: WorkspaceLinkTarget::Snapshot {
+            target: WorkspaceAttachmentTarget::Snapshot {
                 snapshot_ref: format!("sha256:{}", "a".repeat(64)),
             },
-            access: WorkspaceLinkAccess::ReadWrite,
+            access: WorkspaceAccess::Edit,
         }];
         assert!(matches!(
             config.validate(),
             Err(DomainError::InvariantViolation(_))
         ));
 
-        config.features.vfs.as_mut().unwrap().workspace_links = vec![workspace];
+        config.features.vfs.as_mut().unwrap().workspaces = vec![workspace];
         config.features.vfs.as_mut().unwrap().prompts = Some(VfsPromptsConfig {
             roots: Some(vec!["/outside/prompts".to_owned()]),
         });
@@ -1476,26 +1582,213 @@ mod tests {
     }
 
     #[test]
-    fn mcp_feature_requires_unique_nonempty_servers() {
+    fn mcp_feature_requires_unique_nonempty_server_ids() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.mcp = Some(McpFeature::default());
-        let error = config
+        config
             .validate()
-            .expect_err("zero linked servers must fail");
-        assert!(matches!(error, DomainError::InvariantViolation(_)));
+            .expect("an empty attachment list is valid");
 
-        let link = McpServerLink {
+        let attachment = McpServerAttachment {
             server_id: "linear".to_owned(),
+            tools: None,
         };
-        let mut duplicated = config;
+        let mut duplicated = config.clone();
         duplicated.features.mcp = Some(McpFeature {
-            servers: vec![link.clone(), link],
+            servers: vec![attachment.clone(), attachment.clone()],
             ..McpFeature::default()
         });
         let error = duplicated
             .validate()
-            .expect_err("duplicate server links must fail");
+            .expect_err("duplicate server attachments must fail");
         assert!(matches!(error, DomainError::InvariantViolation(_)));
+
+        let mut blank = config.clone();
+        blank
+            .features
+            .mcp
+            .as_mut()
+            .unwrap()
+            .servers
+            .push(McpServerAttachment {
+                server_id: " ".to_owned(),
+                tools: None,
+            });
+        assert!(matches!(
+            blank.validate(),
+            Err(DomainError::InvariantViolation(_))
+        ));
+
+        for tools in [vec![], vec![""], vec!["search", "search"]] {
+            let mut narrowed = config.clone();
+            narrowed.features.mcp = Some(McpFeature {
+                servers: vec![McpServerAttachment {
+                    tools: Some(tools.into_iter().map(String::from).collect()),
+                    ..attachment.clone()
+                }],
+                ..McpFeature::default()
+            });
+            assert!(matches!(
+                narrowed.validate(),
+                Err(DomainError::InvariantViolation(_))
+            ));
+        }
+        let mut narrowed = config;
+        narrowed.features.mcp = Some(McpFeature {
+            servers: vec![McpServerAttachment {
+                tools: Some(vec!["search".to_owned()]),
+                ..attachment
+            }],
+            ..McpFeature::default()
+        });
+        narrowed
+            .validate()
+            .expect("a non-empty unique subset is valid");
+    }
+
+    #[test]
+    fn mcp_empty_attachments_survive_lifecycle_replay() {
+        use crate::core::components::lifecycle::{Event, apply_event};
+
+        let mut empty = config(ProviderApiKind::OpenAiResponses, None);
+        empty.features.mcp = Some(McpFeature::default());
+        let mut attached = empty.clone();
+        attached
+            .features
+            .mcp
+            .as_mut()
+            .unwrap()
+            .servers
+            .push(McpServerAttachment {
+                server_id: "catalog".to_owned(),
+                tools: None,
+            });
+        let events = [
+            Event::Opened {
+                config: empty.clone(),
+            },
+            Event::ConfigChanged {
+                config: attached,
+                revision: 1,
+            },
+            Event::ConfigChanged {
+                config: empty.clone(),
+                revision: 2,
+            },
+        ];
+        let mut original = CoreAgentState::new();
+        let mut replayed = CoreAgentState::new();
+        for event in events {
+            apply_event(&mut original, &event).expect("apply lifecycle event");
+            let bytes = serde_json::to_vec(&event).expect("encode event");
+            let decoded: Event = serde_json::from_slice(&bytes).expect("decode event");
+            apply_event(&mut replayed, &decoded).expect("replay lifecycle event");
+        }
+        assert_eq!(original, replayed);
+        assert_eq!(replayed.lifecycle.config, Some(empty.clone()));
+        assert_eq!(replayed.lifecycle.config_revision, 2);
+        assert_eq!(
+            serde_json::to_value(empty).unwrap()["features"]["mcp"]["servers"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn environment_attachments_validate_identity_default_and_working_directory() {
+        fn attachment(id: &str) -> EnvironmentAttachment {
+            EnvironmentAttachment {
+                environment_id: id.to_owned(),
+                default: false,
+                access: EnvironmentAccess::Read,
+                working_directory: None,
+            }
+        }
+        let mut config = config(ProviderApiKind::OpenAiResponses, None);
+        config.features.environments = Some(EnvironmentsFeature {
+            environments: vec![
+                EnvironmentAttachment {
+                    default: true,
+                    access: EnvironmentAccess::Jobs,
+                    working_directory: Some("/srv/app".to_owned()),
+                    ..attachment("env_a")
+                },
+                attachment("env_b"),
+            ],
+            ..EnvironmentsFeature::default()
+        });
+        config.validate().expect("two attachments with one default");
+        let feature = config.features.environments.as_ref().unwrap();
+        assert_eq!(
+            feature
+                .default_attachment()
+                .map(|a| a.environment_id.as_str()),
+            Some("env_a")
+        );
+        assert_eq!(feature.tool_access(), Some(EnvironmentAccess::Jobs));
+        assert!(feature.is_attached("env_b"));
+        assert!(!feature.is_attached("env_c"));
+
+        let invalid = [
+            vec![attachment("env_a"), attachment("env_a")],
+            vec![
+                EnvironmentAttachment {
+                    default: true,
+                    ..attachment("env_a")
+                },
+                EnvironmentAttachment {
+                    default: true,
+                    ..attachment("env_b")
+                },
+            ],
+            vec![attachment(" ")],
+            vec![attachment("env/bad")],
+            vec![attachment("env bad")],
+            vec![attachment("-invalid-start")],
+            vec![attachment(&"a".repeat(129))],
+            vec![EnvironmentAttachment {
+                working_directory: Some("relative".to_owned()),
+                ..attachment("env_a")
+            }],
+        ];
+        for environments in invalid {
+            config.features.environments = Some(EnvironmentsFeature {
+                environments,
+                ..EnvironmentsFeature::default()
+            });
+            assert!(matches!(
+                config.validate(),
+                Err(DomainError::InvariantViolation(_))
+            ));
+        }
+
+        config.features.environments = Some(EnvironmentsFeature::default());
+        config
+            .validate()
+            .expect("an environments grant without attachments is valid");
+        assert_eq!(
+            config.features.environments.as_ref().unwrap().tool_access(),
+            None
+        );
+    }
+
+    #[test]
+    fn access_ladders_are_ordered_and_implied() {
+        assert!(WorkspaceAccess::Edit > WorkspaceAccess::Read);
+        assert!(WorkspaceAccess::Edit.allows_edit());
+        assert!(!WorkspaceAccess::Read.allows_edit());
+        assert!(EnvironmentAccess::Jobs > EnvironmentAccess::Exec);
+        assert!(EnvironmentAccess::Exec > EnvironmentAccess::Edit);
+        assert!(EnvironmentAccess::Edit > EnvironmentAccess::Read);
+        assert!(EnvironmentAccess::Exec.allows_edit());
+        assert!(EnvironmentAccess::Exec.allows_exec());
+        assert!(!EnvironmentAccess::Exec.allows_jobs());
+        assert!(EnvironmentAccess::Jobs.allows_jobs());
+        assert!(!EnvironmentAccess::Read.allows_edit());
+        assert_eq!(EnvironmentAccess::Exec.describe(), "read, edit, exec");
+        assert_eq!(
+            serde_json::to_value(EnvironmentAccess::Jobs).unwrap(),
+            serde_json::json!("jobs")
+        );
     }
 
     #[test]
@@ -1513,7 +1806,8 @@ mod tests {
         let feature: VfsFeature = serde_json::from_value(serde_json::json!({}))
             .expect("empty vfs grant decodes with defaults");
         assert_eq!(feature.version, CURRENT_FEATURE_VERSION);
-        assert_eq!(feature.tools, None);
+        assert!(feature.workspaces.is_empty());
+        assert_eq!(feature.tool_access(), None);
 
         let value = serde_json::to_value(&feature).expect("serialize");
         assert_eq!(
@@ -1523,29 +1817,47 @@ mod tests {
     }
 
     #[test]
-    fn environment_tool_subgrants_are_default_off() {
+    fn environment_grant_is_default_off_with_no_attachments() {
         let feature: EnvironmentsFeature = serde_json::from_value(serde_json::json!({}))
             .expect("empty environment grant decodes with defaults");
 
-        assert!(!feature.selection_tools);
-        assert!(!feature.jobs);
+        assert!(!feature.selection);
+        assert!(feature.environments.is_empty());
         assert_eq!(
             serde_json::to_value(feature).expect("serialize"),
             serde_json::json!({
                 "version": CURRENT_FEATURE_VERSION,
-                "selection_tools": false,
-                "commands": false,
-                "jobs": false,
+                "selection": false,
             })
         );
     }
 
     #[test]
-    fn vfs_tool_surface_grant_decodes() {
-        let feature: VfsFeature = serde_json::from_value(serde_json::json!({ "tools": "edit" }))
-            .expect("vfs tool surface grant decodes");
-
-        assert_eq!(feature.tools, Some(VfsToolSurface::Edit));
+    fn vfs_tool_access_is_the_widest_attachment_grant() {
+        let read = WorkspaceAttachment {
+            path: "/ref".to_owned(),
+            target: WorkspaceAttachmentTarget::Workspace {
+                workspace_id: "ref".to_owned(),
+            },
+            access: WorkspaceAccess::Read,
+        };
+        let edit = WorkspaceAttachment {
+            path: "/workspace".to_owned(),
+            target: WorkspaceAttachmentTarget::Workspace {
+                workspace_id: "app".to_owned(),
+            },
+            access: WorkspaceAccess::Edit,
+        };
+        let feature = VfsFeature {
+            workspaces: vec![read.clone()],
+            ..VfsFeature::default()
+        };
+        assert_eq!(feature.tool_access(), Some(WorkspaceAccess::Read));
+        let feature = VfsFeature {
+            workspaces: vec![read, edit],
+            ..VfsFeature::default()
+        };
+        assert_eq!(feature.tool_access(), Some(WorkspaceAccess::Edit));
     }
 
     #[test]
@@ -1553,7 +1865,6 @@ mod tests {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.generation.reasoning_effort = Some("high".to_owned());
         config.features.vfs = Some(VfsFeature {
-            tools: Some(VfsToolSurface::Edit),
             prompts: Some(VfsPromptsConfig::default()),
             ..VfsFeature::default()
         });

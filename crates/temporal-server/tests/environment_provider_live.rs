@@ -466,9 +466,8 @@ async fn run_environment_power_live_client(
         .any(|environment| environment.environment_id == environment_id)
     );
 
-    // Wake-on-use: activating the paused environment for a session admits it
-    // as intent and flips desired power back to running; the reconciler then
-    // brings it to ready.
+    // Selection only records the environment. A paused machine stays paused
+    // until an operation actually needs to use it.
     api.start_session(SessionStartParams {
         metadata: Default::default(),
         session_id: Some(session_id.as_str().to_owned()),
@@ -477,23 +476,23 @@ async fn run_environment_power_live_client(
             model: Some(model_to_api(&model)),
             features: Some(api::FeaturesConfig {
                 environments: Some(api::EnvironmentsFeature {
-                    tools: Some(api::EnvironmentToolSurface::Edit),
-                    commands: true,
-                    working_directory: None,
-                    prompts: None,
                     version: api::CURRENT_FEATURE_VERSION,
-                    providers: None,
-                    registration_keys: None,
-                    selection_tools: false,
-                    jobs: false,
+                    selection: false,
+                    prompts: None,
                     skills: None,
+                    environments: vec![api::EnvironmentAttachment {
+                        environment_id: Some(environment_id.clone()),
+                        inherit: false,
+                        default: false,
+                        access: api::EnvironmentAccess::Exec,
+                        working_directory: None,
+                    }],
                 }),
                 ..api::FeaturesConfig::default()
             }),
             ..SessionConfig::default()
         }),
         profile: None,
-        environment: None,
         delete_after_close_ms: None,
     })
     .await?;
@@ -509,20 +508,18 @@ async fn run_environment_power_live_client(
         activated_view.active_environment_id.as_deref(),
         Some(environment_id.as_str())
     );
-    let woken = api
+    let selected = api
         .read_environment(api::EnvironmentReadParams {
             environment_id: environment_id.clone(),
         })
         .await?
         .result
         .environment;
-    assert_eq!(woken.desired_power, api::EnvironmentPowerStateView::Running);
-    wait_for_environment_status(
-        &api,
-        &environment_id,
-        api::EnvironmentLifecycleStatusView::Ready,
-    )
-    .await?;
+    assert_eq!(
+        selected.desired_power,
+        api::EnvironmentPowerStateView::Paused
+    );
+    assert_eq!(selected.status, api::EnvironmentLifecycleStatusView::Paused);
 
     // Suspend and stop are ordinary intents on a provider that supports them.
     api.put_environment_power(api::EnvironmentPowerPutParams {

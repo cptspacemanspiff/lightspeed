@@ -4,15 +4,11 @@
 //! environments are universe-scoped, and provider target facts live on an
 //! environment incarnation rather than on stable environment identity.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use async_trait::async_trait;
 use auth::{AuthGrantId, AuthProviderId, SecretId, SecretValue};
-pub use engine::{EnvironmentId, SessionId};
+pub use engine::EnvironmentId;
 use engine::{StringIdError, validate_general_string_id};
 pub use environment_protocol::control::targets::PowerState;
 use environment_protocol::{
@@ -106,31 +102,7 @@ registry_string_id!(EnvironmentJobGroupId);
 registry_string_id!(EnvironmentRegistrationKeyId);
 registry_string_id!(EnvironmentDaemonId);
 
-/// Prefix of the request id a profile-provisioned environment derives from
-/// its originating session, so retries and repeated applies converge on the
-/// same environment through the `(universe, request_id)` unique key.
-pub const SESSION_PROVISION_REQUEST_PREFIX: &str = "session:";
-
 impl EnvironmentProvisionRequestId {
-    /// The deterministic provision request id for the one environment a
-    /// profile may provision for `session_id`. Uses the session id verbatim
-    /// when it fits the request-id length limit and a SHA-256 digest
-    /// otherwise.
-    pub fn for_session(session_id: &SessionId) -> Self {
-        let plain = format!("{SESSION_PROVISION_REQUEST_PREFIX}{}", session_id.as_str());
-        if let Ok(id) = Self::try_new(plain) {
-            return id;
-        }
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(session_id.as_str().as_bytes());
-        let mut hex = String::with_capacity(64);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        Self::new(format!("{SESSION_PROVISION_REQUEST_PREFIX}sha256-{hex}"))
-    }
-
     /// The deterministic request id of the one environment a daemon identity
     /// may register, so a retried first registration converges on the same
     /// environment through the `(universe, request_id)` unique key.
@@ -576,9 +548,6 @@ pub struct EnvironmentRecord {
     pub incarnation: EnvironmentIncarnationRecord,
     pub public_ingress_enabled: bool,
     pub public_endpoint: Option<String>,
-    /// Provenance recorded when a profile provisioned this environment for a
-    /// session. Not ownership: the environment stays a universe resource.
-    pub origin_session: Option<EnvironmentOriginSession>,
     pub metadata: BTreeMap<String, String>,
     /// Registered environments only: when the gateway last saw the daemon's
     /// control connection (connect, heartbeat). A stale stamp under `Ready`
@@ -643,9 +612,6 @@ impl EnvironmentRecord {
             self.incarnation.updated_at_ms,
         )?;
         validate_nonempty_optional("public_endpoint", self.public_endpoint.as_deref())?;
-        if let Some(origin) = &self.origin_session {
-            origin.validate()?;
-        }
         if let Some(policy) = &self.idle_policy {
             policy.validate()?;
         }
@@ -738,91 +704,6 @@ impl EnvironmentRecord {
             return invalid(format!("{kind} environments have no power control"));
         }
         Ok(())
-    }
-}
-
-/// Which environments a session may list, read, and activate, lowered from
-/// the session's environments grant. Each list is independent: an absent
-/// list allows every environment of that source kind. Provider-less
-/// environments that are also key-less (external) pass only when nothing is
-/// restricted at all.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EnvironmentAccessPolicy {
-    pub providers: Option<BTreeSet<String>>,
-    pub registration_keys: Option<BTreeSet<String>>,
-}
-
-impl EnvironmentAccessPolicy {
-    pub const ALLOW_ALL: Self = Self {
-        providers: None,
-        registration_keys: None,
-    };
-
-    pub fn new(
-        providers: Option<impl IntoIterator<Item = String>>,
-        registration_keys: Option<impl IntoIterator<Item = String>>,
-    ) -> Self {
-        Self {
-            providers: providers.map(|ids| ids.into_iter().collect()),
-            registration_keys: registration_keys.map(|ids| ids.into_iter().collect()),
-        }
-    }
-
-    pub fn is_unrestricted(&self) -> bool {
-        self.providers.is_none() && self.registration_keys.is_none()
-    }
-
-    pub fn allows(&self, environment: &EnvironmentRecord) -> bool {
-        match &environment.source {
-            EnvironmentSource::Provisioned { provider_id, .. } => self
-                .providers
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(provider_id.as_str())),
-            EnvironmentSource::Registered {
-                registration_key_id,
-                ..
-            } => self
-                .registration_keys
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(registration_key_id.as_str())),
-            EnvironmentSource::External { .. } => self.is_unrestricted(),
-        }
-    }
-
-    /// Why `allows` refused, for typed rejections.
-    pub fn refusal(&self, environment: &EnvironmentRecord) -> String {
-        match &environment.source {
-            EnvironmentSource::Provisioned { provider_id, .. } => format!(
-                "environment provider {provider_id} is not allowed by features.environments.providers"
-            ),
-            EnvironmentSource::Registered {
-                registration_key_id,
-                ..
-            } => format!(
-                "registration key {registration_key_id} is not allowed by features.environments.registrationKeys"
-            ),
-            EnvironmentSource::External { .. } => {
-                "external environments are not allowed by a restricted environments grant"
-                    .to_owned()
-            }
-        }
-    }
-}
-
-/// Session provenance of a profile-provisioned environment plus its optional
-/// close trigger.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnvironmentOriginSession {
-    pub session_id: SessionId,
-    pub profile_id: Option<String>,
-    /// When true, the lifecycle reconciler closes the environment once the
-    /// originating session is closed.
-    pub close_with_session: bool,
-}
-
-impl EnvironmentOriginSession {
-    pub fn validate(&self) -> Result<(), EnvironmentRegistryError> {
-        validate_nonempty_optional("origin profile id", self.profile_id.as_deref())
     }
 }
 
@@ -1139,7 +1020,6 @@ pub struct CreateEnvironment {
     pub template_id: EnvironmentTemplateId,
     pub display_name: Option<String>,
     pub metadata: BTreeMap<String, String>,
-    pub origin_session: Option<EnvironmentOriginSession>,
     pub idle_policy: Option<EnvironmentIdlePolicy>,
     pub created_at_ms: i64,
 }
@@ -1172,7 +1052,6 @@ pub struct ListEnvironments {
     pub provider_id: Option<EnvironmentProviderId>,
     pub binding_id: Option<EnvironmentProviderBindingId>,
     pub status: Option<EnvironmentStatus>,
-    pub origin_session_id: Option<SessionId>,
     /// Only environments admitted by this registration key.
     pub registration_key_id: Option<EnvironmentRegistrationKeyId>,
     /// Only environments carrying every listed metadata pair (containment).
@@ -1372,11 +1251,6 @@ pub trait EnvironmentStore: Send + Sync {
         request: ListEnvironments,
     ) -> Result<Vec<EnvironmentRecord>, EnvironmentRegistryError>;
     async fn list_environments_needing_reconcile(
-        &self,
-    ) -> Result<Vec<EnvironmentRecord>, EnvironmentRegistryError>;
-    /// Open (not closing/closed) environments whose origin session asked for
-    /// close-with-session. The caller decides whether the session is closed.
-    async fn list_environments_closing_with_session(
         &self,
     ) -> Result<Vec<EnvironmentRecord>, EnvironmentRegistryError>;
     async fn observe_provisioned_environment(

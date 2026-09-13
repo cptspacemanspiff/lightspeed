@@ -1,10 +1,11 @@
+import { defaultEnvironmentAttachment, environmentAttachments, isEnvironmentAttached } from "@/lib/sessions/resource-features";
 /// Session routes over the engine simulation: the sessions browser, the
 /// transcript's long-poll tail, run control, and the settings sheet. Shapes
 /// and status codes follow the platform server's gateway so the UI cannot
 /// tell the difference.
 import { Hono, type Context } from "hono";
 import type { Environment, ProfileSessionRetention, ProfileSource, SessionView } from "@/api";
-import type { ProfileEnvironment, ProfileInstructions } from "@lightspeed-ai/agent-client";
+import type { ProfileInstructions } from "@lightspeed-ai/agent-client";
 import {
   DEFAULT_MODEL,
   PROFILE_INSTRUCTIONS_KEY,
@@ -21,7 +22,6 @@ import {
 } from "../engine";
 import { sessionSummary, type DemoStore, type SessionRecord, type UniverseState } from "../store";
 import { badRequest, conflict, intQuery, notFound, readBody, universeFor } from "./common";
-import { closeEnvironment, provisionEnvironment } from "./environments";
 
 /// What a session start consumes from a profile, whichever source it came
 /// from. `profileId` is null for inline profiles.
@@ -31,7 +31,6 @@ interface ResolvedProfile {
   retention: ProfileSessionRetention | null;
   config: Record<string, unknown>;
   instructions: ProfileInstructions | null;
-  environment: ProfileEnvironment | null;
 }
 
 /// `?metadata=key` or `?metadata=key=value`, repeatable. Empty values request
@@ -86,9 +85,8 @@ export function sessionRoutes(store: DemoStore): Hono {
     });
   });
 
-  /// The environment intent is resolved before the session exists so a
-  /// refused profile leaves nothing behind; the id is minted early because
-  /// a provisioned environment is keyed by it.
+  /// Resolve the default attachment before creating the session so a refused
+  /// profile leaves no session behind.
   app.post("/:id/sessions", async (c) => {
     const universe = universeFor(store, c);
     if (!universe) return notFound(c);
@@ -97,17 +95,14 @@ export function sessionRoutes(store: DemoStore): Hono {
       metadata?: Record<string, string>;
       deleteAfterCloseMs?: number | null;
       profile?: ProfileSource;
-      environment?: { type: "none" } | { type: "existing"; environmentId: string };
     }>(c);
+    if (Object.hasOwn(body, "environment")) return badRequest(c, "environment is not a session creation field; configure environment attachments instead");
     if (!body.profile) return badRequest(c, "profile is required");
     const profile = resolveProfile(universe, body.profile);
     if (!profile) return notFound(c, "not found in engine");
-    if (body.environment) {
-      profile.environment = body.environment.type === "none" ? null : body.environment;
-    }
     const config = sessionConfig(profile.config);
     const sessionId = store.nextId("session");
-    const resolved = resolveEnvironment(store, universe, profile, sessionId, config);
+    const resolved = resolveEnvironment(universe, profile);
     if ("error" in resolved) return conflict(c, `engine conflict: ${resolved.error}`);
     const session = newSession(store, universe, {
       id: sessionId,
@@ -171,17 +166,15 @@ export function sessionRoutes(store: DemoStore): Hono {
   });
 
   /// Closing keeps history; `force` cancels active and queued work first.
-  /// Environments a profile provisioned for this session go with it.
+  /// Environment lifecycles are independent.
   app.post("/:id/sessions/:sessionId/close", async (c) => {
     const found = lookup(c);
     if (!found) return notFound(c, "not found in engine");
-    const { universe, session } = found;
+    const { session } = found;
     const body = await readBody<{ force?: boolean }>(c);
-    const wasClosed = session.view.status === "closed";
     if (!closeSession(session, body.force === true)) {
       return conflict(c, "engine conflict: session has active work; close with force to cancel it");
     }
-    if (!wasClosed) closeOriginEnvironments(universe, session.view.id);
     return c.json(session.view);
   });
 
@@ -266,6 +259,7 @@ export function sessionRoutes(store: DemoStore): Hono {
     }
     const config = sessionConfig(body.config);
     session.view.config = config;
+    if (session.view.activeEnvironmentId && !isEnvironmentAttached(config, session.view.activeEnvironmentId)) session.view.activeEnvironmentId = null;
     session.view.configRevision += 1;
     pushEvent(session, {
       type: "sessionConfigChanged",
@@ -327,6 +321,7 @@ export function sessionRoutes(store: DemoStore): Hono {
         `engine conflict: environment is ${environment.status}: ${environment.environmentId}`,
       );
     }
+    if (!isEnvironmentAttached(session.view.config, environment.environmentId)) return conflict(c, "engine conflict: environment is not attached to the session");
     session.view.activeEnvironmentId = environment.environmentId;
     session.view.updatedAtMs = Date.now();
     return c.json(session.view);
@@ -451,7 +446,6 @@ function resolveProfile(universe: UniverseState, source: ProfileSource): Resolve
       retention: profile.retention ?? null,
       config: isRecord(profile.config) ? profile.config : {},
       instructions: profile.instructions ?? null,
-      environment: profile.environment ?? null,
     };
   }
   const document = universe.profiles.get(source.profileId);
@@ -463,7 +457,6 @@ function resolveProfile(universe: UniverseState, source: ProfileSource): Resolve
     retention: document.retention ?? null,
     config: isRecord(document.config) ? document.config : {},
     instructions: isRecord(instructions) ? (instructions as unknown as ProfileInstructions) : null,
-    environment: document.environment ?? null,
   };
 }
 
@@ -479,76 +472,19 @@ function instructionText(store: DemoStore, instructions: ProfileInstructions | n
   return instructions.type === "text" ? instructions.text : store.readText(instructions.blobRef);
 }
 
-/// `existing` activates a universe environment; `provision` creates one
-/// keyed by the session id so a retried start finds it again. Provisioning
-/// needs the feature grant and an enabled binding for the provider, as the
-/// engine checks before it touches a provider.
+/// Profiles select resources whose lifecycle is managed independently.
 function resolveEnvironment(
-  store: DemoStore,
   universe: UniverseState,
   profile: ResolvedProfile,
-  sessionId: string,
-  config: Record<string, unknown>,
 ): { environmentId: string | null } | { error: string } {
-  const intent = profile.environment;
-  if (!intent || intent.type === "inherit") return { environmentId: null };
-  if (intent.type === "existing") {
-    const environment = universe.environments.get(intent.environmentId);
-    if (!environment) return { error: `environment not found: ${intent.environmentId}` };
-    if (!usable(environment)) {
-      return { error: `environment is ${environment.status}: ${intent.environmentId}` };
-    }
-    return { environmentId: intent.environmentId };
-  }
-  if (!grantsEnvironments(config)) {
-    return {
-      error:
-        "profile provisions an environment but the effective session config does not grant features.environments",
-    };
-  }
-  const binding = universe.providerBindings.find(
-    (candidate) => candidate.providerId === intent.providerId,
-  );
-  if (!binding) {
-    return {
-      error: `profile provisions from environment provider ${intent.providerId}, but this universe has no binding for it`,
-    };
-  }
-  if (binding.status !== "enabled") {
-    return {
-      error: `profile provisions from environment provider ${intent.providerId}, but binding ${binding.bindingId} is disabled`,
-    };
-  }
-  const result = provisionEnvironment(store, universe, {
-    requestId: `session:${sessionId}`,
-    bindingId: binding.bindingId,
-    templateId: intent.templateId,
-    displayName:
-      intent.displayName ??
-      (profile.profileId ? `${profile.profileId} · ${sessionId}` : `session ${sessionId}`),
-    idlePolicy: intent.idlePolicy ?? null,
-    metadata: intent.metadata ?? {},
-    originSession: {
-      sessionId,
-      ...(profile.profileId ? { profileId: profile.profileId } : {}),
-      closeWithSession: (intent.retention ?? "closeWithSession") === "closeWithSession",
-    },
-  });
-  if ("error" in result) return { error: result.error };
-  return { environmentId: result.environment.environmentId };
-}
-
-/// The reconciler's sweep, done eagerly: environments a profile provisioned
-/// for this session with `closeWithSession` close when it does.
-function closeOriginEnvironments(universe: UniverseState, sessionId: string): void {
-  for (const environment of universe.environments.values()) {
-    if (
-      environment.originSession?.sessionId === sessionId &&
-      environment.originSession.closeWithSession
-    ) {
-      closeEnvironment(universe, environment.environmentId);
-    }
-  }
+  if (environmentAttachments(profile.config).some((attachment) => attachment.inherit)) return { error: "inherited environments require a parent session" };
+  const environmentId = defaultEnvironmentAttachment(profile.config)?.environmentId;
+  if (!environmentId) return { environmentId: null };
+  if (!isEnvironmentAttached(profile.config, environmentId)) return { error: `environment is not attached: ${environmentId}` };
+  const environment = universe.environments.get(environmentId);
+  if (!environment) return { error: `environment not found: ${environmentId}` };
+  if (!usable(environment)) return { error: `environment is ${environment.status}: ${environmentId}` };
+  return { environmentId };
 }
 
 /// Provisioning and booting are valid activation targets; a terminal or

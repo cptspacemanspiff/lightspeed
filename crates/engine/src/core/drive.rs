@@ -884,20 +884,19 @@ pub fn next_tool_batch_request(
             .as_ref()
             .and_then(|config| config.features.vfs.as_ref())
             .and_then(|vfs| vfs.working_directory.clone()),
-        workspace_links: state
+        workspace_attachments: state
             .lifecycle
             .config
             .as_ref()
             .and_then(|config| config.features.vfs.as_ref())
-            .map(|vfs| vfs.workspace_links.clone())
+            .map(|vfs| vfs.workspaces.clone())
             .unwrap_or_default(),
         active_environment_id: state.environment.active_environment_id.clone(),
         environment_policy: state
             .lifecycle
             .config
             .as_ref()
-            .and_then(|config| config.features.environments.as_ref())
-            .map(crate::EnvironmentPolicyRuntime::from_feature),
+            .and_then(|config| config.features.environments.clone()),
         subagents_policy: state
             .lifecycle
             .config
@@ -2194,7 +2193,13 @@ mod tests {
         let mut input = user_input(BlobRef::from_bytes(b"automated steering"));
         input[0].origin = Some("event".into());
         let action = drive
-            .admit_command(CoreAgentCommand::RequestRunSteering { input }, 23)
+            .admit_command(
+                CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
+                    input,
+                },
+                23,
+            )
             .unwrap();
         log.extend(commit_action(&mut drive, action));
         let action = drive.next_action(24, 64).unwrap();
@@ -2528,11 +2533,17 @@ mod tests {
         let session_id = SessionId::new("session-environment-runtime");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let mut session_config = config();
-        session_config.features.environments = Some(crate::EnvironmentsFeature {
-            providers: Some(vec!["provider-a".to_owned(), "provider-b".to_owned()]),
-            selection_tools: true,
+        let environments = crate::EnvironmentsFeature {
+            selection: true,
+            environments: vec![crate::EnvironmentAttachment {
+                environment_id: "environment-a".to_owned(),
+                default: false,
+                access: crate::EnvironmentAccess::Exec,
+                working_directory: Some("/srv".to_owned()),
+            }],
             ..crate::EnvironmentsFeature::default()
-        });
+        };
+        session_config.features.environments = Some(environments.clone());
         session_config.features.subagents = Some(test_subagents_feature());
         open_session_with_config(&mut drive, session_config);
         let set_active = drive
@@ -2553,14 +2564,90 @@ mod tests {
             request.active_environment_id,
             Some(crate::EnvironmentId::new("environment-a"))
         );
-        assert_eq!(
-            request.environment_policy,
-            Some(crate::EnvironmentPolicyRuntime::new(
-                Some(vec!["provider-a".to_owned(), "provider-b".to_owned()]),
-                None,
-            ))
-        );
+        assert_eq!(request.environment_policy, Some(environments));
         assert_eq!(request.subagents_policy, Some(test_subagents_feature()));
+    }
+
+    #[test]
+    fn config_replace_clears_an_active_environment_that_is_no_longer_attached() {
+        let session_id = SessionId::new("session-environment-detach");
+        let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
+        let attachment = |id: &str| crate::EnvironmentAttachment {
+            environment_id: id.to_owned(),
+            default: false,
+            access: crate::EnvironmentAccess::Read,
+            working_directory: None,
+        };
+        let mut session_config = config();
+        session_config.features.environments = Some(crate::EnvironmentsFeature {
+            environments: vec![attachment("environment-a"), attachment("environment-b")],
+            ..crate::EnvironmentsFeature::default()
+        });
+        open_session_with_config(&mut drive, session_config.clone());
+
+        let unlisted = drive.admit_command(
+            CoreAgentCommand::SetActiveEnvironment {
+                environment_id: crate::EnvironmentId::new("environment-c"),
+            },
+            10,
+        );
+        assert!(
+            unlisted.is_err(),
+            "an unattached environment cannot be activated"
+        );
+        let set_active = drive
+            .admit_command(
+                CoreAgentCommand::SetActiveEnvironment {
+                    environment_id: crate::EnvironmentId::new("environment-a"),
+                },
+                11,
+            )
+            .expect("set active environment");
+        commit_action(&mut drive, set_active);
+
+        // Dropping the default only: the live selection is untouched.
+        let mut narrowed = session_config.clone();
+        narrowed
+            .features
+            .environments
+            .as_mut()
+            .unwrap()
+            .environments[1]
+            .default = true;
+        let replace = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceSessionConfig {
+                    expected_revision: None,
+                    config: narrowed.clone(),
+                },
+                12,
+            )
+            .expect("replace config keeping the active attachment");
+        commit_action(&mut drive, replace);
+        assert_eq!(
+            drive.state().environment.active_environment_id,
+            Some(crate::EnvironmentId::new("environment-a"))
+        );
+
+        // Removing the active attachment clears the pointer in the same batch.
+        narrowed
+            .features
+            .environments
+            .as_mut()
+            .unwrap()
+            .environments
+            .remove(0);
+        let replace = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceSessionConfig {
+                    expected_revision: None,
+                    config: narrowed,
+                },
+                13,
+            )
+            .expect("replace config dropping the active attachment");
+        commit_action(&mut drive, replace);
+        assert_eq!(drive.state().environment.active_environment_id, None);
     }
 
     fn test_subagents_feature() -> crate::SubagentsFeature {
@@ -4588,6 +4675,64 @@ mod tests {
     /// context revision and the runtime re-derives it from state); it then
     /// lands before the next turn, in admission order.
     #[test]
+    fn steering_rejects_a_previous_run_target_and_replays_the_matching_target() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("steering-target"),
+            CoreAgentState::new(),
+            None,
+        );
+        open_session(&mut drive);
+        request_run(&mut drive, BlobRef::from_bytes(b"first"));
+        let first = drive_until_generate(&mut drive).run_id;
+        let cancel = drive
+            .admit_command(CoreAgentCommand::ForceCancelRun { run_id: first }, 40)
+            .unwrap();
+        commit_action(&mut drive, cancel);
+        request_run(&mut drive, BlobRef::from_bytes(b"second"));
+        let second = drive_until_generate(&mut drive).run_id;
+        assert_ne!(first, second);
+        let checkpoint = drive.state().clone();
+        let error = drive
+            .admit_command(
+                CoreAgentCommand::RequestRunSteering {
+                    run_id: first,
+                    input: user_input(BlobRef::from_bytes(b"stale")),
+                },
+                50,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, CoreAgentDriveError::Command(CommandError::Rejected(rejection))
+            if rejection.kind == crate::CommandRejectionKind::UnknownReference)
+        );
+        assert_eq!(drive.state(), &checkpoint);
+        let valid = drive
+            .admit_command(
+                CoreAgentCommand::RequestRunSteering {
+                    run_id: second,
+                    input: user_input(BlobRef::from_bytes(b"current")),
+                },
+                51,
+            )
+            .unwrap();
+        let entries = commit_action(&mut drive, valid);
+        let mut replayed = checkpoint;
+        for entry in entries {
+            let stored = CoreAgentCodec.encode_entry(&entry).unwrap();
+            crate::apply_event(
+                &mut replayed,
+                &CoreAgentCodec.decode_entry(&stored).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(&replayed, drive.state());
+        assert_eq!(
+            drive.state().runs.active.as_ref().unwrap().steering.len(),
+            1
+        );
+    }
+
+    #[test]
     fn steering_materializes_after_in_flight_turn_completes() {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
@@ -4600,6 +4745,7 @@ mod tests {
         let steering_one = drive
             .admit_command(
                 CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
                     input: user_input(BlobRef::from_bytes(b"steering one")),
                 },
                 30,
@@ -4609,6 +4755,7 @@ mod tests {
         let steering_two = drive
             .admit_command(
                 CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
                     input: user_input(BlobRef::from_bytes(b"steering two")),
                 },
                 31,
@@ -4688,6 +4835,7 @@ mod tests {
         let steering = drive
             .admit_command(
                 CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
                     input: user_input(BlobRef::from_bytes(b"steer while parked")),
                 },
                 91,
@@ -4746,6 +4894,7 @@ mod tests {
         let error = drive
             .admit_command(
                 CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
                     input: user_input(BlobRef::from_bytes(b"too late")),
                 },
                 31,
@@ -4958,6 +5107,7 @@ mod tests {
         let steering = drive
             .admit_command(
                 CoreAgentCommand::RequestRunSteering {
+                    run_id: crate::RunId::new(1),
                     input: user_input(BlobRef::from_bytes(b"late steering")),
                 },
                 30,
@@ -7720,7 +7870,7 @@ mod tests {
             turn_id: TurnId::new(1),
             batch_id: ToolBatchId::new(1),
             promise_id_base: 1,
-            workspace_links: Vec::new(),
+            workspace_attachments: Vec::new(),
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
@@ -8074,7 +8224,7 @@ mod tests {
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let mut session_config = config();
         session_config.features.environments = Some(crate::EnvironmentsFeature {
-            selection_tools: true,
+            selection: true,
             ..crate::EnvironmentsFeature::default()
         });
         let request = two_call_tool_batch(&mut drive, session_config);

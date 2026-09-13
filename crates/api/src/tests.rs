@@ -4,6 +4,15 @@ use serde_json::{Value, json};
 use super::*;
 
 #[test]
+fn mcp_feature_preserves_an_empty_server_list() {
+    for value in [json!({}), json!({ "servers": [] })] {
+        let feature: McpFeature = serde_json::from_value(value).expect("empty MCP feature");
+        assert!(feature.servers.is_empty());
+        assert_eq!(serde_json::to_value(feature).unwrap()["servers"], json!([]));
+    }
+}
+
+#[test]
 fn session_retention_put_requires_an_explicit_nullable_policy() {
     assert!(
         serde_json::from_value::<SessionRetentionPutParams>(json!({
@@ -409,26 +418,24 @@ fn ordinary_session_start_rejects_managed_creation_fields() {
 }
 
 #[test]
-fn session_start_decodes_creation_environment_overrides() {
-    let existing: SessionStartParams = serde_json::from_value(json!({
-        "profile": {"kind": "named", "profileId": "developer"},
-        "environment": {"type": "existing", "environmentId": "workstation"}
-    }))
-    .expect("existing environment override");
-    assert!(matches!(
-        existing.environment,
-        Some(SessionEnvironmentOverride::Existing { environment_id })
-            if environment_id == "workstation"
-    ));
-
-    let none: SessionStartParams = serde_json::from_value(json!({
-        "environment": {"type": "none"}
-    }))
-    .expect("none environment override");
-    assert!(matches!(
-        none.environment,
-        Some(SessionEnvironmentOverride::None {})
-    ));
+fn session_start_rejects_creation_environment_overrides() {
+    for environment in [
+        json!({"type": "existing", "environmentId": "workstation"}),
+        json!({"type": "none"}),
+        json!(null),
+    ] {
+        let mut request = json!({
+            "profile": {"kind": "named", "profileId": "developer"},
+            "environment": environment,
+        });
+        let error = serde_json::from_value::<SessionStartParams>(request.clone())
+            .expect_err("ordinary start rejects the removed environment field");
+        assert!(error.to_string().contains("unknown field `environment`"));
+        request["workflowTools"] = json!({"version": 1, "tools": []});
+        let error = serde_json::from_value::<ManagedSessionStartParams>(request)
+            .expect_err("managed start rejects the removed environment field");
+        assert!(error.to_string().contains("unknown field `environment`"));
+    }
 }
 
 #[test]
@@ -684,7 +691,9 @@ async fn dispatch_json_rpc_routes_session_config_put() {
                     "generation": { "reasoningEffort": "high" },
                     "features": {
                         "timers": {},
-                        "vfs": { "tools": "edit" }
+                        "vfs": { "workspaces": [
+                            { "path": "/workspace", "workspaceId": "ws_1", "access": "edit" }
+                        ] }
                     }
                 }
             })),
@@ -1183,10 +1192,7 @@ fn mcp_server_put_params_default_approval_is_never_and_revision_optional() {
     }))
     .expect("params");
 
-    assert_eq!(
-        params.server.approval_default,
-        RemoteMcpApprovalPolicy::Never
-    );
+    assert_eq!(params.server.approval, RemoteMcpApprovalPolicy::Never);
     assert_eq!(params.expected_revision, None);
     assert_eq!(params.server.credential, None);
 }
@@ -1228,17 +1234,17 @@ fn mcp_server_put_rejects_internal_transport_field() {
 }
 
 #[test]
-fn mcp_session_links_reject_removed_connection_and_policy_fields() {
+fn mcp_session_attachments_reject_removed_connection_and_policy_fields() {
     for (field, value) in [
         ("authGrantId", json!("authgrant_1")),
         ("allowedTools", json!(["search"])),
         ("approval", json!("never")),
         ("deferLoading", json!(true)),
     ] {
-        let mut link = serde_json::Map::from_iter([("serverId".to_owned(), json!("echo"))]);
-        link.insert(field.to_owned(), value);
-        let error = serde_json::from_value::<McpServerLink>(Value::Object(link))
-            .expect_err("session MCP links must reject removed fields");
+        let mut attachment = serde_json::Map::from_iter([("serverId".to_owned(), json!("echo"))]);
+        attachment.insert(field.to_owned(), value);
+        let error = serde_json::from_value::<McpServerAttachment>(Value::Object(attachment))
+            .expect_err("session MCP attachments must reject removed fields");
         assert!(
             error.to_string().contains("unknown field"),
             "{field}: {error}"
@@ -3112,7 +3118,6 @@ fn test_profile(profile_id: ProfileId) -> AgentProfile {
             instructions: Some(ProfileInstructions::Text {
                 text: "Be concise.".to_owned(),
             }),
-            environment: None,
         },
         created_at_ms: 1,
         updated_at_ms: 2,
@@ -3215,7 +3220,6 @@ fn test_environment_instance() -> EnvironmentView {
         },
         public_ingress_enabled: false,
         public_endpoint: None,
-        origin_session: None,
         metadata: BTreeMap::new(),
         last_seen_at_ms: None,
         created_at_ms: 10,
@@ -3279,7 +3283,6 @@ fn test_external_environment() -> EnvironmentView {
         },
         public_ingress_enabled: false,
         public_endpoint: None,
-        origin_session: None,
         metadata: BTreeMap::new(),
         last_seen_at_ms: None,
         created_at_ms: 10,
@@ -3313,8 +3316,8 @@ fn test_mcp_server(server_id: String) -> McpServerView {
         allowed_tools: None,
         execution: RemoteMcpExecution::Provider,
         exposure: RemoteMcpExposure::Inject,
-        approval_default: RemoteMcpApprovalPolicy::Never,
-        defer_loading_default: None,
+        approval: RemoteMcpApprovalPolicy::Never,
+        defer_loading: None,
         allow_private_network: false,
         auth_policy: McpServerAuthPolicy::None,
         credential: None,

@@ -36,13 +36,15 @@ pub(super) async fn admit_and_append_command(
     let submission_id = command_submission_id(&command);
     if environment_prompt_publication_is_obsolete(drive.state(), &command)
         || environment_catalog_publication_is_obsolete(drive.state(), &command)
+        || environment_attachment_catalog_publication_is_obsolete(drive.state(), &command)
         || vfs_skill_catalog_publication_is_obsolete(drive.state(), &command)
     {
         let rejection = engine::CommandRejection::new(
             engine::CommandRejectionKind::ActiveWork,
-            "skill catalog observation no longer matches an idle configured source",
+            "context observation no longer matches the configured source",
         );
         return Ok(CommandAdmissionResult::Rejected(AgentAdmissionFailure {
+            preparation_error: None,
             submission_id,
             correlation_token,
             kind: AgentAdmissionFailureKind::RejectedCommand,
@@ -55,6 +57,7 @@ pub(super) async fn admit_and_append_command(
         Err(CoreAgentDriveError::Command(CommandError::Rejected(rejection))) => {
             let message = rejection.to_string();
             return Ok(CommandAdmissionResult::Rejected(AgentAdmissionFailure {
+                preparation_error: None,
                 submission_id,
                 correlation_token,
                 kind: AgentAdmissionFailureKind::RejectedCommand,
@@ -118,8 +121,15 @@ pub(super) async fn drive_until_idle(
     if let Some(outcome) = history_boundary_outcome(ctx, args) {
         return Ok(outcome);
     }
+    if drive.state().lifecycle.status == CoreAgentStatus::Closed {
+        ctx.state_mut(preparation::abandon_pending_run);
+    }
+    preparation::publish_pending_tools(ctx, drive).await?;
     let mut action = drive.next_action_unbounded(workflow_time_ms(ctx))?;
     loop {
+        if preparation::publish_pending_tools(ctx, drive).await? {
+            action = drive.next_action_unbounded(workflow_time_ms(ctx))?;
+        }
         // Client admissions (cancel, steer, queue, context edits) land
         // at every action boundary against the live drive, and the plan is
         // recomputed so a cancel stops the next turn/batch from starting and
@@ -262,6 +272,11 @@ fn history_boundary_outcome(
         // the marker and active-run rollover becomes eligible.
         return None;
     }
+    // Pending preparation may need the current turn to finish before it can
+    // publish. Let the driver reach that boundary instead of yielding forever.
+    if ctx.state(|state| state.run_preparation.is_some() || !state.pending_toolsets.is_empty()) {
+        return None;
+    }
     history_boundary_outcome_for(
         wait_loop::history_rollover_due(ctx, args),
         ctx.state(wait_loop::workflow_state_allows_continue_as_new),
@@ -345,6 +360,10 @@ pub(super) async fn append_events(
         state.head = appended.head;
         state.execution_has_rollover_checkpoint = true;
         state.last_error = None;
+        if state.core_state.lifecycle.status == CoreAgentStatus::Closed {
+            preparation::abandon_pending_run(state);
+            state.pending_toolsets.clear();
+        }
         Ok(())
     })?;
     // Invalidation uses only recorded source identity. It performs no discovery,
@@ -353,6 +372,9 @@ pub(super) async fn append_events(
         Box::pin(append_command(ctx, drive, command)).await?;
     }
     if let Some(command) = invalid_environment_catalog_command(drive.state()) {
+        Box::pin(append_command(ctx, drive, command)).await?;
+    }
+    if let Some(command) = invalid_environment_attachment_catalog_command(drive.state()) {
         Box::pin(append_command(ctx, drive, command)).await?;
     }
     if let Some(command) = invalid_vfs_skill_catalog_command(drive.state()) {
@@ -410,7 +432,7 @@ async fn queue_detached_promise_followups(
         // ordinary run; the submission id is derived from the promise so a
         // replayed follow-up is a no-op.
         ctx.state_mut(|state| {
-            state.pending_admissions.push(AgentAdmission {
+            state.queue_admission(AgentAdmission {
                 command: CoreAgentCommand::RequestRun(engine::RunRequestCommand {
                     notify_on_terminal: Vec::new(),
                     submission_id: Some(submission_id),
@@ -618,7 +640,7 @@ pub(super) fn invalid_environment_prompt_command(
     })
 }
 
-fn environment_prompt_publication_is_obsolete(
+pub(super) fn environment_prompt_publication_is_obsolete(
     state: &CoreAgentState,
     command: &CoreAgentCommand,
 ) -> bool {
@@ -651,6 +673,48 @@ fn environment_prompt_publication_is_obsolete(
         || ((state.runs.active.is_some() || !state.runs.queued.is_empty())
             && engine::current_context_entry(state, &ContextEntryKey::new(ENVIRONMENT_PROMPT_KEY))
                 .is_none_or(|current| current.content != entry.content))
+}
+
+const ENVIRONMENT_ATTACHMENT_CATALOG_KEY: &str = "runtime.catalog.environments";
+
+fn environment_attachment_catalog_matches(state: &CoreAgentState, origin: Option<&str>) -> bool {
+    state
+        .lifecycle
+        .config
+        .as_ref()
+        .is_some_and(|config| config.features.environments.is_some())
+        && origin.and_then(|origin| origin.strip_prefix("runtime.environments:"))
+            == Some(
+                state
+                    .environment
+                    .active_environment_id
+                    .as_ref()
+                    .map_or("", |id| id.as_str()),
+            )
+}
+
+/// Drop the attachment catalog as soon as its recorded selection is stale.
+/// A later runtime projection rebuilds it; switching performs no discovery.
+pub(super) fn invalid_environment_attachment_catalog_command(
+    state: &CoreAgentState,
+) -> Option<CoreAgentCommand> {
+    let key = ContextEntryKey::new(ENVIRONMENT_ATTACHMENT_CATALOG_KEY);
+    let entry = engine::current_context_entry(state, &key)?;
+    (state.lifecycle.status == CoreAgentStatus::Open
+        && !environment_attachment_catalog_matches(state, entry.origin.as_deref()))
+    .then_some(CoreAgentCommand::RemoveContext {
+        expected_revision: None,
+        key,
+    })
+}
+
+pub(super) fn environment_attachment_catalog_publication_is_obsolete(
+    state: &CoreAgentState,
+    command: &CoreAgentCommand,
+) -> bool {
+    matches!(command, CoreAgentCommand::UpsertContext { key, entry, .. }
+        if key.as_str() == ENVIRONMENT_ATTACHMENT_CATALOG_KEY
+            && !environment_attachment_catalog_matches(state, entry.origin.as_deref()))
 }
 
 pub(super) fn invalid_environment_catalog_command(

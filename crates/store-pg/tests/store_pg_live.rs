@@ -1920,7 +1920,7 @@ async fn pg_live_mcp_crud_and_universe_isolation() {
     let mut replacement = put_mcp_server("crm", McpServerStatus::Disabled);
     replacement.server_url = "https://crm2.example.com/mcp".to_owned();
     replacement.description = None;
-    replacement.approval_default = McpApprovalPolicy::Always;
+    replacement.approval = McpApprovalPolicy::Always;
     replacement.auth_policy = McpServerAuthPolicy::OptionalBearer;
     replacement.auth_grant_id = Some(AuthGrantId::new("authgrant_mcp_crm"));
     replacement.now_ms = created.updated_at_ms + 5;
@@ -1931,7 +1931,7 @@ async fn pg_live_mcp_crud_and_universe_isolation() {
     assert_eq!(replaced.revision, 2);
     assert_eq!(replaced.server_url, "https://crm2.example.com/mcp");
     assert_eq!(replaced.description, None);
-    assert_eq!(replaced.approval_default, McpApprovalPolicy::Always);
+    assert_eq!(replaced.approval, McpApprovalPolicy::Always);
     assert_eq!(
         replaced.auth_grant_id,
         Some(AuthGrantId::new("authgrant_mcp_crm"))
@@ -2054,7 +2054,7 @@ async fn pg_live_universe_environments_are_independent_of_sessions() {
             template_id: EnvironmentTemplateId::new("rust-v1"),
             display_name: Some("Local host".to_owned()),
             metadata: Default::default(),
-            origin_session: None,
+
             idle_policy: Some(environments::EnvironmentIdlePolicy {
                 pause_after_ms: Some(60_000),
                 suspend_after_ms: None,
@@ -2212,65 +2212,6 @@ async fn pg_live_universe_environments_are_independent_of_sessions() {
         .await
         .expect("close environment while a session exists");
     assert_eq!(closing.status, EnvironmentStatus::Closing);
-
-    // Origin-session provenance round-trips, filters, and feeds the
-    // close-with-session sweep query.
-    let owned_id = EnvironmentId::new("environment-owned");
-    let owned = store
-        .create_environment(CreateEnvironment {
-            request_id: EnvironmentProvisionRequestId::for_session(&session_id),
-            environment_id: owned_id.clone(),
-            incarnation_id: EnvironmentIncarnationId::new("incarnation-owned"),
-            binding_id: EnvironmentProviderBindingId::new("primary"),
-            template_id: EnvironmentTemplateId::new("rust-v1"),
-            display_name: None,
-            metadata: Default::default(),
-            origin_session: Some(environments::EnvironmentOriginSession {
-                session_id: session_id.clone(),
-                profile_id: Some("coder".to_owned()),
-                close_with_session: true,
-            }),
-            idle_policy: None,
-            created_at_ms: 60,
-        })
-        .await
-        .expect("create session-provisioned environment");
-    assert_eq!(
-        owned.origin_session,
-        Some(environments::EnvironmentOriginSession {
-            session_id: session_id.clone(),
-            profile_id: Some("coder".to_owned()),
-            close_with_session: true,
-        })
-    );
-    let by_session = store
-        .list_environments(ListEnvironments {
-            metadata: Default::default(),
-            origin_session_id: Some(session_id.clone()),
-            ..ListEnvironments::default()
-        })
-        .await
-        .expect("list by origin session");
-    assert_eq!(by_session, vec![owned.clone()]);
-    let sweep = store
-        .list_environments_closing_with_session()
-        .await
-        .expect("sweep candidates");
-    assert_eq!(sweep, vec![owned]);
-    store
-        .begin_close_environment(BeginCloseEnvironment {
-            environment_id: owned_id,
-            updated_at_ms: 70,
-        })
-        .await
-        .expect("close owned environment");
-    assert!(
-        store
-            .list_environments_closing_with_session()
-            .await
-            .expect("sweep candidates")
-            .is_empty()
-    );
 
     // Leave nothing behind for a running dev reconciler to chase: the
     // provider endpoint is fictional and its closing environments would be
@@ -2885,7 +2826,7 @@ async fn pg_live_environment_credentials_round_trip() {
             template_id: EnvironmentTemplateId::new("rust-v1"),
             display_name: None,
             metadata: Default::default(),
-            origin_session: None,
+
             idle_policy: None,
             created_at_ms: 3,
         })
@@ -3219,8 +3160,8 @@ fn put_mcp_server(server_id: &str, status: McpServerStatus) -> PutMcpServerRecor
         allowed_tools: Some(vec!["lookup_customer".to_owned()]),
         execution: mcp::McpExecution::Provider,
         exposure: mcp::McpExposure::Inject,
-        approval_default: McpApprovalPolicy::Never,
-        defer_loading_default: Some(true),
+        approval: McpApprovalPolicy::Never,
+        defer_loading: Some(true),
         allow_private_network: false,
         auth_policy: McpServerAuthPolicy::None,
         auth_grant_id: None,

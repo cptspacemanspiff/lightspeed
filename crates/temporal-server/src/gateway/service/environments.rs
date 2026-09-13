@@ -16,15 +16,14 @@ impl GatewayAgentApi {
                     "environment activation requires the environments feature to be granted",
                 )
             })?;
-        let policy = ::environments::EnvironmentAccessPolicy::new(
-            feature.providers.clone(),
-            feature.registration_keys.clone(),
-        );
-        crate::environment_resolver::EnvironmentResolver::from_pg_store(self.store.clone())
-            .with_gateway(self.environment_gateway.clone())
-            .activatable(environment_id, &policy, now_ms()?)
+        if !feature.is_attached(environment_id.as_str()) {
+            return Err(AgentApiError::rejected(format!(
+                "environment {environment_id} is not attached to this session"
+            )));
+        }
+        crate::environments::resolver::EnvironmentResolver::from_pg_store(self.store.clone())
+            .selectable(environment_id)
             .await
-            .map(|(environment, _ready)| environment)
             .map_err(map_environment_resolve_error)
     }
 
@@ -68,13 +67,13 @@ impl GatewayAgentApi {
 /// power to `running` where that applies, and the caller's correct move is
 /// retry-with-backoff, not failure.
 pub(super) fn map_environment_resolve_error(
-    error: crate::environment_resolver::EnvironmentResolveError,
+    error: crate::environments::resolver::EnvironmentResolveError,
 ) -> AgentApiError {
     match error {
-        crate::environment_resolver::EnvironmentResolveError::Store(error) => {
+        crate::environments::resolver::EnvironmentResolveError::Store(error) => {
             map_environments_error(error)
         }
-        not_ready @ crate::environment_resolver::EnvironmentResolveError::NotReady { .. } => {
+        not_ready @ crate::environments::resolver::EnvironmentResolveError::NotReady { .. } => {
             AgentApiError::environment_not_ready(not_ready.to_string())
         }
         other => AgentApiError::rejected(other.to_string()),

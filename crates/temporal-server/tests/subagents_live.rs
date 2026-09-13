@@ -606,7 +606,6 @@ async fn create_child_profile_with_config(
                 instructions: Some(ProfileInstructions::Text {
                     text: "You are a scripted live sub-agent.".to_owned(),
                 }),
-                environment: None,
                 retention: None,
             },
         },
@@ -650,7 +649,6 @@ async fn start_subagent_parent_with_features(
             ..SessionConfig::default()
         }),
         profile: None,
-        environment: None,
         delete_after_close_ms: None,
     })
     .await?;
@@ -749,11 +747,10 @@ async fn run_agent_run_media_live_client(
         .workspace;
     let child_config: SessionConfig = serde_json::from_value(serde_json::json!({
         "features": {"vfs": {
-            "tools": "readOnly",
-            "workspaceLinks": [{
+            "workspaces": [{
                 "path": "/workspace",
-                "target": {"type": "workspace", "workspaceId": workspace.workspace_id},
-                "access": "readOnly"
+                "workspaceId": workspace.workspace_id,
+                "access": "read"
             }]
         }}
     }))?;
@@ -1175,17 +1172,12 @@ async fn run_agent_run_inherit_environment_live_client(
             updated_at_ms: 1,
         })
         .await?;
-    let environments_feature = api::EnvironmentsFeature {
-        tools: Some(api::EnvironmentToolSurface::Edit),
-        commands: true,
-        working_directory: None,
-        prompts: None,
+    let environments_feature = |attachment: api::EnvironmentAttachment| api::EnvironmentsFeature {
         version: api::CURRENT_FEATURE_VERSION,
-        providers: None,
-        registration_keys: None,
-        selection_tools: false,
-        jobs: false,
+        selection: false,
+        prompts: None,
         skills: None,
+        environments: vec![attachment],
     };
 
     // Child profile: inherits whatever environment its parent has active.
@@ -1199,7 +1191,13 @@ async fn run_agent_run_inherit_environment_live_client(
                 metadata: Default::default(),
                 config: Some(SessionConfig {
                     features: Some(api::FeaturesConfig {
-                        environments: Some(environments_feature.clone()),
+                        environments: Some(environments_feature(api::EnvironmentAttachment {
+                            environment_id: None,
+                            inherit: true,
+                            default: true,
+                            access: api::EnvironmentAccess::Exec,
+                            working_directory: None,
+                        })),
                         ..api::FeaturesConfig::default()
                     }),
                     ..SessionConfig::default()
@@ -1207,20 +1205,30 @@ async fn run_agent_run_inherit_environment_live_client(
                 instructions: Some(ProfileInstructions::Text {
                     text: "You are a scripted live sub-agent.".to_owned(),
                 }),
-                environment: Some(api::ProfileEnvironment::Inherit {}),
                 retention: None,
             },
         },
     })
     .await?;
 
-    // Parent: provisions its own environment and may run the child.
+    let independent_environment = api
+        .create_environment(api::EnvironmentCreateParams {
+            request_id: format!("inherit-env-{suffix}"),
+            binding_id: binding_id.clone(),
+            template_id: "rust-v1".into(),
+            display_name: None,
+            metadata: BTreeMap::new(),
+            idle_policy: None,
+        })
+        .await?
+        .result
+        .environment;
+    // Parent selects an independently created environment and may run the child.
     api.start_session(SessionStartParams {
         metadata: Default::default(),
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: None,
-        environment: None,
         delete_after_close_ms: None,
         profile: Some(ProfileSource::Inline {
             profile: Box::new(api::InlineAgentProfile {
@@ -1231,21 +1239,20 @@ async fn run_agent_run_inherit_environment_live_client(
                     config: Some(SessionConfig {
                         model: Some(model_to_api(&model)),
                         features: Some(api::FeaturesConfig {
-                            environments: Some(environments_feature),
+                            environments: Some(environments_feature(api::EnvironmentAttachment {
+                                environment_id: Some(
+                                    independent_environment.environment_id.clone(),
+                                ),
+                                inherit: false,
+                                default: true,
+                                access: api::EnvironmentAccess::Exec,
+                                working_directory: None,
+                            })),
                             ..subagents_features(&child_profile_id, 16)
                         }),
                         ..SessionConfig::default()
                     }),
                     instructions: None,
-                    environment: Some(api::ProfileEnvironment::Provision {
-                        provider_id: provider_id.clone(),
-                        template_id: "rust-v1".to_owned(),
-                        display_name: None,
-                        metadata: BTreeMap::new(),
-                        retention: api::ProfileEnvironmentRetention::CloseWithSession,
-                        idle_policy: None,
-                        credentials: Vec::new(),
-                    }),
                     retention: None,
                 },
             }),
@@ -1331,6 +1338,10 @@ async fn run_agent_run_inherit_environment_live_client(
     let mut all = vec![session_id];
     all.extend(children.iter().map(|child| child.session_id.clone()));
     cleanup_subagent_test(&client, api.as_ref(), child_profile_id, &all).await;
+    api.close_environment(api::EnvironmentCloseParams {
+        environment_id: independent_environment.environment_id,
+    })
+    .await?;
     Ok(())
 }
 

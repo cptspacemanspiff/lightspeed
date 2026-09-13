@@ -270,40 +270,27 @@ export type CompactionPolicy =
       targetTokens?: number | null;
     };
 /**
- * Agent-facing environment filesystem tools; independent of execution grants.
+ * Per-attachment environment access, an ordered ladder: `edit` adds file
+ * editing to `read`, `exec` adds processes, `jobs` adds durable jobs.
+ * Processes can write files regardless of the file-tool level, so
+ * read-only files with commands is deliberately not expressible.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "EnvironmentToolSurface".
+ * via the `definition` "EnvironmentAccess".
  */
-export type EnvironmentToolSurface = "readOnly" | "edit";
+export type EnvironmentAccess = "read" | "edit" | "exec" | "jobs";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileId".
  */
 export type ProfileId = string;
 /**
+ * Per-attachment VFS access; `edit` implies `read`.
+ *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "VfsToolSurface".
+ * via the `definition` "WorkspaceAccess".
  */
-export type VfsToolSurface = "readOnly" | "edit";
-/**
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "WorkspaceLinkAccess".
- */
-export type WorkspaceLinkAccess = "readOnly" | "readWrite";
-/**
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "WorkspaceLinkTarget".
- */
-export type WorkspaceLinkTarget =
-  | {
-      type: "workspace";
-      workspaceId: string;
-    }
-  | {
-      snapshotRef: string;
-      type: "snapshot";
-    };
+export type WorkspaceAccess = "read" | "edit";
 /**
  * Provider processing class used by session defaults and per-run overrides.
  *
@@ -1481,54 +1468,6 @@ export type OperatorEnvironmentProviderTransport =
       type: "provider";
     };
 /**
- * Environment intent carried by a profile document.
- *
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "ProfileEnvironment".
- */
-export type ProfileEnvironment =
-  | {
-      environmentId: string;
-      type: "existing";
-    }
-  | {
-      type: "inherit";
-    }
-  | {
-      /**
-       * Credentials bound to the environment right after it is
-       * provisioned before activation: references to universe
-       * grants/providers/secrets, never values. They become ordinary
-       * environment credential bindings; the profile is the initial set,
-       * not a live sync. Not available for `existing` environments.
-       */
-      credentials?: ProfileEnvironmentCredential[];
-      displayName?: string | null;
-      /**
-       * Optional staged idle policy for the provisioned environment.
-       * Stages the provider cannot realize are skipped.
-       */
-      idlePolicy?: EnvironmentIdlePolicyView | null;
-      metadata?: {
-        [k: string]: string;
-      };
-      providerId: string;
-      retention?: ProfileEnvironmentRetention & string;
-      /**
-       * Immutable provider template-version identity.
-       */
-      templateId: string;
-      type: "provision";
-    };
-/**
- * What happens to a profile-provisioned environment when its originating
- * session closes.
- *
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "ProfileEnvironmentRetention".
- */
-export type ProfileEnvironmentRetention = "closeWithSession" | "retain";
-/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileInstructions".
  */
@@ -1701,22 +1640,6 @@ export type SessionJobCancelScopeView = "job" | "dependents";
  * via the `definition` "SessionJobDependencyPolicyView".
  */
 export type SessionJobDependencyPolicyView = "allSucceeded" | "allTerminal";
-/**
- * Creation-time override for the environment intent carried by a profile.
- * Absence uses the profile unchanged; `none` suppresses its environment
- * intent, while `existing` activates the specified universe environment.
- *
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "SessionEnvironmentOverride".
- */
-export type SessionEnvironmentOverride =
-  | {
-      type: "none";
-    }
-  | {
-      environmentId: string;
-      type: "existing";
-    };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileSource".
@@ -2067,58 +1990,64 @@ export interface FeaturesConfig {
   web?: WebFeature | null;
 }
 /**
- * Grants active session environments. Filesystem tools, commands, selection,
- * durable jobs, prompts, and skills are independent, default-off sub-grants.
+ * Grants session environments. The `environments` list is the allowed set:
+ * the session can select, read, and run work only on a listed machine, each
+ * with its own access grant and working directory. The installed tool
+ * surface is the union of every attachment's grant; a call the active
+ * machine's grant does not cover fails at execution, so switching machines
+ * never changes the toolset. `{}` grants the feature with no reachable
+ * machine.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "EnvironmentsFeature".
  */
 export interface EnvironmentsFeature {
   /**
-   * Grants command execution and process continuation. Commands may modify
-   * files even when filesystem tools are read-only or disabled.
+   * The environments this session may use; unique ids, at most one
+   * default, at most one `inherit` (profiles only).
    */
-  commands?: boolean;
-  /**
-   * Grants the advanced durable-job tool surface. The workflow binding is
-   * installed for the session when granted; invocations still require an
-   * active, ready environment with matching job capabilities.
-   */
-  jobs?: boolean;
+  environments?: EnvironmentAttachment[];
   /**
    * Independent environment prompt loading; absent disables sourced instructions.
    */
   prompts?: EnvironmentPromptsConfig | null;
   /**
-   * Absent means every registered provider is allowed.
-   */
-  providers?: string[] | null;
-  /**
-   * Registration keys whose registered environments the session may
-   * list and activate; absent means every key. Independent of
-   * `providers`: each list scopes its own environment source, and
-   * external environments pass only when neither list is set.
-   */
-  registrationKeys?: string[] | null;
-  /**
    * Exposes `environment_list`, `environment_activate`, and
-   * `environment_deactivate` to the model. `environment_read` is available
-   * whenever environments are enabled, and external API/profile activation
-   * remains available when this is false.
+   * `environment_deactivate` over the attached environments.
+   * `environment_read` is available whenever environments are enabled, and
+   * external API/profile activation remains available when this is false.
    */
-  selectionTools?: boolean;
+  selection?: boolean;
   /**
    * Independent environment skill discovery. Absent disables discovery.
    */
   skills?: EnvironmentSkillsConfig | null;
-  /**
-   * Filesystem tool surface. Absent installs no filesystem tools; sources
-   * remain independent. Read-only does not restrict commands or durable jobs.
-   */
-  tools?: EnvironmentToolSurface | null;
   version?: number;
+}
+/**
+ * One environment the session may use. Exactly one of `environmentId` and
+ * `inherit` identifies the machine. `inherit` is valid only in a profile
+ * document applied to a sub-agent: it resolves to the delegating parent's
+ * active environment at spawn and is stored on the child as a concrete id.
+ * If the parent's environment is also listed explicitly, the explicit
+ * attachment wins; if the parent has none, the inherit attachment is dropped.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "EnvironmentAttachment".
+ */
+export interface EnvironmentAttachment {
+  access: EnvironmentAccess;
   /**
-   * Absolute machine working directory for file tools, commands, jobs, and sources; absent uses the endpoint default.
+   * Activated when a profile is applied while the session has no active
+   * environment; creation is the trivial case. Never overrides a live
+   * selection and never applies on a plain `session/config/put`.
+   */
+  default?: boolean;
+  environmentId?: string | null;
+  inherit?: boolean;
+  /**
+   * Absolute machine working directory for file tools, commands, jobs,
+   * and sources; absent uses the machine's advertised default.
    */
   workingDirectory?: string | null;
 }
@@ -2157,25 +2086,32 @@ export interface EnvironmentSkillsConfig {
   roots?: [string, ...string[]] | null;
 }
 /**
- * Grants remote MCP tools by declaring linked servers from the universe MCP
- * catalog; must link at least one server, with unique server ids.
+ * Grants remote MCP tools by declaring attached servers from the universe MCP
+ * catalog. Server ids must be unique; an empty list grants no MCP tools.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "McpFeature".
  */
 export interface McpFeature {
-  servers?: McpServerLink[];
+  servers?: McpServerAttachment[];
   version?: number;
 }
 /**
- * A selected universe MCP server. Its catalog record owns all connection and
- * behavior configuration.
+ * A selected universe MCP server. Its catalog record owns connection,
+ * execution, exposure, approval, and auth; the attachment may only narrow the
+ * record's tool allowlist for this session.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "McpServerLink".
+ * via the `definition` "McpServerAttachment".
  */
-export interface McpServerLink {
+export interface McpServerAttachment {
   serverId: string;
+  /**
+   * Non-empty subset of the record's allowed tools exposed to this
+   * session, under both injection and search; absent exposes the record's
+   * full allowlist.
+   */
+  tools?: string[] | null;
 }
 /**
  * Grants sub-agent delegation: `agent_run` (joined, result inline) and
@@ -2230,9 +2166,12 @@ export interface TimersFeature {
   version?: number;
 }
 /**
- * Grants the session virtual filesystem. Workspace links declare the
- * session-visible namespace and the VFS catalog is surfaced. Sub-grants are independent; `{}` grants a VFS with
- * no tools and no sourcing.
+ * Grants the session virtual filesystem. Workspace attachments declare the
+ * session-visible namespace and the VFS catalog is surfaced. The file tool
+ * surface is derived from the attachments: any attachment installs the read
+ * tools, any `edit` attachment adds the write tools, and with the
+ * environments feature granted the matching transfer tools appear. `{}`
+ * grants a VFS with no attachments, no tools, and no sourcing.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "VfsFeature".
@@ -2240,31 +2179,24 @@ export interface TimersFeature {
 export interface VfsFeature {
   /**
    * Prompt-instruction sourcing from the VFS. Absent disables loading;
-   * an empty block discovers conventional linked roots.
+   * an empty block discovers conventional attached roots.
    */
   prompts?: VfsPromptsConfig | null;
   /**
    * Independent VFS skill discovery. Absent disables discovery and removes
-   * its runtime catalog; an empty block discovers conventional linked roots.
+   * its runtime catalog; an empty block discovers conventional attached roots.
    */
   skills?: VfsSkillsConfig | null;
-  /**
-   * Agent-facing filesystem tool surface; absent = no fs tools. Per-path
-   * writability is defined by each workspace link's own access.
-   * With the environments feature granted, `readOnly` also exposes
-   * `vfs_materialize`; `edit` additionally exposes `vfs_capture`.
-   * Prompt/skill sourcing alone does not grant transfer tools.
-   */
-  tools?: VfsToolSurface | null;
   version?: number;
   /**
    * Absolute VFS tool working directory; absent uses /.
    */
   workingDirectory?: string | null;
   /**
-   * Catalog resources exposed in the session's workspace namespace.
+   * Catalog resources exposed in the session's workspace namespace at
+   * disjoint absolute paths.
    */
-  workspaceLinks?: WorkspaceLink[];
+  workspaces?: WorkspaceAttachment[];
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -2273,8 +2205,8 @@ export interface VfsFeature {
 export interface VfsPromptsConfig {
   /**
    * Absent searches .agents/prompts and .lightspeed/prompts beneath each
-   * workspace link. Explicit roots replace these defaults and must be
-   * non-empty absolute paths contained in workspace links.
+   * workspace attachment. Explicit roots replace these defaults and must be
+   * non-empty absolute paths contained in workspace attachments.
    */
   roots?: string[] | null;
 }
@@ -2285,21 +2217,26 @@ export interface VfsPromptsConfig {
 export interface VfsSkillsConfig {
   /**
    * Absent searches .agents/skills and .lightspeed/skills beneath each
-   * workspace link. Explicit roots replace these defaults and must be
-   * non-empty absolute paths contained in workspace links.
+   * workspace attachment. Explicit roots replace these defaults and must be
+   * non-empty absolute paths contained in workspace attachments.
    *
    * @minItems 1
    */
   roots?: [string, ...string[]] | null;
 }
 /**
+ * One catalog resource mounted into the session namespace. Exactly one of
+ * `workspaceId` and `snapshotRef` names the resource; snapshots are
+ * immutable and must be attached with `read` access.
+ *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "WorkspaceLink".
+ * via the `definition` "WorkspaceAttachment".
  */
-export interface WorkspaceLink {
-  access: WorkspaceLinkAccess;
+export interface WorkspaceAttachment {
+  access: WorkspaceAccess;
   path: string;
-  target: WorkspaceLinkTarget;
+  snapshotRef?: string | null;
+  workspaceId?: string | null;
 }
 /**
  * Grants network access through the web toolset; `fetch` and `search` are
@@ -4238,12 +4175,6 @@ export interface EnvironmentView {
   metadata?: {
     [k: string]: string;
   };
-  /**
-   * Present when a profile provisioned this environment for a session.
-   * Provenance and an optional close trigger, not ownership: the
-   * environment remains an ordinary universe resource.
-   */
-  originSession?: EnvironmentOriginSessionView | null;
   publicEndpoint?: string | null;
   publicIngressEnabled: boolean;
   requestId: string;
@@ -4281,18 +4212,6 @@ export interface EnvironmentIncarnationView {
   provisionRequestId?: string | null;
   templateId?: string | null;
   updatedAtMs: number;
-}
-/**
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "EnvironmentOriginSessionView".
- */
-export interface EnvironmentOriginSessionView {
-  /**
-   * When true, Lightspeed closes the environment once the session closes.
-   */
-  closeWithSession: boolean;
-  profileId?: ProfileId | null;
-  sessionId: string;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -4909,12 +4828,12 @@ export interface McpServerDeleteResponse {
 export interface McpServerView {
   allowPrivateNetwork: boolean;
   allowedTools?: string[] | null;
-  approvalDefault: RemoteMcpApprovalPolicy;
+  approval: RemoteMcpApprovalPolicy;
   authPolicy: McpServerAuthPolicy;
   createdAtMs: number;
   credential?: McpServerCredential | null;
   defaultServerLabel: string;
-  deferLoadingDefault?: boolean | null;
+  deferLoading?: boolean | null;
   description?: string | null;
   displayName?: string | null;
   execution: RemoteMcpExecution;
@@ -5445,10 +5364,6 @@ export interface ProfileApplyResponse {
 export interface ProfileApplySummary {
   activeEnvironmentChanged: boolean;
   configChanged: boolean;
-  /**
-   * True when this apply created a new environment for the session.
-   */
-  environmentProvisioned?: boolean;
   instructionsChanged: boolean;
 }
 /**
@@ -5475,13 +5390,6 @@ export interface AgentProfile {
   createdAtMs: number;
   description?: string | null;
   displayName?: string | null;
-  /**
-   * How the session obtains its active environment when this profile is
-   * applied: activate an existing universe environment, or provision a
-   * fresh one for this session. Absence leaves the session's current
-   * active environment unchanged.
-   */
-  environment?: ProfileEnvironment | null;
   instructions?: ProfileInstructions | null;
   /**
    * Descriptive metadata defaults copied to a session when it is created
@@ -5500,20 +5408,6 @@ export interface AgentProfile {
   retention?: ProfileSessionRetention | null;
   revision: number;
   updatedAtMs: number;
-}
-/**
- * One environment credential binding requested by a profile: the same shape
- * as `environments/credentials/bind`.
- *
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "ProfileEnvironmentCredential".
- */
-export interface ProfileEnvironmentCredential {
-  /**
-   * Environment variable name (`[A-Za-z_][A-Za-z0-9_]{0,127}`).
-   */
-  envName: string;
-  source: EnvironmentCredentialSourceView;
 }
 /**
  * Root-session retention policy supplied by a profile at session creation.
@@ -6133,13 +6027,6 @@ export interface AgentProfileInput {
   config?: SessionConfig | null;
   description?: string | null;
   displayName?: string | null;
-  /**
-   * How the session obtains its active environment when this profile is
-   * applied: activate an existing universe environment, or provision a
-   * fresh one for this session. Absence leaves the session's current
-   * active environment unchanged.
-   */
-  environment?: ProfileEnvironment | null;
   instructions?: ProfileInstructions | null;
   /**
    * Descriptive metadata defaults copied to a session when it is created
@@ -6969,10 +6856,6 @@ export interface EnvironmentListParams {
   metadata?: {
     [k: string]: string;
   };
-  /**
-   * Only environments a profile provisioned for this session.
-   */
-  originSessionId?: string | null;
   providerId?: string | null;
   /**
    * Only registered environments admitted by this registration key.
@@ -7085,13 +6968,6 @@ export interface InlineAgentProfile {
   config?: SessionConfig | null;
   description?: string | null;
   displayName?: string | null;
-  /**
-   * How the session obtains its active environment when this profile is
-   * applied: activate an existing universe environment, or provision a
-   * fresh one for this session. Absence leaves the session's current
-   * active environment unchanged.
-   */
-  environment?: ProfileEnvironment | null;
   instructions?: ProfileInstructions | null;
   /**
    * Descriptive metadata defaults copied to a session when it is created
@@ -7133,11 +7009,6 @@ export interface ManagedSessionStartParams {
    */
   deleteAfterCloseMs?: number | null;
   displayName?: string | null;
-  /**
-   * Optional creation-time override for the selected profile's environment
-   * intent. Omit to use the profile's intent unchanged.
-   */
-  environment?: SessionEnvironmentOverride | null;
   /**
    * Descriptive key/value metadata with the same bounds as
    * `session/start`; applied only when the session is first created.
@@ -7182,11 +7053,17 @@ export interface McpServerDeleteParams {
 export interface McpServerInput {
   allowPrivateNetwork?: boolean;
   allowedTools?: string[] | null;
-  approvalDefault?: RemoteMcpApprovalPolicy & string;
+  /**
+   * Approval policy for every session linking this server.
+   */
+  approval?: RemoteMcpApprovalPolicy & string;
   authPolicy?: McpServerAuthPolicy;
   credential?: McpServerCredential | null;
   defaultServerLabel: string;
-  deferLoadingDefault?: boolean | null;
+  /**
+   * Provider-side deferred loading of tool definitions where supported.
+   */
+  deferLoading?: boolean | null;
   description?: string | null;
   displayName?: string | null;
   execution?: RemoteMcpExecution & string;
@@ -7724,11 +7601,6 @@ export interface SessionStartParams {
    */
   deleteAfterCloseMs?: number | null;
   displayName?: string | null;
-  /**
-   * Optional creation-time override for the selected profile's environment
-   * intent. Omit to use the profile's intent unchanged.
-   */
-  environment?: SessionEnvironmentOverride | null;
   /**
    * Descriptive key/value metadata, applied only when the session is
    * first created: at most 32 entries, keys 1..=64 bytes, values 1..=256

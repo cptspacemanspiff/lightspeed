@@ -26,7 +26,7 @@ use crate::worker::mcp::{McpPrivateNetworkPolicy, NativeMcpInventoryResolver, Na
 use crate::{
     config::pg_store_from_env,
     credential_injection::EnvironmentCredentialResolver,
-    environment_gateway::EnvironmentGatewayClientConfig,
+    environments::gateway::EnvironmentGatewayClientConfig,
     subagents::{SubagentChildRuntime, SubagentService},
     worker::{BrokerSecretResolver, SessionTools, StoredProviderKeyResolver},
 };
@@ -66,7 +66,7 @@ pub struct ToolActivityDeps {
 
 #[derive(Clone)]
 pub struct RuntimeProjectionActivityDeps {
-    pub(super) environment_resolver: Option<crate::environment_resolver::EnvironmentResolver>,
+    pub(super) environment_resolver: Option<crate::environments::resolver::EnvironmentResolver>,
     pub(super) environment_gateway: Option<EnvironmentGatewayClientConfig>,
     pub(super) blobs: Arc<dyn BlobStore>,
     /// Records catalog-, report-, and projection-to-child edges.
@@ -118,6 +118,7 @@ pub struct ActivityState {
     llm: LlmActivityDeps,
     tools: ToolActivityDeps,
     runtime_projection: Option<RuntimeProjectionActivityDeps>,
+    pub(super) preparation_store: Option<Arc<PgStore>>,
     preprocess: PreprocessActivityDeps,
     environment_jobs: Option<EnvironmentJobActivityDeps>,
     workflow_tool_executions: Option<WorkflowToolExecutionDeps>,
@@ -149,6 +150,7 @@ impl ActivityState {
                 native_mcp: None,
             },
             runtime_projection: None,
+            preparation_store: None,
             preprocess: PreprocessActivityDeps {
                 blobs: blobs.clone(),
                 transcriber: Arc::new(UnavailableAudioTranscriber),
@@ -225,6 +227,7 @@ impl ActivityState {
         let workspace_store: Arc<dyn VfsWorkspaceStore> = store.clone();
         let profile_store: Arc<dyn ::profiles::ProfileStore> = store.clone();
         let mut state = Self::new(sessions, blobs, llm, tools);
+        state.preparation_store = Some(store.clone());
         state.storage.blob_graph = Some(blob_graph.clone());
         state.tools.blob_graph = Some(blob_graph.clone());
         let mut state = state
@@ -232,7 +235,7 @@ impl ActivityState {
             .with_profile_store(profile_store);
         if let Some(projection) = state.runtime_projection.as_mut() {
             projection.environment_resolver = Some(
-                crate::environment_resolver::EnvironmentResolver::from_pg_store(store.clone()),
+                crate::environments::resolver::EnvironmentResolver::from_pg_store(store.clone()),
             );
         }
         state.environment_jobs = Some(EnvironmentJobActivityDeps {

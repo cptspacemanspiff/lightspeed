@@ -1,11 +1,10 @@
+import { useMcpToolDiscoverySource } from "@/lib/mcp/tool-discovery";
 import { useQuery } from "@tanstack/react-query";
 import {
   api,
-  type EnvironmentProviderBinding,
-  type EnvironmentTemplate,
+  type Environment,
   type ModelListResponse,
   type ProfileSummary,
-  type SecretsInventory,
 } from "@/api";
 import type {
   McpServerOption,
@@ -35,49 +34,19 @@ export function useSessionConfigEditorOptions(universeId: string, enabled = true
     queryFn: () => api<ProfileSummary[]>("GET", `/api/v1/universes/${universeId}/profiles`),
     enabled,
   });
-  const environmentProviders = useQuery({
-    queryKey: ["environment-provider-bindings", universeId],
-    queryFn: () =>
-      api<EnvironmentProviderBinding[]>(
-        "GET",
-        `/api/v1/universes/${universeId}/environment-provider-bindings`,
-      ),
+  const environments = useQuery({
+    queryKey: ["environments", universeId],
+    queryFn: () => api<Environment[]>("GET", `/api/v1/universes/${universeId}/environments`),
     enabled,
   });
-  const environmentTemplates = useQuery({
-    queryKey: ["environment-templates", universeId],
-    queryFn: () =>
-      api<EnvironmentTemplate[]>(
-        "GET",
-        `/api/v1/universes/${universeId}/environment-templates`,
-      ),
-    enabled,
-  });
-  const secrets = useQuery({
-    queryKey: ["secrets", universeId],
-    queryFn: () => api<SecretsInventory>("GET", `/api/v1/universes/${universeId}/secrets`),
-    enabled,
-  });
+  const mcpToolDiscovery = useMcpToolDiscoverySource(universeId);
   return {
-    secrets: secrets.data,
     mcpServers: servers.data,
     workspaces: workspaces.data,
     workspacesLoading: workspaces.isLoading,
     models: models.data?.models,
     profiles: profiles.data,
-    environmentProviders: environmentProviderOptions(environmentProviders.data ?? []),
-    environmentBindings: environmentProviders.data,
-    environmentTemplates: environmentTemplates.data,
+    environments: environments.data,
+    mcpToolDiscovery,
   };
-}
-
-export function environmentProviderOptions(bindings: EnvironmentProviderBinding[]) {
-  return [...new Map(
-    bindings
-      .filter((binding) => binding.status === "enabled")
-      .map((binding) => [binding.providerId, {
-        providerId: binding.providerId,
-        displayName: binding.metadata?.displayName,
-      }]),
-  ).values()].sort((left, right) => left.providerId.localeCompare(right.providerId));
 }

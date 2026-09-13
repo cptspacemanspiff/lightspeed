@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -8,10 +7,9 @@ use async_trait::async_trait;
 use engine::{
     ContextConfig, ContextEntryInput, ContextEntryKind, ContextMessageRole, CoreAgentCommand,
     CoreAgentEvent, ModelSelection, ProviderApiKind, RunConfig, RunStatus, SessionConfig,
-    SessionId, WorkspaceLink, WorkspaceLinkAccess, WorkspaceLinkTarget,
+    SessionId, WorkspaceAccess, WorkspaceAttachment, WorkspaceAttachmentTarget,
     storage::{BlobStore, CreateSession, InMemoryBlobStore, InMemorySessionStore, SessionStore},
 };
-use llm_clients::openai::responses::{Client, Config};
 use llm_runtime::{LlmAdapterRegistry, LlmRuntime, OpenAiResponsesLlmAdapter};
 use test_support::{DriveCommand, RunnerQuiescence, RunnerStores, SessionRunner};
 use tools::prompts::{PROMPT_INSTRUCTIONS_CONTEXT_KEY_PREFIX, active_prompt_instruction_entries};
@@ -23,6 +21,8 @@ use vfs::{
 
 mod support;
 
+use support::{env_or_dotenv_var, openai_responses_live_client as live_client};
+
 use support::retrying_openai_responses_client;
 
 const LIVE_PROMPT_MARKER: &str = "LIVE-PROMPT-AXIS-8642";
@@ -32,71 +32,6 @@ fn live_model() -> String {
         .or_else(|_| env_or_dotenv_var("OPENAI_RESPONSES_MODEL"))
         .or_else(|_| env_or_dotenv_var("OPENAI_LIVE_MODEL"))
         .unwrap_or_else(|_| "gpt-5.5".to_string())
-}
-
-fn live_client() -> Client {
-    let api_key = env_or_dotenv_var("OPENAI_API_KEY").expect(
-        "OPENAI_API_KEY must be set in env or root .env to run llm-runtime prompts live tests",
-    );
-    assert!(
-        !api_key.trim().is_empty(),
-        "OPENAI_API_KEY is set but empty"
-    );
-
-    let mut config = Config::new(api_key);
-    if let Ok(base_url) = env_or_dotenv_var("OPENAI_BASE_URL") {
-        config.base_url = base_url;
-    }
-    if let Ok(org_id) = env_or_dotenv_var("OPENAI_ORG_ID") {
-        config.organization = Some(org_id);
-    }
-    if let Ok(project) = env_or_dotenv_var("OPENAI_PROJECT_ID") {
-        config.project = Some(project);
-    }
-
-    Client::new(config).expect("OpenAI Responses client")
-}
-
-fn env_or_dotenv_var(name: &str) -> Result<String, std::env::VarError> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(env_error) => dotenv_var(name).ok_or(env_error),
-    }
-}
-
-fn dotenv_var(name: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(root_dotenv_path()).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line.split_once('=')?;
-        if key.trim() == name {
-            return Some(unquote_dotenv_value(value.trim()));
-        }
-    }
-    None
-}
-
-fn root_dotenv_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("repo root")
-        .join(".env")
-}
-
-fn unquote_dotenv_value(value: &str) -> String {
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-        {
-            return value[1..value.len() - 1].to_string();
-        }
-    }
-    value.to_string()
 }
 
 #[derive(Default)]
@@ -248,12 +183,12 @@ async fn openai_responses_live_uses_vfs_prompt_instructions() {
     })
     .await
     .expect("create workspace");
-    let workspace_links = vec![WorkspaceLink {
+    let workspace_attachments = vec![WorkspaceAttachment {
         path: "/workspace".to_owned(),
-        target: WorkspaceLinkTarget::Workspace {
+        target: WorkspaceAttachmentTarget::Workspace {
             workspace_id: workspace_id.to_string(),
         },
-        access: WorkspaceLinkAccess::ReadWrite,
+        access: WorkspaceAccess::Edit,
     }];
 
     let model = ModelSelection {
@@ -278,7 +213,7 @@ async fn openai_responses_live_uses_vfs_prompt_instructions() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
-                config: session_config(model, workspace_links),
+                config: session_config(model, workspace_attachments),
             },
             max_steps: None,
         })
@@ -357,7 +292,10 @@ async fn openai_responses_live_uses_vfs_prompt_instructions() {
     );
 }
 
-fn session_config(model: ModelSelection, workspace_links: Vec<WorkspaceLink>) -> SessionConfig {
+fn session_config(
+    model: ModelSelection,
+    workspace_attachments: Vec<WorkspaceAttachment>,
+) -> SessionConfig {
     SessionConfig {
         model,
         generation: engine::GenerationConfig {
@@ -371,7 +309,7 @@ fn session_config(model: ModelSelection, workspace_links: Vec<WorkspaceLink>) ->
         context: ContextConfig { compaction: None },
         features: engine::FeaturesConfig {
             vfs: Some(engine::VfsFeature {
-                workspace_links,
+                workspaces: workspace_attachments,
                 prompts: Some(engine::VfsPromptsConfig::default()),
                 ..engine::VfsFeature::default()
             }),

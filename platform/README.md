@@ -37,6 +37,15 @@ for each model. Transcripts preserve each call's original `toolName` alongside
 its optional admitted `toolId`; the UI does not resolve historical names again.
 Demo tool fixtures record these identities explicitly as well.
 
+Session and profile editors configure workspace and environment attachments
+with access per resource. Environment rows also carry a default selection and
+working directory; saved profiles can inherit a parent environment for
+sub-agents. MCP server allowances and session subsets share a searchable
+tool picker with live descriptions and connection errors. Session subsets
+can only narrow the server's allowance. Session activation controls offer attached environments
+and remain separate from profile defaults. Session creation uses the default
+environment attachment in the effective config, without a separate override.
+
 Context views and run outputs share a content descriptor. Assistant messages,
 reasoning, and audio transcripts can reference JSON; API views include their
 full projected text. Detailed run reads include `output` and `outputText` even

@@ -5,9 +5,8 @@
 use std::sync::Arc;
 
 use environments::{
-    EnvironmentAccessPolicy, EnvironmentId, EnvironmentProviderStore, EnvironmentRecord,
-    EnvironmentRegistryError, EnvironmentSource, EnvironmentStatus, EnvironmentStore,
-    ListEnvironments, PowerState, SetEnvironmentPower,
+    EnvironmentId, EnvironmentProviderStore, EnvironmentRecord, EnvironmentRegistryError,
+    EnvironmentSource, EnvironmentStatus, EnvironmentStore, PowerState, SetEnvironmentPower,
 };
 use store_pg::PgStore;
 use thiserror::Error;
@@ -16,7 +15,7 @@ use thiserror::Error;
 pub(crate) struct EnvironmentResolver {
     environments: Arc<dyn EnvironmentStore>,
     providers: Arc<dyn EnvironmentProviderStore>,
-    gateway: Option<crate::environment_gateway::EnvironmentGatewayClientConfig>,
+    gateway: Option<crate::environments::gateway::EnvironmentGatewayClientConfig>,
     universe_id: uuid::Uuid,
 }
 
@@ -45,79 +44,59 @@ impl EnvironmentResolver {
 
     pub(crate) fn with_gateway(
         mut self,
-        gateway: crate::environment_gateway::EnvironmentGatewayClientConfig,
+        gateway: crate::environments::gateway::EnvironmentGatewayClientConfig,
     ) -> Self {
         self.gateway = Some(gateway);
         self
     }
 
-    pub(crate) async fn list_allowed(
-        &self,
-        policy: &EnvironmentAccessPolicy,
-    ) -> Result<Vec<EnvironmentRecord>, EnvironmentResolveError> {
-        let mut environments = self
-            .environments
-            .list_environments(ListEnvironments::default())
-            .await?;
-        environments.retain(|environment| policy.allows(environment));
-        Ok(environments)
-    }
-
-    pub(crate) async fn read_allowed(
+    /// The registry record. Whether a session may use the environment is a
+    /// membership check against its attachment list, made by the caller.
+    pub(crate) async fn read(
         &self,
         environment_id: &EnvironmentId,
-        policy: &EnvironmentAccessPolicy,
     ) -> Result<EnvironmentRecord, EnvironmentResolveError> {
-        let environment = self.environments.read_environment(environment_id).await?;
-        if !policy.allows(&environment) {
-            return Err(EnvironmentResolveError::NotAllowed {
-                environment_id: environment.environment_id.to_string(),
-                reason: policy.refusal(&environment),
-            });
-        }
-        Ok(environment)
+        Ok(self.environments.read_environment(environment_id).await?)
     }
 
-    /// Activation admission: like [`Self::selectable`], but a
-    /// `provisioning`/`booting` environment is admitted as valid intent and
-    /// returned with `ready == false` instead of failing. Environment tools
-    /// wait for readiness at call time.
-    pub(crate) async fn activatable(
-        &self,
-        environment_id: &EnvironmentId,
-        policy: &EnvironmentAccessPolicy,
-        now_ms: i64,
-    ) -> Result<(EnvironmentRecord, bool), EnvironmentResolveError> {
-        match self.selectable(environment_id, policy, now_ms).await {
-            Ok(environment) => Ok((environment, true)),
-            Err(EnvironmentResolveError::NotReady { .. }) => {
-                Ok((self.read_allowed(environment_id, policy).await?, false))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Status-aware selection admission. `provisioning`/`booting`
-    /// environments are admitted as intent without a route probe (they cannot
-    /// be reachable yet) and reported as `NotReady`; `failed`, `closing`, and
-    /// `closed` are rejected with typed errors; a powered-down provisioned
-    /// environment whose provider supports power control is woken (desired
-    /// power set to `running`) and reported as `NotReady`; everything
-    /// else must prove the full data-plane route.
+    /// Validate selection using registry state only. Selecting or reselecting
+    /// an environment never changes power or proves data-plane reachability.
     pub(crate) async fn selectable(
         &self,
         environment_id: &EnvironmentId,
-        policy: &EnvironmentAccessPolicy,
+    ) -> Result<EnvironmentRecord, EnvironmentResolveError> {
+        let environment = self.read(environment_id).await?;
+        match environment.status {
+            EnvironmentStatus::Failed => Err(EnvironmentResolveError::Failed {
+                environment_id: environment.environment_id.to_string(),
+                message: environment
+                    .metadata
+                    .get(LIFECYCLE_ERROR_METADATA_KEY)
+                    .cloned()
+                    .unwrap_or_else(|| "environment provisioning failed".to_owned()),
+            }),
+            EnvironmentStatus::Closing | EnvironmentStatus::Closed => {
+                Err(EnvironmentResolveError::Closed {
+                    environment_id: environment.environment_id.to_string(),
+                })
+            }
+            _ => Ok(environment),
+        }
+    }
+
+    /// Check readiness for actual use, requesting wake-up where supported and
+    /// probing the data route. Selection itself uses only registry validation.
+    pub(crate) async fn ready_for_use(
+        &self,
+        environment_id: &EnvironmentId,
         now_ms: i64,
     ) -> Result<EnvironmentRecord, EnvironmentResolveError> {
-        let environment = self
-            .resolve_for_connection(environment_id, policy, now_ms)
-            .await?;
+        let environment = self.resolve_for_connection(environment_id, now_ms).await?;
         if let Some(gateway) = &self.gateway {
             let connection = gateway.connection_for(self.universe_id, &environment);
             if let Ok(mut client) = environment_client::EnvironmentDataClient::connect(
                 &connection.endpoint,
-                gateway.connect_options("lightspeed-environment-selection"),
+                gateway.connect_options("lightspeed-environment-readiness"),
             )
             .await
             {
@@ -132,15 +111,14 @@ impl EnvironmentResolver {
     }
 
     /// Validate lifecycle and policy immediately before opening a real
-    /// data-plane connection. Unlike [`Self::selectable`], this does not open
+    /// data-plane connection. Unlike [`Self::ready_for_use`], this does not open
     /// a second connection merely to prove reachability.
     pub(crate) async fn resolve_for_connection(
         &self,
         environment_id: &EnvironmentId,
-        policy: &EnvironmentAccessPolicy,
         now_ms: i64,
     ) -> Result<EnvironmentRecord, EnvironmentResolveError> {
-        let environment = self.read_allowed(environment_id, policy).await?;
+        let environment = self.selectable(environment_id).await?;
         if let Some(provider_id) = environment.provider_id() {
             self.providers.read_provider(provider_id).await?;
         }
@@ -170,21 +148,6 @@ impl EnvironmentResolver {
                     status: environment.status,
                 });
             }
-            EnvironmentStatus::Failed => {
-                return Err(EnvironmentResolveError::Failed {
-                    environment_id: environment.environment_id.as_str().to_owned(),
-                    message: environment
-                        .metadata
-                        .get(LIFECYCLE_ERROR_METADATA_KEY)
-                        .cloned()
-                        .unwrap_or_else(|| "environment provisioning failed".to_owned()),
-                });
-            }
-            EnvironmentStatus::Closing | EnvironmentStatus::Closed => {
-                return Err(EnvironmentResolveError::Closed {
-                    environment_id: environment.environment_id.as_str().to_owned(),
-                });
-            }
             EnvironmentStatus::Ready if environment.desired_power != PowerState::Running => {
                 // Use cancels a pending power-down: the idle reaper has asked
                 // for a lower power state but the reconciler has not converged
@@ -202,11 +165,7 @@ impl EnvironmentResolver {
                     .await
                     .map_err(EnvironmentResolveError::from);
             }
-            EnvironmentStatus::Ready
-            | EnvironmentStatus::Paused
-            | EnvironmentStatus::Suspended
-            | EnvironmentStatus::Offline
-            | EnvironmentStatus::Unknown => {}
+            _ => {}
         }
         Ok(environment)
     }
@@ -216,12 +175,6 @@ impl EnvironmentResolver {
 pub(crate) enum EnvironmentResolveError {
     #[error(transparent)]
     Store(#[from] EnvironmentRegistryError),
-
-    #[error("environment {environment_id} is not allowed by session config: {reason}")]
-    NotAllowed {
-        environment_id: String,
-        reason: String,
-    },
 
     #[error("environment is unavailable: {environment_id} ({status})")]
     EnvironmentUnavailable {
@@ -317,7 +270,7 @@ mod tests {
                 template_id: EnvironmentTemplateId::new("test-template"),
                 display_name: None,
                 metadata: BTreeMap::new(),
-                origin_session: None,
+
                 idle_policy: None,
                 created_at_ms: 10,
             })
@@ -340,7 +293,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn environment_skills_idle_discovery_reuses_observations_and_never_wakes() {
+    async fn environment_discovery_shares_connection_preserves_freshness_and_never_wakes() {
         use engine::{
             CoreAgentCommand,
             storage::{BlobStore, InMemoryBlobStore},
@@ -357,99 +310,142 @@ mod tests {
         let skill_path = root.join(".agents/skills/review/SKILL.md");
         std::fs::write(&skill_path, doc).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let gateway = crate::environment_gateway::EnvironmentGatewayClientConfig::new(
+        let gateway = crate::environments::gateway::EnvironmentGatewayClientConfig::new(
             format!("http://{}", listener.local_addr().unwrap()),
             "test",
         );
+        let connections = Arc::new(AtomicUsize::new(0));
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let metadata_reads = Arc::new(AtomicUsize::new(0));
+        let stall_skills = Arc::new(AtomicBool::new(false));
         let scans = Arc::new(AtomicUsize::new(0));
         let unchanged = Arc::new(AtomicUsize::new(0));
         let supported = Arc::new(AtomicBool::new(true));
         let stall = Arc::new(AtomicBool::new(false));
         let task = {
+            let connections = connections.clone();
+            let initializations = initializations.clone();
+            let metadata_reads = metadata_reads.clone();
+            let stall_skills = stall_skills.clone();
             let scans = scans.clone();
             let unchanged = unchanged.clone();
             let supported = supported.clone();
             let stall = stall.clone();
             let root = root.clone();
             tokio::spawn(async move {
+                let mut clients = tokio::task::JoinSet::new();
                 loop {
                     let (socket, _) = listener.accept().await.unwrap();
-                    let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-                    while let Some(Ok(message)) = socket.next().await {
-                        let Ok(text) = message.to_text() else {
-                            continue;
-                        };
-                        let Ok(request) = serde_json::from_str::<serde_json::Value>(text) else {
-                            continue;
-                        };
-                        let Some(id) = request.get("id") else {
-                            continue;
-                        };
-                        if stall.load(Ordering::SeqCst) {
-                            std::future::pending::<()>().await;
-                        }
-                        let result = match request["method"].as_str().unwrap() {
-                            "initialize" => {
-                                serde_json::json!({ "protocolVersion": environment_protocol::shared::CURRENT_PROTOCOL_VERSION, "connectionId": "test", "capabilities": {"filesystemRead": true, "filesystemScan": supported.load(Ordering::SeqCst)}, "defaultCwd": root, "homeDirectory": root, "implementation": {"name": "test", "version": "1"} })
-                            }
-                            "fs/getMetadata" => {
-                                let fs = environment_daemon::filesystem::LocalFileSystem::new(
-                                    root.clone(),
-                                    root.clone(),
-                                    false,
-                                );
-                                serde_json::to_value(
-                                    fs.get_metadata(
-                                        serde_json::from_value(request["params"].clone()).unwrap(),
-                                    )
-                                    .await
-                                    .unwrap(),
-                                )
-                                .unwrap()
-                            }
-                            "fs/scan" => {
-                                scans.fetch_add(1, Ordering::SeqCst);
-                                let fs = environment_daemon::filesystem::LocalFileSystem::new(
-                                    root.clone(),
-                                    root.clone(),
-                                    false,
-                                );
-                                let result = fs
-                                    .scan(
-                                        serde_json::from_value(request["params"].clone()).unwrap(),
-                                    )
-                                    .await
-                                    .unwrap();
-                                if result.unchanged {
-                                    unchanged.fetch_add(1, Ordering::SeqCst);
-                                }
-                                serde_json::to_value(result).unwrap()
-                            }
-                            other => panic!("unexpected discovery RPC: {other}"),
-                        };
-                        if socket
-                            .send(tokio_tungstenite::tungstenite::Message::Text(
-                                serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    while let Some(result) = clients.try_join_next() {
+                        result.unwrap();
                     }
+                    let initializations = initializations.clone();
+                    let metadata_reads = metadata_reads.clone();
+                    let stall_skills = stall_skills.clone();
+                    let scans = scans.clone();
+                    let unchanged = unchanged.clone();
+                    let supported = supported.clone();
+                    let stall = stall.clone();
+                    let root = root.clone();
+                    clients.spawn(async move {
+                        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                        while let Some(Ok(message)) = socket.next().await {
+                            let Ok(text) = message.to_text() else {
+                                continue;
+                            };
+                            let Ok(request) = serde_json::from_str::<serde_json::Value>(text) else {
+                                continue;
+                            };
+                            let Some(id) = request.get("id") else {
+                                continue;
+                            };
+                            if stall.load(Ordering::SeqCst) {
+                                std::future::pending::<()>().await;
+                            }
+                            let result = match request["method"].as_str().unwrap() {
+                                "initialize" => {
+                                    initializations.fetch_add(1, Ordering::SeqCst);
+                                    serde_json::json!({ "protocolVersion": environment_protocol::shared::CURRENT_PROTOCOL_VERSION, "connectionId": "test", "capabilities": {"filesystemRead": true, "filesystemScan": supported.load(Ordering::SeqCst)}, "defaultCwd": root, "homeDirectory": root, "implementation": {"name": "test", "version": "1"} })
+                                }
+                                "fs/getMetadata" => {
+                                    metadata_reads.fetch_add(1, Ordering::SeqCst);
+                                    let fs = environment_daemon::filesystem::LocalFileSystem::new(
+                                        root.clone(),
+                                        root.clone(),
+                                        false,
+                                    );
+                                    serde_json::to_value(
+                                        fs.get_metadata(
+                                            serde_json::from_value(request["params"].clone()).unwrap(),
+                                        )
+                                        .await
+                                        .unwrap(),
+                                    )
+                                    .unwrap()
+                                }
+                                "fs/scan" => {
+                                    scans.fetch_add(1, Ordering::SeqCst);
+                                    if stall_skills.load(Ordering::SeqCst)
+                                        && request["params"]["includePatterns"].as_array().unwrap().iter().any(|p| p == "SKILL.md") {
+                                        std::future::pending::<()>().await;
+                                    }
+                                    let fs = environment_daemon::filesystem::LocalFileSystem::new(
+                                        root.clone(),
+                                        root.clone(),
+                                        false,
+                                    );
+                                    let result = fs
+                                        .scan(
+                                            serde_json::from_value(request["params"].clone()).unwrap(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                    if result.unchanged {
+                                        unchanged.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    serde_json::to_value(result).unwrap()
+                                }
+                                other => panic!("unexpected discovery RPC: {other}"),
+                            };
+                            if socket
+                                .send(tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result})
+                                        .to_string()
+                                        .into(),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
                 }
             })
+        };
+        let counts = || {
+            (
+                connections.load(Ordering::SeqCst),
+                initializations.load(Ordering::SeqCst),
+                metadata_reads.load(Ordering::SeqCst),
+                scans.load(Ordering::SeqCst),
+            )
         };
         let blobs = InMemoryBlobStore::new();
         let session_id = engine::SessionId::new(uuid::Uuid::new_v4().to_string());
         let feature = engine::EnvironmentsFeature {
             skills: Some(Default::default()),
+            environments: vec![engine::EnvironmentAttachment {
+                environment_id: environment_id.as_str().to_owned(),
+                default: false,
+                access: engine::EnvironmentAccess::Read,
+                working_directory: None,
+            }],
             ..Default::default()
         };
-        let refresh = |current| {
-            crate::environment_skills::refresh(
+        let refresh = async |current| {
+            crate::environments::sources::refresh(
                 &blobs,
                 Some(&resolver),
                 Some(&gateway),
@@ -458,6 +454,8 @@ mod tests {
                 Some(&environment_id),
                 current,
             )
+            .await
+            .map(|publication| publication.skill_command)
         };
         let entry = |command| match command {
             Some(CoreAgentCommand::UpsertContext { entry, .. }) => entry,
@@ -505,6 +503,114 @@ mod tests {
         std::fs::write(&skill_path, doc.replace("Review code.", "Review changes.")).unwrap();
         let edited = entry(refresh(Some(&available)).await.unwrap());
         assert_ne!(edited.content, available.content);
+        // Both sources share setup, but retain their own scans and observe every edit.
+        let mut both = feature.clone();
+        both.prompts = Some(Default::default());
+        std::fs::create_dir_all(root.join(".agents/prompts")).unwrap();
+        let prompt_path = root.join(".agents/prompts/instructions.md");
+        let prompt_key = engine::ContextEntryKey::new(
+            tools::prompts::environment::ENVIRONMENT_PROMPT_CONTEXT_KEY,
+        );
+        let refresh_sources = async |config, current| {
+            crate::environments::sources::refresh(
+                &blobs,
+                Some(&resolver),
+                Some(&gateway),
+                &session_id,
+                Some(config),
+                Some(&environment_id),
+                current,
+            )
+            .await
+            .unwrap()
+        };
+        for text in ["First instructions", "Updated instructions"] {
+            std::fs::write(&prompt_path, text).unwrap();
+            let before = counts();
+            let result = refresh_sources(&both, Some(&edited)).await;
+            assert!(result.skill_command.is_none());
+            assert_eq!(
+                counts(),
+                (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 2)
+            );
+            assert_eq!(
+                blobs
+                    .read_bytes(&result.prompt_entries[&prompt_key].content.content_ref)
+                    .await
+                    .unwrap(),
+                text.as_bytes()
+            );
+        }
+        let before = counts();
+        let prompts_only = engine::EnvironmentsFeature {
+            prompts: Some(Default::default()),
+            environments: feature.environments.clone(),
+            ..Default::default()
+        };
+        let result = refresh_sources(&prompts_only, None).await;
+        assert!(result.skill_command.is_none());
+        assert!(result.prompt_entries.contains_key(&prompt_key));
+        assert_eq!(
+            counts(),
+            (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 1)
+        );
+
+        let before = counts();
+        let disabled_feature = engine::EnvironmentsFeature::default();
+        let disabled = refresh_sources(&disabled_feature, None).await;
+        assert!(disabled.skill_command.is_none());
+        assert!(disabled.prompt_entries.is_empty());
+        let mut controller_owned = edited.clone();
+        controller_owned.origin = Some("controller".into());
+        assert!(
+            refresh_sources(&feature, Some(&controller_owned))
+                .await
+                .skill_command
+                .is_none()
+        );
+        assert_eq!(
+            counts(),
+            before,
+            "disabled and controller-owned sources need no connection"
+        );
+        let result = refresh_sources(&both, Some(&controller_owned)).await;
+        assert!(result.skill_command.is_none());
+        assert!(result.prompt_entries.contains_key(&prompt_key));
+        assert_eq!(
+            counts(),
+            (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 1)
+        );
+
+        // A timed-out skill RPC must not poison the prompt scan with an unread response.
+        stall_skills.store(true, Ordering::SeqCst);
+        let before = counts();
+        let result = refresh_sources(&both, Some(&edited)).await;
+        let failed_skills = entry(result.skill_command);
+        let failed_catalog: EnvironmentSkillCatalog = serde_json::from_slice(
+            &blobs
+                .read_bytes(failed_skills.provenance_ref.as_ref().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            failed_catalog.availability,
+            EnvironmentSkillAvailability::Unavailable
+        );
+        assert!(failed_catalog.skills.is_empty());
+        assert_eq!(
+            blobs
+                .read_bytes(&result.prompt_entries[&prompt_key].content.content_ref)
+                .await
+                .unwrap(),
+            b"Updated instructions"
+        );
+        assert_eq!(
+            counts(),
+            (before.0 + 2, before.1 + 2, before.2 + 2, before.3 + 2)
+        );
+        stall_skills.store(false, Ordering::SeqCst);
+
         // An incomplete scan reports unavailable and removes obsolete catalog paths.
         std::fs::write(&skill_path, vec![b'x'; 65537]).unwrap();
         let stale = entry(refresh(Some(&edited)).await.unwrap());
@@ -521,6 +627,44 @@ mod tests {
         );
         assert!(catalog.skills.is_empty());
         assert!(refresh(Some(&stale)).await.unwrap().is_none());
+        let result = refresh_sources(&both, Some(&edited)).await;
+        assert!(result.skill_command.is_some());
+        assert_eq!(
+            blobs
+                .read_bytes(&result.prompt_entries[&prompt_key].content.content_ref)
+                .await
+                .unwrap(),
+            b"Updated instructions"
+        );
+        std::fs::write(&skill_path, doc).unwrap();
+        std::fs::write(&prompt_path, vec![b'x'; 65537]).unwrap();
+        let result = refresh_sources(&both, Some(&stale)).await;
+        let recovered = entry(result.skill_command);
+        let recovered_catalog: EnvironmentSkillCatalog = serde_json::from_slice(
+            &blobs
+                .read_bytes(recovered.provenance_ref.as_ref().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_catalog.availability,
+            EnvironmentSkillAvailability::Available
+        );
+        let prompt_report: tools::prompts::environment::EnvironmentPromptReport =
+            serde_json::from_slice(
+                &blobs
+                    .read_bytes(
+                        result.prompt_entries[&prompt_key]
+                            .provenance_ref
+                            .as_ref()
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(!prompt_report.available);
         // Missing fs/scan is explicit unavailable discovery, with no RPC fallback.
         supported.store(false, Ordering::SeqCst);
         let before = scans.load(Ordering::SeqCst);
@@ -543,7 +687,7 @@ mod tests {
             EnvironmentSkillAvailability::Available
         );
         // Deselection removes only this catalog key.
-        let cleared = crate::environment_skills::refresh(
+        let cleared = crate::environments::sources::refresh(
             &blobs,
             Some(&resolver),
             Some(&gateway),
@@ -555,12 +699,12 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(cleared, Some(CoreAgentCommand::RemoveContext { key, .. }) if key.as_str() == "runtime.catalog.skills.environment")
+            matches!(cleared.skill_command, Some(CoreAgentCommand::RemoveContext { key, .. }) if key.as_str() == "runtime.catalog.skills.environment")
         );
         let mut denied = feature.clone();
-        denied.providers = Some(vec!["not-granted".into()]);
+        denied.environments.clear();
         let denied_entry = entry(
-            crate::environment_skills::refresh(
+            crate::environments::sources::refresh(
                 &blobs,
                 Some(&resolver),
                 Some(&gateway),
@@ -570,7 +714,8 @@ mod tests {
                 Some(&available),
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .skill_command,
         );
         let denied_catalog: EnvironmentSkillCatalog = serde_json::from_slice(
             &blobs
@@ -609,42 +754,101 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn provider_filter_applies_to_list_read_and_selection() {
-        let (resolver, environment_id) = resolver().await;
-        let denied =
-            EnvironmentAccessPolicy::new(Some(vec!["other".to_owned()]), None::<Vec<String>>);
-        assert!(resolver.list_allowed(&denied).await.unwrap().is_empty());
-        assert!(matches!(
-            resolver.read_allowed(&environment_id, &denied).await,
-            Err(EnvironmentResolveError::NotAllowed { .. })
-        ));
-        assert!(matches!(
-            resolver.selectable(&environment_id, &denied, 20).await,
-            Err(EnvironmentResolveError::NotAllowed { .. })
-        ));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn offline_environment_without_gateway_is_unavailable_but_readable() {
         let (resolver, environment_id) = resolver().await;
+        assert!(resolver.read(&environment_id).await.is_ok());
         assert!(
             resolver
-                .read_allowed(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL)
-                .await
-                .is_ok()
-        );
-        assert!(
-            resolver
-                .resolve_for_connection(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 111)
+                .resolve_for_connection(&environment_id, 111)
                 .await
                 .is_ok(),
             "execution resolution should defer reachability to the real connection"
         );
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 111)
-                .await,
+            resolver.ready_for_use(&environment_id, 111).await,
             Err(EnvironmentResolveError::EnvironmentUnavailable { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn selection_preserves_power_and_needs_no_gateway_in_any_nonterminal_state() {
+        let (resolver, environment_id) = resolver().await;
+        let store = resolver.environments.clone();
+        store
+            .set_environment_power(SetEnvironmentPower {
+                environment_id: environment_id.clone(),
+                desired_power: PowerState::Paused,
+                updated_at_ms: 20,
+            })
+            .await
+            .unwrap();
+        for status in [
+            EnvironmentStatus::Provisioning,
+            EnvironmentStatus::Booting,
+            EnvironmentStatus::Ready,
+            EnvironmentStatus::Paused,
+            EnvironmentStatus::Suspended,
+            EnvironmentStatus::Offline,
+            EnvironmentStatus::Unknown,
+        ] {
+            store
+                .observe_provisioned_environment(ObserveProvisionedEnvironment {
+                    environment_id: environment_id.clone(),
+                    provider_target_id: ProviderTargetId::new("target-1"),
+                    status,
+                    power_states: vec![PowerState::Running, PowerState::Paused],
+                    observed_at_ms: 30,
+                })
+                .await
+                .unwrap();
+            let before = store.read_environment(&environment_id).await.unwrap();
+            for _ in 0..2 {
+                let selected = resolver
+                    .selectable(&environment_id)
+                    .await
+                    .expect("selection requires only valid registry state");
+                assert_eq!(selected, before);
+                assert_eq!(
+                    store.read_environment(&environment_id).await.unwrap(),
+                    before
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reselection_checks_terminal_status() {
+        let (resolver, environment_id) = resolver().await;
+        let store = resolver.environments.clone();
+        resolver.selectable(&environment_id).await.unwrap();
+        assert!(matches!(
+            resolver.selectable(&EnvironmentId::new("missing")).await,
+            Err(EnvironmentResolveError::Store(
+                EnvironmentRegistryError::NotFound { .. }
+            ))
+        ));
+        store
+            .fail_environment_lifecycle(environments::FailEnvironmentLifecycle {
+                environment_id: environment_id.clone(),
+                message: "no capacity".into(),
+                observed_at_ms: 40,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolver.selectable(&environment_id).await,
+            Err(EnvironmentResolveError::Failed { .. })
+        ));
+        store
+            .begin_close_environment(environments::BeginCloseEnvironment {
+                environment_id: environment_id.clone(),
+                updated_at_ms: 50,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolver.selectable(&environment_id).await,
+            Err(EnvironmentResolveError::Closed { .. })
         ));
     }
 
@@ -673,7 +877,7 @@ mod tests {
             .expect("pause intent");
 
         let resolved = resolver
-            .resolve_for_connection(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 30)
+            .resolve_for_connection(&environment_id, 30)
             .await
             .expect("a ready environment resolves for use");
         assert_eq!(resolved.status, EnvironmentStatus::Ready);
@@ -715,12 +919,10 @@ mod tests {
             .expect("pause intent");
         observe(EnvironmentStatus::Paused, 22).await;
 
-        // Selecting a paused environment requests a wake and reports it as
+        // Using a paused environment requests a wake and reports it as
         // not ready instead of probing an unreachable daemon.
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 30)
-                .await,
+            resolver.ready_for_use(&environment_id, 30).await,
             Err(EnvironmentResolveError::NotReady {
                 status: EnvironmentStatus::Paused,
                 ..
@@ -730,20 +932,17 @@ mod tests {
         assert_eq!(woken.desired_power, PowerState::Running);
         assert!(woken.power_diverges());
         // Activation admits it as intent.
-        let (record, ready) = resolver
-            .activatable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 31)
+        let record = resolver
+            .selectable(&environment_id)
             .await
             .expect("activation admits a paused environment");
-        assert!(!ready);
         assert_eq!(record.status, EnvironmentStatus::Paused);
 
         // Once the provider observed it running again the ordinary probe
         // path applies (no gateway here → unavailable, not NotReady).
         observe(EnvironmentStatus::Ready, 40).await;
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 50)
-                .await,
+            resolver.ready_for_use(&environment_id, 50).await,
             Err(EnvironmentResolveError::EnvironmentUnavailable { .. })
         ));
 
@@ -760,9 +959,7 @@ mod tests {
             .await
             .expect("observe offline without power control");
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 70)
-                .await,
+            resolver.ready_for_use(&environment_id, 70).await,
             Err(EnvironmentResolveError::EnvironmentUnavailable { .. })
         ));
         assert_eq!(
@@ -776,7 +973,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn selection_is_status_aware() {
+    async fn readiness_is_status_aware() {
         let (resolver, environment_id) = resolver().await;
         let store = resolver.environments.clone();
         let observe = |status: EnvironmentStatus| {
@@ -800,9 +997,7 @@ mod tests {
         // probe and reported as not ready.
         observe(EnvironmentStatus::Provisioning).await;
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 30)
-                .await,
+            resolver.ready_for_use(&environment_id, 30).await,
             Err(EnvironmentResolveError::NotReady {
                 status: EnvironmentStatus::Provisioning,
                 ..
@@ -810,19 +1005,16 @@ mod tests {
         ));
         observe(EnvironmentStatus::Booting).await;
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 30)
-                .await,
+            resolver.ready_for_use(&environment_id, 30).await,
             Err(EnvironmentResolveError::NotReady {
                 status: EnvironmentStatus::Booting,
                 ..
             })
         ));
-        let (record, ready) = resolver
-            .activatable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 30)
+        let record = resolver
+            .selectable(&environment_id)
             .await
             .expect("activation admits a booting environment");
-        assert!(!ready);
         assert_eq!(record.status, EnvironmentStatus::Booting);
 
         store
@@ -834,7 +1026,7 @@ mod tests {
             .await
             .expect("fail");
         assert!(matches!(
-            resolver.selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 50).await,
+            resolver.ready_for_use(&environment_id, 50).await,
             Err(EnvironmentResolveError::Failed { message, .. }) if message == "no capacity"
         ));
 
@@ -846,9 +1038,7 @@ mod tests {
             .await
             .expect("close");
         assert!(matches!(
-            resolver
-                .selectable(&environment_id, &EnvironmentAccessPolicy::ALLOW_ALL, 70)
-                .await,
+            resolver.ready_for_use(&environment_id, 70).await,
             Err(EnvironmentResolveError::Closed { .. })
         ));
     }

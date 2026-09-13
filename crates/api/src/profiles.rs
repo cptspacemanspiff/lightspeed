@@ -175,18 +175,12 @@ pub struct AgentProfileSummary {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<SessionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<ProfileInstructions>,
-    /// How the session obtains its active environment when this profile is
-    /// applied: activate an existing universe environment, or provision a
-    /// fresh one for this session. Absence leaves the session's current
-    /// active environment unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<ProfileEnvironment>,
     /// Descriptive metadata defaults copied to a session when it is created
     /// from this profile. Explicit `session/start` metadata wins key by key.
     /// Applying the profile to an existing session does not change metadata.
@@ -206,73 +200,6 @@ pub struct ProfileSessionRetention {
     /// Positive close-relative automatic-deletion duration.
     #[schemars(range(min = 1, max = 3153600000000_u64))]
     pub delete_after_close_ms: u64,
-}
-
-/// Environment intent carried by a profile document.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum ProfileEnvironment {
-    /// Activate an existing universe environment. The profile never closes
-    /// it.
-    Existing { environment_id: EnvironmentId },
-    /// Activate the delegating parent's active environment. Resolved at
-    /// sub-agent spawn, shared not copied, never closed by the
-    /// child; rejected on a session without a delegation origin or whose
-    /// parent has no active environment.
-    Inherit {},
-    /// Provision one environment for the session from the universe's enabled
-    /// binding for `providerId`, then activate it. The provision request id
-    /// is derived from the session id, so retries and repeated applies
-    /// converge on the same environment.
-    Provision {
-        provider_id: EnvironmentProviderId,
-        /// Immutable provider template-version identity.
-        template_id: EnvironmentTemplateId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, String>,
-        #[serde(default)]
-        retention: ProfileEnvironmentRetention,
-        /// Optional staged idle policy for the provisioned environment.
-        /// Stages the provider cannot realize are skipped.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        idle_policy: Option<EnvironmentIdlePolicyView>,
-        /// Credentials bound to the environment right after it is
-        /// provisioned before activation: references to universe
-        /// grants/providers/secrets, never values. They become ordinary
-        /// environment credential bindings; the profile is the initial set,
-        /// not a live sync. Not available for `existing` environments.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        credentials: Vec<ProfileEnvironmentCredential>,
-    },
-}
-
-/// One environment credential binding requested by a profile: the same shape
-/// as `environments/credentials/bind`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProfileEnvironmentCredential {
-    /// Environment variable name (`[A-Za-z_][A-Za-z0-9_]{0,127}`).
-    pub env_name: String,
-    pub source: EnvironmentCredentialSourceView,
-}
-
-/// What happens to a profile-provisioned environment when its originating
-/// session closes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum ProfileEnvironmentRetention {
-    /// Close the environment when the session that provisioned it closes.
-    #[default]
-    CloseWithSession,
-    /// Leave the environment open; the universe owns its cleanup.
-    Retain,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -396,7 +323,4 @@ pub struct ProfileApplySummary {
     pub config_changed: bool,
     pub instructions_changed: bool,
     pub active_environment_changed: bool,
-    /// True when this apply created a new environment for the session.
-    #[serde(default)]
-    pub environment_provisioned: bool,
 }

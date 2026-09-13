@@ -118,87 +118,9 @@ impl GatewayAgentApi {
             .map_err(map_blob_store_error)
     }
 
-    pub(super) async fn wait_for_open_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionView, AgentApiError> {
-        let started = Instant::now();
-        loop {
-            if started.elapsed() > self.operation_timeout {
-                return Err(AgentApiError::internal(format!(
-                    "timed out waiting for agent session to open: {session_id}"
-                )));
-            }
-            if let Some(status) = self.query_status_optional(session_id).await?
-                && let Some(error) = status.last_error
-            {
-                return Err(AgentApiError::internal(format!(
-                    "agent workflow reported error: {error}"
-                )));
-            }
-            match self.project_session_by_id(session_id).await {
-                Ok(session) if session.config.is_some() => return Ok(session),
-                Ok(_) => {}
-                Err(error) if is_not_found(&error) => {}
-                Err(error) => return Err(error),
-            }
-            tokio::time::sleep(self.poll_interval).await;
-        }
-    }
-
-    pub(super) async fn wait_for_config_revision(
-        &self,
-        session_id: &SessionId,
-        target_revision: u64,
-        baseline_failures: usize,
-    ) -> Result<SessionView, AgentApiError> {
-        let started = Instant::now();
-        loop {
-            if started.elapsed() > self.operation_timeout {
-                return Err(AgentApiError::internal(format!(
-                    "timed out waiting for agent session config update: {session_id}"
-                )));
-            }
-            if let Some(status) = self.query_status_optional(session_id).await? {
-                if status.admission_failures.len() > baseline_failures
-                    && let Some(failure) = status.admission_failures.last()
-                {
-                    return Err(map_admission_failure_to_api_error(failure));
-                }
-                if let Some(error) = status.last_error {
-                    return Err(AgentApiError::internal(format!(
-                        "agent workflow reported error: {error}"
-                    )));
-                }
-            }
-            let session = self.project_session_by_id(session_id).await?;
-            if session.config_revision >= target_revision {
-                return Ok(session);
-            }
-            tokio::time::sleep(self.poll_interval).await;
-        }
-    }
-
     /// Waits for exact context entries to commit; any per-entry admission
     /// failure is escalated to a call-level typed error. Built on the same
     /// wait loop as `session/context/append`.
-    pub(super) async fn wait_for_context_entries_applied(
-        &self,
-        session_id: &SessionId,
-        expected: &[(ContextEntryKey, ContextEntryInput)],
-        correlations: &BTreeMap<String, ContextEntryKey>,
-    ) -> Result<u64, AgentApiError> {
-        let (context_revision, outcomes) = self
-            .wait_for_context_append_outcomes(session_id, expected, correlations)
-            .await?;
-        for outcome in outcomes.values() {
-            if let ContextAppendWaitOutcome::Failed { failure } = outcome {
-                return Err(map_admission_failure_to_api_error(failure));
-            }
-        }
-        Ok(context_revision)
-    }
-
     pub(super) async fn wait_for_context_append_outcomes(
         &self,
         session_id: &SessionId,

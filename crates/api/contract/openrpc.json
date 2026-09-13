@@ -2407,17 +2407,6 @@
               "null"
             ]
           },
-          "environment": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileEnvironment"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How the session obtains its active environment when this profile is\napplied: activate an existing universe environment, or provision a\nfresh one for this session. Absence leaves the session's current\nactive environment unchanged."
-          },
           "instructions": {
             "anyOf": [
               {
@@ -2490,17 +2479,6 @@
               "string",
               "null"
             ]
-          },
-          "environment": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileEnvironment"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How the session obtains its active environment when this profile is\napplied: activate an existing universe environment, or provision a\nfresh one for this session. Absence leaves the session's current\nactive environment unchanged."
           },
           "instructions": {
             "anyOf": [
@@ -7758,6 +7736,49 @@
         ],
         "type": "object"
       },
+      "EnvironmentAccess": {
+        "description": "Per-attachment environment access, an ordered ladder: `edit` adds file\nediting to `read`, `exec` adds processes, `jobs` adds durable jobs.\nProcesses can write files regardless of the file-tool level, so\nread-only files with commands is deliberately not expressible.",
+        "enum": [
+          "read",
+          "edit",
+          "exec",
+          "jobs"
+        ],
+        "type": "string"
+      },
+      "EnvironmentAttachment": {
+        "additionalProperties": false,
+        "description": "One environment the session may use. Exactly one of `environmentId` and\n`inherit` identifies the machine. `inherit` is valid only in a profile\ndocument applied to a sub-agent: it resolves to the delegating parent's\nactive environment at spawn and is stored on the child as a concrete id.\nIf the parent's environment is also listed explicitly, the explicit\nattachment wins; if the parent has none, the inherit attachment is dropped.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/EnvironmentAccess"
+          },
+          "default": {
+            "description": "Activated when a profile is applied while the session has no active\nenvironment; creation is the trivial case. Never overrides a live\nselection and never applies on a plain `session/config/put`.",
+            "type": "boolean"
+          },
+          "environmentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inherit": {
+            "type": "boolean"
+          },
+          "workingDirectory": {
+            "description": "Absolute machine working directory for file tools, commands, jobs,\nand sources; absent uses the machine's advertised default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "access"
+        ],
+        "type": "object"
+      },
       "EnvironmentCloseParams": {
         "properties": {
           "environmentId": {
@@ -8449,13 +8470,6 @@
             "description": "Only environments carrying every listed metadata pair (AND\nsemantics); the same filter `session/list` accepts.",
             "type": "object"
           },
-          "originSessionId": {
-            "description": "Only environments a profile provisioned for this session.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "providerId": {
             "type": [
               "string",
@@ -8492,32 +8506,6 @@
             "type": "array"
           }
         },
-        "type": "object"
-      },
-      "EnvironmentOriginSessionView": {
-        "properties": {
-          "closeWithSession": {
-            "description": "When true, Lightspeed closes the environment once the session closes.",
-            "type": "boolean"
-          },
-          "profileId": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "sessionId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "sessionId",
-          "closeWithSession"
-        ],
         "type": "object"
       },
       "EnvironmentPowerPutParams": {
@@ -9109,14 +9097,6 @@
         ],
         "type": "object"
       },
-      "EnvironmentToolSurface": {
-        "description": "Agent-facing environment filesystem tools; independent of execution grants.",
-        "enum": [
-          "readOnly",
-          "edit"
-        ],
-        "type": "string"
-      },
       "EnvironmentView": {
         "properties": {
           "createdAtMs": {
@@ -9167,17 +9147,6 @@
             },
             "type": "object"
           },
-          "originSession": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/EnvironmentOriginSessionView"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Present when a profile provisioned this environment for a session.\nProvenance and an optional close trigger, not ownership: the\nenvironment remains an ordinary universe resource."
-          },
           "publicEndpoint": {
             "type": [
               "string",
@@ -9216,17 +9185,14 @@
       },
       "EnvironmentsFeature": {
         "additionalProperties": false,
-        "description": "Grants active session environments. Filesystem tools, commands, selection,\ndurable jobs, prompts, and skills are independent, default-off sub-grants.",
+        "description": "Grants session environments. The `environments` list is the allowed set:\nthe session can select, read, and run work only on a listed machine, each\nwith its own access grant and working directory. The installed tool\nsurface is the union of every attachment's grant; a call the active\nmachine's grant does not cover fails at execution, so switching machines\nnever changes the toolset. `{}` grants the feature with no reachable\nmachine.",
         "properties": {
-          "commands": {
-            "default": false,
-            "description": "Grants command execution and process continuation. Commands may modify\nfiles even when filesystem tools are read-only or disabled.",
-            "type": "boolean"
-          },
-          "jobs": {
-            "default": false,
-            "description": "Grants the advanced durable-job tool surface. The workflow binding is\ninstalled for the session when granted; invocations still require an\nactive, ready environment with matching job capabilities.",
-            "type": "boolean"
+          "environments": {
+            "description": "The environments this session may use; unique ids, at most one\ndefault, at most one `inherit` (profiles only).",
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentAttachment"
+            },
+            "type": "array"
           },
           "prompts": {
             "anyOf": [
@@ -9239,29 +9205,9 @@
             ],
             "description": "Independent environment prompt loading; absent disables sourced instructions."
           },
-          "providers": {
-            "description": "Absent means every registered provider is allowed.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "registrationKeys": {
-            "description": "Registration keys whose registered environments the session may\nlist and activate; absent means every key. Independent of\n`providers`: each list scopes its own environment source, and\nexternal environments pass only when neither list is set.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "selectionTools": {
+          "selection": {
             "default": false,
-            "description": "Exposes `environment_list`, `environment_activate`, and\n`environment_deactivate` to the model. `environment_read` is available\nwhenever environments are enabled, and external API/profile activation\nremains available when this is false.",
+            "description": "Exposes `environment_list`, `environment_activate`, and\n`environment_deactivate` over the attached environments.\n`environment_read` is available whenever environments are enabled, and\nexternal API/profile activation remains available when this is false.",
             "type": "boolean"
           },
           "skills": {
@@ -9275,29 +9221,11 @@
             ],
             "description": "Independent environment skill discovery. Absent disables discovery."
           },
-          "tools": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/EnvironmentToolSurface"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Filesystem tool surface. Absent installs no filesystem tools; sources\nremain independent. Read-only does not restrict commands or durable jobs."
-          },
           "version": {
             "default": 1,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
-          },
-          "workingDirectory": {
-            "description": "Absolute machine working directory for file tools, commands, jobs, and sources; absent uses the endpoint default.",
-            "type": [
-              "string",
-              "null"
-            ]
           }
         },
         "type": "object"
@@ -9602,17 +9530,6 @@
               "string",
               "null"
             ]
-          },
-          "environment": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileEnvironment"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How the session obtains its active environment when this profile is\napplied: activate an existing universe environment, or provision a\nfresh one for this session. Absence leaves the session's current\nactive environment unchanged."
           },
           "instructions": {
             "anyOf": [
@@ -9919,17 +9836,6 @@
               "null"
             ]
           },
-          "environment": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SessionEnvironmentOverride"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional creation-time override for the selected profile's environment\nintent. Omit to use the profile's intent unchanged."
-          },
           "metadata": {
             "additionalProperties": {
               "type": "string"
@@ -10033,11 +9939,12 @@
       },
       "McpFeature": {
         "additionalProperties": false,
-        "description": "Grants remote MCP tools by declaring linked servers from the universe MCP\ncatalog; must link at least one server, with unique server ids.",
+        "description": "Grants remote MCP tools by declaring attached servers from the universe MCP\ncatalog. Server ids must be unique; an empty list grants no MCP tools.",
         "properties": {
           "servers": {
+            "default": [],
             "items": {
-              "$ref": "#/components/schemas/McpServerLink"
+              "$ref": "#/components/schemas/McpServerAttachment"
             },
             "type": "array"
           },
@@ -10073,6 +9980,29 @@
         },
         "required": [
           "resource"
+        ],
+        "type": "object"
+      },
+      "McpServerAttachment": {
+        "additionalProperties": false,
+        "description": "A selected universe MCP server. Its catalog record owns connection,\nexecution, exposure, approval, and auth; the attachment may only narrow the\nrecord's tool allowlist for this session.",
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "tools": {
+            "description": "Non-empty subset of the record's allowed tools exposed to this\nsession, under both injection and search; absent exposes the record's\nfull allowlist.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "serverId"
         ],
         "type": "object"
       },
@@ -10273,13 +10203,14 @@
               "null"
             ]
           },
-          "approvalDefault": {
+          "approval": {
             "allOf": [
               {
                 "$ref": "#/components/schemas/RemoteMcpApprovalPolicy"
               }
             ],
-            "default": "never"
+            "default": "never",
+            "description": "Approval policy for every session linking this server."
           },
           "authPolicy": {
             "allOf": [
@@ -10304,7 +10235,8 @@
           "defaultServerLabel": {
             "type": "string"
           },
-          "deferLoadingDefault": {
+          "deferLoading": {
+            "description": "Provider-side deferred loading of tool definitions where supported.",
             "type": [
               "boolean",
               "null"
@@ -10357,19 +10289,6 @@
           "serverId",
           "serverUrl",
           "defaultServerLabel"
-        ],
-        "type": "object"
-      },
-      "McpServerLink": {
-        "additionalProperties": false,
-        "description": "A selected universe MCP server. Its catalog record owns all connection and\nbehavior configuration.",
-        "properties": {
-          "serverId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "serverId"
         ],
         "type": "object"
       },
@@ -10539,7 +10458,7 @@
               "null"
             ]
           },
-          "approvalDefault": {
+          "approval": {
             "$ref": "#/components/schemas/RemoteMcpApprovalPolicy"
           },
           "authPolicy": {
@@ -10562,7 +10481,7 @@
           "defaultServerLabel": {
             "type": "string"
           },
-          "deferLoadingDefault": {
+          "deferLoading": {
             "type": [
               "boolean",
               "null"
@@ -10611,7 +10530,7 @@
           "defaultServerLabel",
           "execution",
           "exposure",
-          "approvalDefault",
+          "approval",
           "allowPrivateNetwork",
           "authPolicy",
           "status",
@@ -12055,7 +11974,6 @@
             "default": {
               "activeEnvironmentChanged": false,
               "configChanged": false,
-              "environmentProvisioned": false,
               "instructionsChanged": false
             }
           },
@@ -12074,11 +11992,6 @@
             "type": "boolean"
           },
           "configChanged": {
-            "type": "boolean"
-          },
-          "environmentProvisioned": {
-            "default": false,
-            "description": "True when this apply created a new environment for the session.",
             "type": "boolean"
           },
           "instructionsChanged": {
@@ -12135,137 +12048,6 @@
           "profile"
         ],
         "type": "object"
-      },
-      "ProfileEnvironment": {
-        "description": "Environment intent carried by a profile document.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "description": "Activate an existing universe environment. The profile never closes\nit.",
-            "properties": {
-              "environmentId": {
-                "type": "string"
-              },
-              "type": {
-                "const": "existing",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "environmentId"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "description": "Activate the delegating parent's active environment. Resolved at\nsub-agent spawn, shared not copied, never closed by the\nchild; rejected on a session without a delegation origin or whose\nparent has no active environment.",
-            "properties": {
-              "type": {
-                "const": "inherit",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "description": "Provision one environment for the session from the universe's enabled\nbinding for `providerId`, then activate it. The provision request id\nis derived from the session id, so retries and repeated applies\nconverge on the same environment.",
-            "properties": {
-              "credentials": {
-                "description": "Credentials bound to the environment right after it is\nprovisioned before activation: references to universe\ngrants/providers/secrets, never values. They become ordinary\nenvironment credential bindings; the profile is the initial set,\nnot a live sync. Not available for `existing` environments.",
-                "items": {
-                  "$ref": "#/components/schemas/ProfileEnvironmentCredential"
-                },
-                "type": "array"
-              },
-              "displayName": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "idlePolicy": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/EnvironmentIdlePolicyView"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Optional staged idle policy for the provisioned environment.\nStages the provider cannot realize are skipped."
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "type": "object"
-              },
-              "providerId": {
-                "type": "string"
-              },
-              "retention": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/ProfileEnvironmentRetention"
-                  }
-                ],
-                "default": "closeWithSession"
-              },
-              "templateId": {
-                "description": "Immutable provider template-version identity.",
-                "type": "string"
-              },
-              "type": {
-                "const": "provision",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "providerId",
-              "templateId"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "ProfileEnvironmentCredential": {
-        "additionalProperties": false,
-        "description": "One environment credential binding requested by a profile: the same shape\nas `environments/credentials/bind`.",
-        "properties": {
-          "envName": {
-            "description": "Environment variable name (`[A-Za-z_][A-Za-z0-9_]{0,127}`).",
-            "type": "string"
-          },
-          "source": {
-            "$ref": "#/components/schemas/EnvironmentCredentialSourceView"
-          }
-        },
-        "required": [
-          "envName",
-          "source"
-        ],
-        "type": "object"
-      },
-      "ProfileEnvironmentRetention": {
-        "description": "What happens to a profile-provisioned environment when its originating\nsession closes.",
-        "oneOf": [
-          {
-            "const": "closeWithSession",
-            "description": "Close the environment when the session that provisioned it closes.",
-            "type": "string"
-          },
-          {
-            "const": "retain",
-            "description": "Leave the environment open; the universe owns its cleanup.",
-            "type": "string"
-          }
-        ]
       },
       "ProfileId": {
         "type": "string"
@@ -13322,41 +13104,6 @@
           "session"
         ],
         "type": "object"
-      },
-      "SessionEnvironmentOverride": {
-        "description": "Creation-time override for the environment intent carried by a profile.\nAbsence uses the profile unchanged; `none` suppresses its environment\nintent, while `existing` activates the specified universe environment.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "type": {
-                "const": "none",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "environmentId": {
-                "type": "string"
-              },
-              "type": {
-                "const": "existing",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "environmentId"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "SessionEventDirection": {
         "enum": [
@@ -15541,17 +15288,6 @@
               "null"
             ]
           },
-          "environment": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SessionEnvironmentOverride"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional creation-time override for the selected profile's environment\nintent. Omit to use the profile's intent unchanged."
-          },
           "metadata": {
             "additionalProperties": {
               "type": "string"
@@ -16640,7 +16376,7 @@
       },
       "VfsFeature": {
         "additionalProperties": false,
-        "description": "Grants the session virtual filesystem. Workspace links declare the\nsession-visible namespace and the VFS catalog is surfaced. Sub-grants are independent; `{}` grants a VFS with\nno tools and no sourcing.",
+        "description": "Grants the session virtual filesystem. Workspace attachments declare the\nsession-visible namespace and the VFS catalog is surfaced. The file tool\nsurface is derived from the attachments: any attachment installs the read\ntools, any `edit` attachment adds the write tools, and with the\nenvironments feature granted the matching transfer tools appear. `{}`\ngrants a VFS with no attachments, no tools, and no sourcing.",
         "properties": {
           "prompts": {
             "anyOf": [
@@ -16651,7 +16387,7 @@
                 "type": "null"
               }
             ],
-            "description": "Prompt-instruction sourcing from the VFS. Absent disables loading;\nan empty block discovers conventional linked roots."
+            "description": "Prompt-instruction sourcing from the VFS. Absent disables loading;\nan empty block discovers conventional attached roots."
           },
           "skills": {
             "anyOf": [
@@ -16662,18 +16398,7 @@
                 "type": "null"
               }
             ],
-            "description": "Independent VFS skill discovery. Absent disables discovery and removes\nits runtime catalog; an empty block discovers conventional linked roots."
-          },
-          "tools": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/VfsToolSurface"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Agent-facing filesystem tool surface; absent = no fs tools. Per-path\nwritability is defined by each workspace link's own access.\nWith the environments feature granted, `readOnly` also exposes\n`vfs_materialize`; `edit` additionally exposes `vfs_capture`.\nPrompt/skill sourcing alone does not grant transfer tools."
+            "description": "Independent VFS skill discovery. Absent disables discovery and removes\nits runtime catalog; an empty block discovers conventional attached roots."
           },
           "version": {
             "default": 1,
@@ -16688,10 +16413,10 @@
               "null"
             ]
           },
-          "workspaceLinks": {
-            "description": "Catalog resources exposed in the session's workspace namespace.",
+          "workspaces": {
+            "description": "Catalog resources exposed in the session's workspace namespace at\ndisjoint absolute paths.",
             "items": {
-              "$ref": "#/components/schemas/WorkspaceLink"
+              "$ref": "#/components/schemas/WorkspaceAttachment"
             },
             "type": "array"
           }
@@ -16702,7 +16427,7 @@
         "additionalProperties": false,
         "properties": {
           "roots": {
-            "description": "Absent searches .agents/prompts and .lightspeed/prompts beneath each\nworkspace link. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace links.",
+            "description": "Absent searches .agents/prompts and .lightspeed/prompts beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
             "items": {
               "type": "string"
             },
@@ -16718,7 +16443,7 @@
         "additionalProperties": false,
         "properties": {
           "roots": {
-            "description": "Absent searches .agents/skills and .lightspeed/skills beneath each\nworkspace link. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace links.",
+            "description": "Absent searches .agents/skills and .lightspeed/skills beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
             "items": {
               "type": "string"
             },
@@ -16798,13 +16523,6 @@
           "bytes"
         ],
         "type": "object"
-      },
-      "VfsToolSurface": {
-        "enum": [
-          "readOnly",
-          "edit"
-        ],
-        "type": "string"
       },
       "VfsWorkspaceCreateParams": {
         "properties": {
@@ -17476,68 +17194,42 @@
           }
         ]
       },
-      "WorkspaceLink": {
+      "WorkspaceAccess": {
+        "description": "Per-attachment VFS access; `edit` implies `read`.",
+        "enum": [
+          "read",
+          "edit"
+        ],
+        "type": "string"
+      },
+      "WorkspaceAttachment": {
         "additionalProperties": false,
+        "description": "One catalog resource mounted into the session namespace. Exactly one of\n`workspaceId` and `snapshotRef` names the resource; snapshots are\nimmutable and must be attached with `read` access.",
         "properties": {
           "access": {
-            "$ref": "#/components/schemas/WorkspaceLinkAccess"
+            "$ref": "#/components/schemas/WorkspaceAccess"
           },
           "path": {
             "type": "string"
           },
-          "target": {
-            "$ref": "#/components/schemas/WorkspaceLinkTarget"
+          "snapshotRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "path",
-          "target",
           "access"
         ],
         "type": "object"
-      },
-      "WorkspaceLinkAccess": {
-        "enum": [
-          "readOnly",
-          "readWrite"
-        ],
-        "type": "string"
-      },
-      "WorkspaceLinkTarget": {
-        "oneOf": [
-          {
-            "properties": {
-              "type": {
-                "const": "workspace",
-                "type": "string"
-              },
-              "workspaceId": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "workspaceId"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "snapshotRef": {
-                "type": "string"
-              },
-              "type": {
-                "const": "snapshot",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "snapshotRef"
-            ],
-            "type": "object"
-          }
-        ]
       }
     }
   },
@@ -17569,7 +17261,7 @@
       "summary": "Inspect the Lightspeed protocol"
     },
     {
-      "description": "Creates a session with optional config/profile setup. Profile metadata and retention supply creation defaults; explicit start values override them. An existing-or-none environment override can replace the profile intent. Retrying an existing session id returns that session.",
+      "description": "Creates a session with optional config/profile setup. Profile metadata and retention supply creation defaults; explicit start values override them. The default environment attachment in the effective config supplies the initial active environment. Retrying an existing session id returns that session.",
       "name": "session/start",
       "paramStructure": "by-name",
       "params": [
@@ -17590,7 +17282,7 @@
       "summary": "Create or reopen a session"
     },
     {
-      "description": "Creates a session with immutable lifecycle and workflow-tool declarations using explicit bound dispatch. Profile metadata, retention, and environment overrides follow session/start semantics. Retrying an id requires the same managed declaration; an ordinary session cannot be upgraded.",
+      "description": "Creates a session with immutable lifecycle and workflow-tool declarations using explicit bound dispatch. Profile metadata, retention, and default environment attachment selection follow session/start semantics. Retrying an id requires the same managed declaration; an ordinary session cannot be upgraded.",
       "name": "session/managed/start",
       "paramStructure": "by-name",
       "params": [

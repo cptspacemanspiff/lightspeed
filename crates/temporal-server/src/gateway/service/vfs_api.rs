@@ -1,50 +1,13 @@
 use super::*;
 
 impl GatewayAgentApi {
-    pub(super) async fn validate_workspace_link_targets(
+    pub(super) async fn validate_workspace_attachment_targets(
         &self,
         features: &engine::FeaturesConfig,
     ) -> Result<(), AgentApiError> {
-        let Some(vfs) = features.vfs.as_ref() else {
-            return Ok(());
-        };
-        if vfs.workspace_links.is_empty() {
-            return Ok(());
-        }
-        let blobs: Arc<dyn BlobStore> = self.store.clone();
-        let workspace_store: Arc<dyn VfsWorkspaceStore> = self.store.clone();
-        let resolved = vfs::resolve_workspace_links(blobs, workspace_store, &vfs.workspace_links)
+        self.preparation_service()
+            .validate_workspace_attachment_targets(features)
             .await
-            .map_err(map_vfs_catalog_error)?;
-        if let Some(link) = resolved.iter().find(|link| !link.is_available()) {
-            return Err(AgentApiError::invalid_request(format!(
-                "workspace link target at {} is unavailable: {}",
-                link.path,
-                link.unavailable_reason().unwrap_or("unknown reason")
-            )));
-        }
-        Ok(())
-    }
-
-    pub(super) async fn resolve_session_workspace_links(
-        &self,
-        state: &engine::CoreAgentState,
-    ) -> Result<Vec<vfs::ResolvedWorkspaceLink>, AgentApiError> {
-        let declarations = state
-            .lifecycle
-            .config
-            .as_ref()
-            .and_then(|config| config.features.vfs.as_ref())
-            .map(|vfs| vfs.workspace_links.as_slice())
-            .unwrap_or_default();
-        if declarations.is_empty() {
-            return Ok(Vec::new());
-        }
-        let blobs: Arc<dyn BlobStore> = self.store.clone();
-        let workspace_store: Arc<dyn VfsWorkspaceStore> = self.store.clone();
-        vfs::resolve_workspace_links(blobs, workspace_store, declarations)
-            .await
-            .map_err(map_vfs_catalog_error)
     }
 
     pub(super) async fn create_vfs_workspace_record(

@@ -1,4 +1,5 @@
-import type { BotView, Environment, ProfileEnvironment } from "@/api";
+import { defaultEnvironmentAttachment } from "@/lib/sessions/resource-features";
+import type { BotView, Environment } from "@/api";
 import { describeIdlePolicy } from "@/components/environment/power-controls";
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -24,17 +25,17 @@ export function capabilitySummary(config: Record<string, unknown> | undefined): 
 }
 
 export function environmentSummary(
-  environment: ProfileEnvironment | null | undefined,
+  config: unknown,
   environments?: Environment[],
 ): string {
-  if (!environment) return "No environment";
-  if (environment.type === "existing") {
+  const environment = defaultEnvironmentAttachment(config);
+  if (!environment) return "No default environment";
+  if (environment.environmentId) {
     const current = environments?.find((entry) => entry.environmentId === environment.environmentId);
     const name = current?.displayName ?? environment.environmentId;
     const policy = current?.idlePolicy ? ` · ${describeIdlePolicy(current.idlePolicy)}` : "";
     return `${name}${current ? ` · ${current.status}` : ""}${policy}`;
   }
-  if (environment.type === "provision") return "A fresh environment per session";
   return "Inherits the session's environment";
 }
 

@@ -27,9 +27,41 @@ continuity between the two tasks.
 
 A **session** is that continuing conversation and execution state. A **run**
 is one admitted task within it. Completing a run does not discard the session;
-another task can use the same configuration, workspace links, and accumulated
+another task can use the same configuration, workspace attachments, and accumulated
 context. A **profile** supplies reusable setup when creating or configuring a
 session. It is resolved by the hosted runtime, outside the deterministic core.
+
+The session workflow owns setup, profile/configuration application, and runtime
+context refresh. It observes the desired toolset for every new run submission,
+including internal followups, through activities that read current records and
+grants. The gateway submits intent and waits for a correlated outcome. Tools
+publish at safe turn boundaries; cancellation and existing effects continue
+while a new submission's policy read is pending. Duplicate submissions resolve
+before fresh policy reads. Initial setup must finish before a session can run.
+
+Configuration, profile, and explicit refresh operations retain up to 256 compact
+result receipts across workflow rollover. Retained retries return their original
+result. Once a receipt expires, the workflow rejects the old request; callers
+must reload session state before submitting a new operation.
+
+These operations build a private candidate through ordinary engine command
+admission. Activities prepare context against the proposed configuration,
+instructions, and environment. After every command validates, the workflow
+publishes the complete event batch in one database transaction against the
+original session head. Failed preparation leaves the proposed changes
+unpublished; a concurrent session change rejects the candidate. Source
+invalidation is included in the batch. Storage confirms retries of an already
+committed batch, so a lost append response cannot apply the change twice.
+
+Environments have independent lifecycles. Their service owns provisioning,
+registration, credentials, power, and cleanup; environment runtime roles run
+reconciliation. Session configuration attaches the environments a session may
+use, each with its own access level; setup only activates one of them, filling
+an empty active pointer from a profile's default attachment or, for
+sub-agents, from the parent's active machine resolved at spawn. Session
+closure and deletion never close environments. Selection validates attachment
+membership and a nonterminal registry record without waking or probing the
+machine. Readiness checks and wake-on-use happen during actual use.
 
 The core represents a session as events reduced into state. Admission checks
 whether a command is valid against that state. Planning decides which fact or

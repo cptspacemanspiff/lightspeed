@@ -10,15 +10,17 @@ use engine::{
 };
 use tools::{
     catalog::{SKILL_CATALOG_CONTEXT_KEY, VFS_CATALOG_CONTEXT_KEY, clear_catalog_command},
-    environment::projection::{prepare_vfs_catalog_publication, vfs_catalog_from_workspace_links},
+    environment::projection::{
+        prepare_vfs_catalog_publication, vfs_catalog_from_workspace_attachments,
+    },
     prompts::{
         PromptAssemblyLimits, configured_vfs_prompt_root_specs,
         prepare_prompt_instructions_publication,
-        prepare_prompt_instructions_publication_with_warnings, resolve_linked_vfs_prompt_roots,
+        prepare_prompt_instructions_publication_with_warnings, resolve_attached_vfs_prompt_roots,
     },
     skills::{
         configured_vfs_skill_root_specs, prepare_skill_catalog_publication_with_warnings,
-        resolve_linked_vfs_skill_roots,
+        resolve_attached_vfs_skill_roots,
     },
 };
 
@@ -127,13 +129,13 @@ impl SessionRunner {
             .as_ref()
             .and_then(|config| config.features.vfs.as_ref())
             .and_then(|vfs| vfs.prompts.as_ref());
-        let links = if prompt_config.is_some() {
-            self.resolve_workspace_links(state).await?
+        let attachments = if prompt_config.is_some() {
+            self.resolve_workspace_attachments(state).await?
         } else {
             Vec::new()
         };
         let specs = match prompt_config {
-            Some(config) => configured_vfs_prompt_root_specs(&links, config.roots.as_deref())
+            Some(config) => configured_vfs_prompt_root_specs(&attachments, config.roots.as_deref())
                 .map_err(|error| RunnerError::InvalidRequest {
                     message: format!("configure VFS prompt roots: {error}"),
                 })?,
@@ -157,10 +159,10 @@ impl SessionRunner {
                     message: "VFS prompt sourcing requires a workspace store".to_owned(),
                 }
             })?;
-            let resolved = resolve_linked_vfs_prompt_roots(
+            let resolved = resolve_attached_vfs_prompt_roots(
                 self.stores.blobs.clone(),
                 workspace_store.clone(),
-                links,
+                attachments,
                 specs,
             )
             .await
@@ -298,8 +300,8 @@ impl SessionRunner {
             .as_ref()
             .map(|config| &config.features);
         let vfs_catalog_enabled = features.is_some_and(|features| features.vfs.is_some());
-        let links = if vfs_catalog_enabled {
-            self.resolve_workspace_links(state).await?
+        let attachments = if vfs_catalog_enabled {
+            self.resolve_workspace_attachments(state).await?
         } else {
             Vec::new()
         };
@@ -321,7 +323,7 @@ impl SessionRunner {
                 .into_iter()
                 .collect());
         }
-        let catalog = vfs_catalog_from_workspace_links(&links).map_err(|error| {
+        let catalog = vfs_catalog_from_workspace_attachments(&attachments).map_err(|error| {
             RunnerError::InvalidRequest {
                 message: format!("prepare VFS catalog: {error}"),
             }
@@ -384,19 +386,19 @@ impl SessionRunner {
         let Some(workspace_store) = self.stores.vfs_workspace_store.as_ref() else {
             return Ok(clear_catalog_command(current, SKILL_CATALOG_CONTEXT_KEY));
         };
-        let links = self.resolve_workspace_links(state).await?;
-        let specs = configured_vfs_skill_root_specs(&links, skills_config.roots.as_deref())
+        let attachments = self.resolve_workspace_attachments(state).await?;
+        let specs = configured_vfs_skill_root_specs(&attachments, skills_config.roots.as_deref())
             .map_err(|error| RunnerError::InvalidRequest {
-                message: format!("configure VFS skill roots: {error}"),
-            })?;
+            message: format!("configure VFS skill roots: {error}"),
+        })?;
         if specs.is_empty() {
             return Ok(clear_catalog_command(current, SKILL_CATALOG_CONTEXT_KEY));
         }
 
-        let resolved = resolve_linked_vfs_skill_roots(
+        let resolved = resolve_attached_vfs_skill_roots(
             self.stores.blobs.clone(),
             workspace_store.clone(),
-            links,
+            attachments,
             specs,
         )
         .await
@@ -427,33 +429,33 @@ impl SessionRunner {
         Ok(publication.command)
     }
 
-    async fn resolve_workspace_links(
+    async fn resolve_workspace_attachments(
         &self,
         state: &CoreAgentState,
-    ) -> Result<Vec<vfs::ResolvedWorkspaceLink>, RunnerError> {
+    ) -> Result<Vec<vfs::ResolvedWorkspaceAttachment>, RunnerError> {
         let declarations = state
             .lifecycle
             .config
             .as_ref()
             .and_then(|config| config.features.vfs.as_ref())
-            .map(|vfs| vfs.workspace_links.as_slice())
+            .map(|vfs| vfs.workspaces.as_slice())
             .unwrap_or_default();
         if declarations.is_empty() {
             return Ok(Vec::new());
         }
         let workspace_store = self.stores.vfs_workspace_store.as_ref().ok_or_else(|| {
             RunnerError::InvalidRequest {
-                message: "workspace links require a VFS workspace store".to_owned(),
+                message: "workspace attachments require a VFS workspace store".to_owned(),
             }
         })?;
-        vfs::resolve_workspace_links(
+        vfs::resolve_workspace_attachments(
             self.stores.blobs.clone(),
             workspace_store.clone(),
             declarations,
         )
         .await
         .map_err(|error| RunnerError::InvalidRequest {
-            message: format!("resolve workspace links: {error}"),
+            message: format!("resolve workspace attachments: {error}"),
         })
     }
 
@@ -825,7 +827,7 @@ mod tests {
         ContextEntryKind, ContextMessageRole, CoreAgentCommand, CoreAgentEvent, FunctionToolSpec,
         LlmFinish, ModelSelection, ObservedToolCall, ProviderApiKind, RunConfig, RunStatus,
         SessionConfig, SessionId, ToolCallResult, ToolKind, ToolName, ToolParallelism, ToolSpec,
-        TurnEvent, WorkspaceLink, WorkspaceLinkAccess, WorkspaceLinkTarget,
+        TurnEvent, WorkspaceAccess, WorkspaceAttachment, WorkspaceAttachmentTarget,
         storage::{
             BlobStore, CreateForkedSession, CreateSession, InMemoryBlobStore, InMemorySessionStore,
             SessionStore,
@@ -838,14 +840,15 @@ mod tests {
     use tools::skills::{SkillCatalogSnapshot, SkillLocation};
     use tools::{
         fs::tools::ReadFileResult,
-        fs::{FsPath, FsToolContext, LinkedVfsFileSystem},
+        fs::{AttachedVfsFileSystem, FsPath, FsToolContext},
         runtime::InlineToolRuntime,
         toolset::{ToolsetConfig, register_toolset},
     };
     use vfs::{
         CompareAndSetVfsWorkspaceHead, CreateInlineSnapshotRequest, CreateVfsWorkspaceRecord,
-        InlineFile, ResolvedWorkspaceLink, ResolvedWorkspaceLinkTarget, VfsCatalogError, VfsPath,
-        VfsWorkspaceId, VfsWorkspaceRecord, VfsWorkspaceStore, create_inline_snapshot,
+        InlineFile, ResolvedWorkspaceAttachment, ResolvedWorkspaceAttachmentTarget,
+        VfsCatalogError, VfsPath, VfsWorkspaceId, VfsWorkspaceRecord, VfsWorkspaceStore,
+        create_inline_snapshot,
     };
 
     use super::*;
@@ -1210,33 +1213,33 @@ mod tests {
         config
     }
 
-    fn vfs_config_with_links(
+    fn vfs_config_with_attachments(
         prompts: bool,
         skills: bool,
-        workspace_links: Vec<WorkspaceLink>,
+        workspace_attachments: Vec<WorkspaceAttachment>,
     ) -> SessionConfig {
         let mut config = vfs_config(prompts, skills);
-        config.features.vfs.as_mut().unwrap().workspace_links = workspace_links;
+        config.features.vfs.as_mut().unwrap().workspaces = workspace_attachments;
         config
     }
 
-    fn snapshot_link(path: &str, snapshot_ref: &BlobRef) -> WorkspaceLink {
-        WorkspaceLink {
+    fn snapshot_attachment(path: &str, snapshot_ref: &BlobRef) -> WorkspaceAttachment {
+        WorkspaceAttachment {
             path: path.to_owned(),
-            target: WorkspaceLinkTarget::Snapshot {
+            target: WorkspaceAttachmentTarget::Snapshot {
                 snapshot_ref: snapshot_ref.to_string(),
             },
-            access: WorkspaceLinkAccess::ReadOnly,
+            access: WorkspaceAccess::Read,
         }
     }
 
-    fn workspace_link(path: &str, workspace_id: &VfsWorkspaceId) -> WorkspaceLink {
-        WorkspaceLink {
+    fn workspace_attachment(path: &str, workspace_id: &VfsWorkspaceId) -> WorkspaceAttachment {
+        WorkspaceAttachment {
             path: path.to_owned(),
-            target: WorkspaceLinkTarget::Workspace {
+            target: WorkspaceAttachmentTarget::Workspace {
                 workspace_id: workspace_id.to_string(),
             },
-            access: WorkspaceLinkAccess::ReadWrite,
+            access: WorkspaceAccess::Edit,
         }
     }
 
@@ -1389,7 +1392,7 @@ mod tests {
         )
         .await
         .expect("create snapshot");
-        let link = snapshot_link("/workspace", &snapshot.snapshot_ref);
+        let attachment = snapshot_attachment("/workspace", &snapshot.snapshot_ref);
         let llm = Arc::new(CaptureFinalLlm::default());
         let runner = SessionRunner::new(stores, llm.clone());
 
@@ -1398,7 +1401,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
-                    config: vfs_config_with_links(false, false, vec![link]),
+                    config: vfs_config_with_attachments(false, false, vec![attachment]),
                 },
                 max_steps: None,
             })
@@ -1566,7 +1569,6 @@ mod tests {
         for vfs in [
             None,
             Some(engine::VfsFeature {
-                tools: Some(engine::VfsToolSurface::Edit),
                 prompts: Some(Default::default()),
                 ..Default::default()
             }),
@@ -1621,7 +1623,7 @@ mod tests {
         )
         .await
         .expect("create snapshot");
-        let link = snapshot_link("/skills/system", &snapshot.snapshot_ref);
+        let attachment = snapshot_attachment("/skills/system", &snapshot.snapshot_ref);
         let runner = SessionRunner::new(
             stores,
             Arc::new(ToolThenFinalLlm {
@@ -1634,7 +1636,7 @@ mod tests {
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
                     config: {
-                        let mut config = vfs_config_with_links(false, true, vec![link]);
+                        let mut config = vfs_config_with_attachments(false, true, vec![attachment]);
                         config.features.vfs.as_mut().unwrap().skills = Some(Default::default());
                         config
                     },
@@ -1670,13 +1672,13 @@ mod tests {
         assert_eq!(catalog.skills[0].name, "deploy-review");
         assert!(matches!(
             &catalog.skills[0].location,
-            SkillLocation::LinkedSnapshot {
+            SkillLocation::AttachedSnapshot {
                 source_snapshot_ref,
-                source_link_path,
+                source_attachment_path,
                 skill_doc_path,
                 ..
             } if source_snapshot_ref == &snapshot.snapshot_ref
-                && source_link_path.as_str() == "/skills/system"
+                && source_attachment_path.as_str() == "/skills/system"
                 && skill_doc_path.as_str() == "/skills/system/.agents/skills/deploy-review/SKILL.md"
         ));
         assert!(outcome.emitted_entries.iter().any(|entry| {
@@ -1738,7 +1740,7 @@ mod tests {
         })
         .await
         .expect("create workspace");
-        let link = workspace_link("/workspace", &workspace_id);
+        let attachment = workspace_attachment("/workspace", &workspace_id);
         let llm = Arc::new(CaptureFinalLlm::default());
         let runner = SessionRunner::new(stores, llm.clone());
         runner
@@ -1746,7 +1748,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
-                    config: vfs_config_with_links(true, false, vec![link]),
+                    config: vfs_config_with_attachments(true, false, vec![attachment]),
                 },
                 max_steps: None,
             })
@@ -1988,20 +1990,20 @@ mod tests {
         )
         .await
         .expect("create snapshot");
-        let linked_fs = LinkedVfsFileSystem::new(
+        let attached_fs = AttachedVfsFileSystem::new(
             blob_store.clone(),
             vfs.clone(),
-            vec![ResolvedWorkspaceLink {
+            vec![ResolvedWorkspaceAttachment {
                 path: VfsPath::parse("/skills/system").unwrap(),
-                target: ResolvedWorkspaceLinkTarget::AvailableSnapshot {
+                target: ResolvedWorkspaceAttachmentTarget::AvailableSnapshot {
                     snapshot_ref: snapshot.snapshot_ref.clone(),
                 },
-                access: WorkspaceLinkAccess::ReadOnly,
+                access: WorkspaceAccess::Read,
             }],
         )
-        .expect("linked fs");
+        .expect("attached fs");
         let ctx =
-            FsToolContext::new(Arc::new(linked_fs), blob_store.clone()).with_cwd(FsPath::root());
+            FsToolContext::new(Arc::new(attached_fs), blob_store.clone()).with_cwd(FsPath::root());
         let toolset = register_toolset(&ToolsetConfig::workspace()).expect("toolset");
         let tool_set = toolset.tools.clone();
         let tools = InlineToolRuntime::with_vfs_filesystem(ctx, tools::runtime::ToolCatalog::new());
@@ -2100,20 +2102,20 @@ mod tests {
         })
         .await
         .expect("create workspace");
-        let linked_fs = LinkedVfsFileSystem::new(
+        let attached_fs = AttachedVfsFileSystem::new(
             blob_store.clone(),
             vfs.clone(),
-            vec![ResolvedWorkspaceLink {
+            vec![ResolvedWorkspaceAttachment {
                 path: VfsPath::parse("/skills/system").unwrap(),
-                target: ResolvedWorkspaceLinkTarget::AvailableWorkspace {
+                target: ResolvedWorkspaceAttachmentTarget::AvailableWorkspace {
                     workspace: vfs.read_workspace(&workspace_id).await.unwrap(),
                 },
-                access: WorkspaceLinkAccess::ReadWrite,
+                access: WorkspaceAccess::Edit,
             }],
         )
-        .expect("linked fs");
+        .expect("attached fs");
         let ctx =
-            FsToolContext::new(Arc::new(linked_fs), blob_store.clone()).with_cwd(FsPath::root());
+            FsToolContext::new(Arc::new(attached_fs), blob_store.clone()).with_cwd(FsPath::root());
         let toolset = register_toolset(&ToolsetConfig::workspace()).expect("toolset");
         let tool_set = toolset.tools.clone();
         let tools = InlineToolRuntime::with_vfs_filesystem(ctx, tools::runtime::ToolCatalog::new());
@@ -2191,18 +2193,18 @@ mod tests {
         .await
         .expect("update workspace head");
 
-        let current_fs = LinkedVfsFileSystem::new(
+        let current_fs = AttachedVfsFileSystem::new(
             blob_store.clone(),
             vfs.clone(),
-            vec![ResolvedWorkspaceLink {
+            vec![ResolvedWorkspaceAttachment {
                 path: VfsPath::parse("/skills/system").unwrap(),
-                target: ResolvedWorkspaceLinkTarget::AvailableWorkspace {
+                target: ResolvedWorkspaceAttachmentTarget::AvailableWorkspace {
                     workspace: vfs.read_workspace(&workspace_id).await.unwrap(),
                 },
-                access: WorkspaceLinkAccess::ReadWrite,
+                access: WorkspaceAccess::Edit,
             }],
         )
-        .expect("current linked fs");
+        .expect("current attached fs");
         let current_skill = tools::fs::tools::invoke_read_file(
             &FsToolContext::new(Arc::new(current_fs), blob_store.clone()).with_cwd(FsPath::root()),
             tools::fs::tools::ReadFileArgs {

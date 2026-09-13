@@ -39,7 +39,7 @@ fn create(request: &str, environment: &str, incarnation: &str, at: i64) -> Creat
         template_id: EnvironmentTemplateId::new("rust-v1"),
         display_name: None,
         metadata: BTreeMap::new(),
-        origin_session: None,
+
         idle_policy: None,
         created_at_ms: at,
     }
@@ -365,39 +365,8 @@ async fn disabled_binding_blocks_create_and_live_references_block_delete() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn origin_session_is_recorded_listed_and_swept() {
+async fn environment_metadata_filters_require_every_pair() {
     let (_universe, store) = store().await;
-    let mut request = create("session:s-1", "env-s1", "inc-s1", 1);
-    request.origin_session = Some(EnvironmentOriginSession {
-        session_id: SessionId::new("s-1"),
-        profile_id: Some("coder".to_owned()),
-        close_with_session: true,
-    });
-    let created = store.create_environment(request).await.expect("create");
-    assert_eq!(
-        created
-            .origin_session
-            .as_ref()
-            .map(|origin| origin.session_id.as_str()),
-        Some("s-1")
-    );
-    let plain = store
-        .create_environment(create("plain", "env-plain", "inc-plain", 2))
-        .await
-        .expect("create plain");
-    assert!(plain.origin_session.is_none());
-
-    let by_session = store
-        .list_environments(ListEnvironments {
-            metadata: Default::default(),
-            origin_session_id: Some(SessionId::new("s-1")),
-            ..ListEnvironments::default()
-        })
-        .await
-        .expect("list");
-    assert_eq!(by_session.len(), 1);
-    assert_eq!(by_session[0].environment_id.as_str(), "env-s1");
-
     // Metadata filters by containment: every listed pair must match.
     let mut tagged = create("tagged", "env-tagged", "inc-tagged", 3);
     tagged.metadata = BTreeMap::from([
@@ -428,46 +397,6 @@ async fn origin_session_is_recorded_listed_and_swept() {
         .await
         .expect("list by mismatched metadata");
     assert!(mismatched.is_empty());
-
-    let sweep = store
-        .list_environments_closing_with_session()
-        .await
-        .expect("sweep");
-    assert_eq!(sweep.len(), 1);
-    assert_eq!(sweep[0].environment_id.as_str(), "env-s1");
-
-    store
-        .begin_close_environment(BeginCloseEnvironment {
-            environment_id: EnvironmentId::new("env-s1"),
-            updated_at_ms: 3,
-        })
-        .await
-        .expect("begin close");
-    assert!(
-        store
-            .list_environments_closing_with_session()
-            .await
-            .expect("sweep")
-            .is_empty()
-    );
-}
-
-#[test]
-fn session_provision_request_id_is_deterministic_and_bounded() {
-    let short = SessionId::new("session-1");
-    assert_eq!(
-        EnvironmentProvisionRequestId::for_session(&short).as_str(),
-        "session:session-1"
-    );
-    assert_eq!(
-        EnvironmentProvisionRequestId::for_session(&short),
-        EnvironmentProvisionRequestId::for_session(&short)
-    );
-    let long = SessionId::new("s".repeat(128));
-    let derived = EnvironmentProvisionRequestId::for_session(&long);
-    assert!(derived.as_str().starts_with("session:sha256-"));
-    assert!(derived.as_str().len() <= 128);
-    assert_eq!(derived, EnvironmentProvisionRequestId::for_session(&long));
 }
 
 #[test]
@@ -1025,7 +954,7 @@ async fn registration_key_policy_gates_admission_without_touching_reconnects() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn registered_environments_group_by_key_and_access_policy_scopes_them() {
+async fn registered_environments_list_by_key() {
     let (_universe_id, store) = store().await;
     minted_key(
         &store,
@@ -1043,29 +972,10 @@ async fn registered_environments_group_by_key_and_access_policy_scopes_them() {
         .create_registered_environment(register("rk-a", "env-a", &daemon_key(0x31), 2_000))
         .await
         .expect("a");
-    let b = store
+    store
         .create_registered_environment(register("rk-b", "env-b", &daemon_key(0x32), 2_000))
         .await
         .expect("b");
-    let provisioned = store
-        .create_environment(create("p", "env-p", "inc-p", 2_000))
-        .await
-        .expect("provisioned");
-    let external = store
-        .create_external_environment(CreateExternalEnvironment {
-            request_id: EnvironmentProvisionRequestId::new("ext"),
-            environment_id: EnvironmentId::new("env-x"),
-            incarnation_id: EnvironmentIncarnationId::new("inc-x"),
-            connection: EnvironmentConnectionSpec::new(
-                "ws://envd.internal:19091",
-                EnvironmentTransport::WebSocket,
-            ),
-            display_name: None,
-            metadata: BTreeMap::new(),
-            created_at_ms: 2_000,
-        })
-        .await
-        .expect("external");
 
     let by_key = store
         .list_environments(ListEnvironments {
@@ -1077,31 +987,6 @@ async fn registered_environments_group_by_key_and_access_policy_scopes_them() {
         .expect("list");
     assert_eq!(by_key.len(), 1);
     assert_eq!(by_key[0].environment_id, a.environment_id);
-
-    let open = EnvironmentAccessPolicy::ALLOW_ALL;
-    assert!(
-        open.allows(&a) && open.allows(&b) && open.allows(&provisioned) && open.allows(&external)
-    );
-
-    let keys_only =
-        EnvironmentAccessPolicy::new(None::<Vec<String>>, Some(vec!["rk-a".to_owned()]));
-    assert!(keys_only.allows(&a));
-    assert!(!keys_only.allows(&b));
-    assert!(keys_only.allows(&provisioned));
-    assert!(!keys_only.allows(&external));
-    assert!(keys_only.refusal(&b).contains("rk-b"));
-
-    let providers_only =
-        EnvironmentAccessPolicy::new(Some(vec!["incus-local".to_owned()]), None::<Vec<String>>);
-    assert!(providers_only.allows(&provisioned));
-    assert!(providers_only.allows(&a));
-    assert!(!providers_only.allows(&external));
-
-    let neither =
-        EnvironmentAccessPolicy::new(Some(vec!["other".to_owned()]), Some(Vec::<String>::new()));
-    assert!(!neither.allows(&provisioned));
-    assert!(!neither.allows(&a));
-    assert!(!neither.allows(&external));
 }
 
 /// The gateway stamps reserved entries on top of whatever a daemon sent, so
