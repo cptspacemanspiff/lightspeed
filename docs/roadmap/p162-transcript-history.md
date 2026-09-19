@@ -4,6 +4,32 @@ Status: implemented and verified.
 
 ## Behavior
 
+- Local run inputs retain their submission identity and component position
+  through acknowledgement and durable input arrival. Submitted messages,
+  steering, and queued inputs use normal opacity immediately, with no visual
+  change on acceptance. Failed sends remove the optimistic message and show
+  an error in the composer.
+  DOM regression coverage
+  checks both acknowledgement orders, delayed input, pending-state cleanup,
+  and preservation of expanded long messages through run completion.
+  Backend-loaded runs use stable run-ID keys; only locally submitted inputs
+  use submission-ID keys. History prepend coverage verifies that discovering
+  an older input or acknowledgement preserves mounted activity and expansion.
+  New messages and activity boxes use a restrained 200 ms opacity/translation
+  entrance with reduced-motion support. Arrival tracking excludes initial and
+  older history, records hidden work, and prevents replay on text updates or
+  final-answer promotion. Component tests cover these transitions.
+  Nested message entrances stay suppressed until the activity box animation
+  ends or is cancelled, including messages arriving in later renders during
+  that interval. Reduced-motion mode does not wait for an animation event.
+
+- Completed runs identify their reply using the recorded output reference and
+  run identity, including when reasoning follows the reply in stored history.
+  Completions reasoning displays before adjacent text from the same turn;
+  Responses and Anthropic preserve native order. Live updates and older-page
+  reconstruction share this behavior, with regression coverage for repeated
+  content, missing output, and collapsed final-answer visibility.
+
 - Open with the latest 500 events, position at the end, and begin independent
   forward long-polling from the initial response's fenced head.
 - Automatically fetch older pages near the top, without a load-more button or
@@ -13,8 +39,12 @@ Status: implemented and verified.
 - Retry older-page failures without stopping live updates. Abort both directions
   and clear the projection on session changes.
 - Recover a transient live-read failure with an immediate non-waiting probe
-  from the same cursor. Show a disconnect if that probe also fails, pace further
-  retries, and clear it on any successful probe, including an empty response.
+  from the same cursor. If that probe also fails, wait ten seconds before
+  showing a muted disconnect notice, pace further retries, and clear the notice
+  on any successful probe, including an empty response. Initial and older-history
+  reads share the ten-second grace period; list-page reads use three seconds through a small shared
+  error component. Cached content remains visible; actionable query errors skip
+  the retry delay. Retry timing and transcript cursor recovery are unchanged.
   Authorization and event-integrity errors stay immediately visible. Bound live
   requests to their requested wait plus ten seconds of transport/projection time.
 - Keep the parent/sub-agent header mounted while run activity refreshes its
@@ -78,6 +108,10 @@ Statistics remain beneath each run, with no context indicator in the composer.
 statistics popover from medium widths up and moves it into the opened run on
 narrow screens; the popover no longer repeats the duration. See
 `platform/README.md` for the current transcript model.)
+For finished runs without activity, disabling statistics also hides the
+standalone duration and removes an otherwise empty outcome row. Failure and
+cancellation messages remain visible. Activity strips retain their durations.
+Component coverage verifies toggling the preference and preserving status text.
 Context describes measured input to the last call, not a live tokenizer or a
 context-capacity gauge. No backend or API changes are needed.
 

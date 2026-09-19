@@ -417,7 +417,9 @@ async fn materialize_messages(
                 let can_fold = messages
                     .last()
                     .is_some_and(|message: &oai_c::CompletionMessage| message.role == "assistant")
-                    && last_assistant_source.as_ref() == Some(&entry.source);
+                    && last_assistant_source
+                        .as_ref()
+                        .is_some_and(|source| same_assistant_turn(source, &entry.source));
                 if can_fold {
                     messages
                         .last_mut()
@@ -457,7 +459,9 @@ async fn materialize_messages(
                 let can_fold = messages
                     .last()
                     .is_some_and(|message: &oai_c::CompletionMessage| message.role == "assistant")
-                    && last_assistant_source.as_ref() == Some(&entry.source);
+                    && last_assistant_source
+                        .as_ref()
+                        .is_some_and(|source| same_assistant_turn(source, &entry.source));
                 if can_fold {
                     messages
                         .last_mut()
@@ -504,6 +508,32 @@ async fn materialize_messages(
         }
     }
     Ok(messages)
+}
+
+// Reasoning and visible output have distinct provenance labels, but belong
+// to the same native assistant message when their run and turn agree.
+fn same_assistant_turn(left: &ContextEntrySource, right: &ContextEntrySource) -> bool {
+    match (left, right) {
+        (
+            ContextEntrySource::AssistantOutput {
+                run_id: left_run,
+                turn_id: left_turn,
+            }
+            | ContextEntrySource::Reasoning {
+                run_id: left_run,
+                turn_id: left_turn,
+            },
+            ContextEntrySource::AssistantOutput {
+                run_id: right_run,
+                turn_id: right_turn,
+            }
+            | ContextEntrySource::Reasoning {
+                run_id: right_run,
+                turn_id: right_turn,
+            },
+        ) => left_run == right_run && left_turn == right_turn,
+        _ => left == right,
+    }
 }
 
 fn reject_foreign_provider_kind(entry: &ContextEntry) -> LlmAdapterResult<()> {
@@ -2237,7 +2267,7 @@ mod tests {
                     "tool_calls": [{
                         "id":"call_reasoning",
                         "type":"function",
-                        "function":{"name":"lookup","arguments":"{\"id\":1}"}
+                        "function":{"name":"run_process","arguments":"{\"argv\":[\"echo\",\"hello\"]}"}
                     }]
                 }
             }]
@@ -2258,10 +2288,6 @@ mod tests {
             ContextEntryKind::ReasoningState
         ));
 
-        let source = ContextEntrySource::AssistantOutput {
-            run_id: RunId::new(2),
-            turn_id: TurnId::new(3),
-        };
         let entries: Vec<ContextEntry> = result
             .context_entries
             .into_iter()
@@ -2269,8 +2295,17 @@ mod tests {
             .map(|(index, input)| ContextEntry {
                 entry_id: ContextEntryId::new(index as u64 + 1),
                 key: None,
+                source: match input.kind {
+                    ContextEntryKind::ReasoningState => ContextEntrySource::Reasoning {
+                        run_id: result.run_id,
+                        turn_id: result.turn_id,
+                    },
+                    _ => ContextEntrySource::AssistantOutput {
+                        run_id: result.run_id,
+                        turn_id: result.turn_id,
+                    },
+                },
                 kind: input.kind,
-                source: source.clone(),
                 content: input.content,
                 preview: input.preview,
                 origin: input.origin,
@@ -2279,8 +2314,16 @@ mod tests {
                 supersedes: None,
             })
             .collect();
+        let mut replay_request = request(entries.clone());
+        let mut toolset = tools::toolset::ToolsetConfig::empty();
+        toolset.builtin.environment = tools::toolset::EnvironmentToolsetConfig::basic();
+        replay_request.tools = tools::toolset::register_toolset(&toolset)
+            .unwrap()
+            .tools
+            .into_values()
+            .collect();
         let replay = serde_json::to_value(
-            materialize_create_request(&blobs, &request(entries.clone()))
+            materialize_create_request(&blobs, &replay_request)
                 .await
                 .expect("replay"),
         )
@@ -2295,6 +2338,19 @@ mod tests {
             json!([{"type":"reasoning.text","text":"exact","signature":"sig_1"}])
         );
         assert_eq!(replayed["tool_calls"][0]["id"], "call_reasoning");
+        assert_eq!(
+            replayed["tool_calls"],
+            response.raw_json["choices"][0]["message"]["tool_calls"]
+        );
+        let tool_names: Vec<_> = replay["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(tool_names.contains(&"exec_command"));
+        assert!(!tool_names.contains(&"run_process"));
+        assert!(!tool_names.contains(&"apply_patch"));
 
         let deepseek_replay = serde_json::to_value(
             materialize_messages(&blobs, &entries, CompletionDialect::DeepSeek)

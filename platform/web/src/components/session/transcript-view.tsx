@@ -14,6 +14,7 @@ import { TranscriptLinksContext } from "@/components/session/transcript-links";
 import { type TranscriptEntry, type TranscriptMedia } from "@/lib/sessions/transcript";
 import { MediaStrip } from "@/components/session/media";
 import { cn } from "@/lib/utils";
+import { TranscriptEntrance } from "./transcript-motion";
 
 /// Full-width transcript rows without avatars. User inputs use muted bands;
 /// assistant output is plain rendered text, with compact tool and lifecycle markers.
@@ -29,7 +30,7 @@ export function TranscriptEntryView({
 }) {
   switch (entry.kind) {
     case "message":
-      return entry.role === "user" ? (
+      return <TranscriptEntrance motionKey={entry.key}>{entry.role === "user" ? (
         <UserBand
           text={entry.text}
           origin={entry.origin}
@@ -63,7 +64,7 @@ export function TranscriptEntryView({
             </Bubble>
           </MessageContent>
         </Message>
-      );
+      )}</TranscriptEntrance>;
     case "system":
       return <SystemChips entries={[entry]} />;
     case "reasoning":
@@ -147,7 +148,6 @@ const COLLAPSED_TEXT_HEIGHT = 160;
 export function UserBand({
   text,
   origin,
-  pending = false,
   steering = false,
   media,
 }: {
@@ -155,7 +155,6 @@ export function UserBand({
   /// Application-supplied origin of the input; `event` marks a delivered bot
   /// event, which gets a sender header instead of a plain band.
   origin?: string;
-  pending?: boolean;
   /// A message injected into a running run rather than its initial input.
   steering?: boolean;
   /// Images and documents sent with the input.
@@ -190,7 +189,6 @@ export function UserBand({
           variant="muted"
           className={cn(
             "w-full max-w-full",
-            pending && "opacity-60",
             event && "*:data-[slot=bubble-content]:border-l-2 *:data-[slot=bubble-content]:border-l-teal-600/60 *:data-[slot=bubble-content]:rounded-l-sm dark:*:data-[slot=bubble-content]:border-l-teal-300/50",
           )}
         >
@@ -276,8 +274,6 @@ export interface QueuedRunItem {
   key: string;
   runId: string | null;
   text: string;
-  /// Still being submitted or awaiting the engine's acknowledgement.
-  pending?: boolean;
   /// A cancel is in flight for this queued run.
   cancelling?: boolean;
 }
@@ -306,7 +302,7 @@ export function QueuedRunsBar({
             key={item.key}
             className={cn(
               "flex items-center gap-2 text-sm",
-              (item.pending || item.cancelling) && "opacity-60",
+              item.cancelling && "opacity-60",
             )}
           >
             <span className="w-5 shrink-0 text-right text-xs text-muted-foreground">

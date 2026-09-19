@@ -67,6 +67,20 @@ label or color emphasis. All user-role messages collapse to
 about 206px when their rendered text exceeds 160px, with a bottom fade and
 keyboard-accessible Show more / Show less controls. Resizing rechecks wrapping,
 and expansion leaves bottom-following to keep the message in view.
+Locally submitted run inputs keep the same message element and expansion state
+through confirmation, whether acknowledgement arrives through the POST or event
+stream first. Submitted messages, steering, and queued inputs use their normal
+opacity immediately; acceptance causes no visual change. Failed sends remove
+the optimistic message and show an error in the composer.
+Backend-loaded runs use run IDs as rendering keys. Loading an older input or
+submission acknowledgement does not remount the run or reset its expanded state.
+New inputs, activity boxes, and assistant messages enter with a 200 ms fade and
+4 px rise. Initial history and older-page arrivals stay still; confirmation,
+text updates, final-answer promotion, and opening hidden activity do not replay
+entrances. Reduced-motion preferences disable them, and layout height is not animated.
+Messages arriving while their activity box is entering share that animation;
+only messages arriving after it ends get an individual entrance. Thinking traces
+and tool batches do not animate separately inside the box.
 
 Session transcripts open with one recent event window from
 `session/events/read` with `direction: "backward"`, then follow `session/events/read` strictly after
@@ -90,6 +104,11 @@ time, duration, output size. Activity families come from the API's
 other); bot rows use the bot mark, and Emit rows resolve peer bot ids to
 display names through the bot roster. Delivered bot events (`origin: "event"`)
 render as bands headed by sender, kind and `#N`.
+Completed replies are selected by the run's recorded output reference, not by
+the last transcript row. Chat Completions reasoning appears before the message
+from the same turn; this display ordering does not rewrite stored context or
+reorder other providers' native output items. Missing output entries become
+visible as their history page loads, without promoting an interim message.
 A finished run's work folds behind one strip naming the outcome and duration
 ("Worked for 2m 14s", "Failed after 38s"), the tool call count and failures.
 From medium widths up the strip ends with a hoverable statistics button
@@ -108,7 +127,8 @@ second under 10 s, then seconds, minutes and hours. Two preferences live in
 the session-title and active bot-conversation menus: "Collapse completed runs"
 (default on; applies when a session or older history loads, and a strip click
 overrides it per run until the preference changes) and "Show run statistics"
-(default on; hides the statistics button while failures stay visible). Both
+(default on; hides the statistics button and standalone duration lines for
+runs without activity, while failures and cancellations stay visible). Both
 are saved per user in local storage, shared across sessions, bots, universes,
 and tabs in this browser. A live run streams open with a status row at its
 foot; a folded run mounts none of its work.
@@ -116,11 +136,19 @@ History is reconstructed chronologically and deduplicated by event/entry ID;
 historical lifecycle transitions never overwrite live controls. History errors
 retry independently of live polling, and changing sessions aborts both paths.
 Live polling retries a transient connection failure immediately with `waitMs: 0`
-and at most one event from the unchanged cursor. Only a failed recovery probe shows a disconnect;
+and at most one event from the unchanged cursor. A failed recovery probe starts
+a ten-second presentation grace period before a muted disconnect notice;
 an empty successful probe clears it immediately and resumes normal long-polling.
 Authorization and event-integrity errors remain visible immediately. Live reads
 have a deadline ten seconds beyond their requested wait so stalled connections
 cannot stop updates indefinitely.
+Transcript and list read errors share this presentation rule: transient transport,
+timeout, rate-limit, and server errors stay quiet for ten seconds in transcripts
+and three seconds in lists, then show a
+muted connection notice. Initial reads show loading during that interval; cached
+content remains visible. Lists retain one retry for transient failures and expose
+actionable errors without a retry delay. Notices only say "retrying" where the
+transcript reader continues retrying; mutation error handling is unchanged.
 
 The authoritative configuration reference is
 [environment-variable reference](../docs/documentation/reference/environment-variables.md), with separate sections for the

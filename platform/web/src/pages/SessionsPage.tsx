@@ -99,9 +99,11 @@ import {
   type QueuedRunItem,
 } from "@/components/session/transcript-view";
 import { RunSectionView } from "@/components/session/run-section";
+import { TranscriptEntrance, TranscriptMotionProvider } from "@/components/session/transcript-motion";
 import { TranscriptLinksContext, type TranscriptLinks } from "@/components/session/tool-trace";
-import { sectionsByRun } from "@/lib/sessions/run-sections";
+import { sectionsByRun, withPendingRunInputs } from "@/lib/sessions/run-sections";
 import { CenteredNote, LoadingNote, UniverseNotFound } from "@/components/page";
+import { ReadError } from "@/components/read-error";
 import { useSessionTail } from "@/lib/sessions/tail";
 import {
   mediaByHandle,
@@ -595,7 +597,7 @@ function SessionList({
       <div className="min-h-0 flex-1 overflow-y-auto">
         {pages.isLoading && <p className="p-4 text-sm text-muted-foreground">Loading…</p>}
         {pages.error && (
-          <p className="p-4 text-sm text-destructive">{pages.error.message}</p>
+          <ReadError error={pages.error} loading={!pages.data} className="p-4" />
         )}
         {pages.data && allSessions.length === 0 && (
           <p className="p-4 text-sm text-muted-foreground">
@@ -1273,6 +1275,11 @@ export function SessionDetail({
       ),
   });
   const [pending, setPending] = useState<PendingMessage[]>([]);
+  // Retain only this view's local submission identities after pending cleanup.
+  // Historical acknowledgements must never rekey a backend-loaded run. Scope
+  // these records because run ids repeat across sessions.
+  const [localSubmissions, setLocalSubmissions] = useState<Map<string, Map<string, string | null>>>(() => new Map());
+  const submissionScope = JSON.stringify([universeId, sessionId]);
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
   const [notices, setNotices] = useState<{ id: string; text: string }[]>([]);
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null);
@@ -1453,6 +1460,12 @@ export function SessionDetail({
     (message) =>
       !isQueuedPending(message) && !(message.runId && confirmedInputRuns.has(message.runId)),
   );
+  const submissionKeys = new Map<string, string>();
+  for (const [submissionId, acknowledgedRunId] of localSubmissions.get(submissionScope) ?? []) {
+    const runId = acknowledgedRunId ?? runBySubmission.get(submissionId);
+    if (runId) submissionKeys.set(runId, submissionId);
+  }
+  const displaySections = withPendingRunInputs(sections, pendingInTranscript, submissionKeys);
   const confirmedSteers = new Set(
     entries
       .filter((entry) => entry.kind === "message" && entry.role === "user" && entry.steering)
@@ -1495,7 +1508,6 @@ export function SessionDetail({
         key: message.id,
         runId: message.runId ?? null,
         text: message.text,
-        pending: true,
       })),
   ];
   const closed = session.data?.status === "closed";
@@ -1564,6 +1576,9 @@ export function SessionDetail({
     // POST returns the original run instead of starting a second one.
     const submissionId = crypto.randomUUID();
     const expectQueued = runActive;
+    setLocalSubmissions((previous) => new Map(previous).set(
+      submissionScope, new Map(previous.get(submissionScope)).set(submissionId, null),
+    ));
     setPending((prev) => [
       ...prev,
       { id: submissionId, text, runId: null, status: "sending", expectQueued },
@@ -1575,6 +1590,9 @@ export function SessionDetail({
         { text, submissionId },
       );
       setFollowRequest((request) => request + 1);
+      setLocalSubmissions((previous) => new Map(previous).set(
+        submissionScope, new Map(previous.get(submissionScope)).set(submissionId, accepted.run.id),
+      ));
       setPending((prev) =>
         prev.map((message) =>
           message.id === submissionId
@@ -1972,6 +1990,7 @@ export function SessionDetail({
       />
       <TranscriptLinksContext.Provider value={transcriptLinks}>
       <MessageScrollerProvider key={`${universeId}/${sessionId}`} autoScroll defaultScrollPosition="end">
+        <TranscriptMotionProvider sections={displaySections} pendingKeys={visiblePendingSteers.map((steer) => steer.id)} ready={tail.phase === "live"} historyRevision={tail.historyRevision}>
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport preserveScrollOnPrepend>
             <SessionHistoryLoader tail={tail} />
@@ -1980,14 +1999,14 @@ export function SessionDetail({
                 <LoadingNote />
               )}
               {tail.error && entries.length === 0 && (
-                <p className="text-sm text-destructive">{tail.error}</p>
+                <ReadError error={tail.error} transient={tail.errorIsTransient} retrying loading graceMs={10_000} />
               )}
               {tail.phase === "live" &&
                 entries.length === 0 &&
                 pendingInTranscript.length === 0 && (
                   <CenteredNote>No conversation yet — say something below.</CenteredNote>
                 )}
-              {sections.map((section) => (
+              {displaySections.map((section) => (
                 <MessageScrollerItem key={section.key} messageId={section.key}>
                   {section.kind === "run" ? (
                     <RunSectionView
@@ -2004,14 +2023,9 @@ export function SessionDetail({
                   )}
                 </MessageScrollerItem>
               ))}
-              {pendingInTranscript.map((message) => (
-                <MessageScrollerItem key={message.id} messageId={message.id}>
-                  <UserBand text={message.text} pending />
-                </MessageScrollerItem>
-              ))}
               {visiblePendingSteers.map((steer) => (
                 <MessageScrollerItem key={steer.id} messageId={steer.id}>
-                  <UserBand text={steer.text} pending steering />
+                  <TranscriptEntrance motionKey={steer.id}><UserBand text={steer.text} steering /></TranscriptEntrance>
                 </MessageScrollerItem>
               ))}
               {notices.map((notice) => (
@@ -2033,9 +2047,7 @@ export function SessionDetail({
                 </MessageScrollerItem>
               )}
               {tail.error && entries.length > 0 && (
-                <p className="text-center text-xs text-destructive">
-                  Connection lost — retrying. ({tail.error})
-                </p>
+                <ReadError error={tail.error} transient={tail.errorIsTransient} retrying graceMs={10_000} className="text-center text-xs" />
               )}
             </MessageScrollerContent>
           </MessageScrollerViewport>
@@ -2049,6 +2061,7 @@ export function SessionDetail({
           pending={pendingInTranscript}
           activeRun={activeRun}
         />
+        </TranscriptMotionProvider>
       </MessageScrollerProvider>
       </TranscriptLinksContext.Provider>
       {!closed && (
