@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -218,7 +218,6 @@ pub(crate) struct ChatSessionDriver {
     /// Projected turns of terminal runs, keyed by run id. A terminal run
     /// never changes, so each is read through `session/runs/read` once.
     finished_turns: BTreeMap<String, ChatTurn>,
-    sessions: BTreeSet<String>,
     pending_run: Option<PendingRunHandle>,
     notice_seq: u64,
 }
@@ -259,7 +258,6 @@ impl ChatSessionDriver {
             active_tool_chains: Vec::new(),
             run_states: BTreeMap::new(),
             finished_turns: BTreeMap::new(),
-            sessions: BTreeSet::from([session_id.clone()]),
             pending_run: None,
             notice_seq: 0,
         };
@@ -1079,7 +1077,6 @@ impl ChatSessionDriver {
             })]);
         }
         let session_id = new_session_id();
-        self.sessions.insert(session_id.clone());
         self.session_id = session_id.clone();
         self.event_cursor = None;
         self.turns.clear();
@@ -1110,10 +1107,19 @@ impl ChatSessionDriver {
             })]);
         }
         let session_id = validate_session_id(&session_id)?;
-        if !self.sessions.contains(&session_id) {
+        // `/sessions` lists every session the gateway holds, so any of them
+        // may be opened; confirm it exists before dropping the current one.
+        if let Err(error) = self
+            .api
+            .read_session(SessionReadParams {
+                session_id: session_id.clone(),
+                run_limit: Some(1),
+            })
+            .await
+        {
             return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message: format!("unknown loaded session: {session_id}"),
-                action: Some("use /new to create a session in this process".into()),
+                message: format!("cannot open session {session_id}: {}", api_error(error)),
+                action: Some("pick a session from /sessions or use /new".into()),
             })]);
         }
         self.session_id = session_id.clone();
