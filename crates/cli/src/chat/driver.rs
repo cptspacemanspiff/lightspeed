@@ -24,7 +24,7 @@ use crate::chat::protocol::{
     ChatMessageView, ChatProgressStatus, ChatRunStats, ChatRunView, ChatSessionSummary,
     ChatSettingsView, ChatStatus, ChatToolCallDisplayView, ChatToolCallView, ChatToolChainView,
     ChatToolDisplayGroup, ChatTurn, DEFAULT_CHAT_REASONING_EFFORT, GATEWAY_WORLD_ID,
-    run_stats_summary, run_status, session_lifecycle,
+    ModelPickerPurpose, run_stats_summary, run_status, session_lifecycle,
 };
 use crate::chat::session::{new_session_id, new_submission_id, validate_session_id};
 
@@ -219,6 +219,8 @@ pub(crate) struct ChatSessionDriver {
     /// Projected turns of terminal runs, keyed by run id. A terminal run
     /// never changes, so each is read through `session/runs/read` once.
     finished_turns: BTreeMap<String, ChatTurn>,
+    /// API kind the session is pinned to, from the last `session/read`.
+    session_api_kind: Option<String>,
     /// Model calls and last prompt size per run id, from observed
     /// `turnGenerationCompleted` events; the run views do not carry them.
     generation_stats: BTreeMap<String, GenerationStats>,
@@ -268,6 +270,7 @@ impl ChatSessionDriver {
             active_tool_chains: Vec::new(),
             run_states: BTreeMap::new(),
             finished_turns: BTreeMap::new(),
+            session_api_kind: None,
             generation_stats: BTreeMap::new(),
             pending_run: None,
             notice_seq: 0,
@@ -338,6 +341,12 @@ impl ChatSessionDriver {
             ChatCommand::SubmitUserMessage { text } => self.submit_user_message(text).await,
             ChatCommand::SetDraftProvider { provider } => self.set_provider(provider).await,
             ChatCommand::SetDraftModel { model } => self.set_model(model).await,
+            ChatCommand::SetDraftRoute {
+                provider,
+                api_kind,
+                model,
+            } => self.set_route(provider, api_kind, model).await,
+            ChatCommand::ListModels { purpose } => self.list_models(purpose).await,
             ChatCommand::SetDraftReasoningEffort { effort } => self.set_effort(effort).await,
             ChatCommand::SetDraftMaxTokens { max_tokens } => self.set_max_tokens(max_tokens).await,
             ChatCommand::ListSessions => {
@@ -723,6 +732,11 @@ impl ChatSessionDriver {
             .await
             .map_err(api_error)?;
         let session = read.result.session;
+        self.session_api_kind = session
+            .config
+            .as_ref()
+            .and_then(|config| config.model.as_ref())
+            .map(|model| model.api_kind.clone());
         let old_turns = self.turns.clone();
         let old_active_tool_chains = self.active_tool_chains.clone();
         // Detailed transcript and tool state are maintained from the bounded
@@ -1105,6 +1119,7 @@ impl ChatSessionDriver {
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
+        self.session_api_kind = None;
         self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
@@ -1151,6 +1166,7 @@ impl ChatSessionDriver {
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
+        self.session_api_kind = None;
         self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
@@ -1182,6 +1198,64 @@ impl ChatSessionDriver {
         }
         self.settings.model = model;
         Ok(vec![self.setting_status("model updated")])
+    }
+
+    async fn set_route(
+        &mut self,
+        provider: String,
+        api_kind: String,
+        model: String,
+    ) -> Result<Vec<ChatEvent>> {
+        if self.model_locked() {
+            return Ok(vec![ChatEvent::Error(ChatErrorView {
+                message: "model switching is not supported while a run is active".into(),
+                action: Some("wait for the current run to finish first".into()),
+            })]);
+        }
+        self.settings.provider = provider;
+        self.settings.api_kind = api_kind;
+        self.settings.model = model;
+        Ok(vec![self.setting_status("model updated")])
+    }
+
+    /// Discovery failure reports an error and opens no picker.
+    async fn list_models(&mut self, purpose: ModelPickerPurpose) -> Result<Vec<ChatEvent>> {
+        match self
+            .api
+            .list_models(api::ModelListParams {
+                selectable_only: true,
+            })
+            .await
+        {
+            Ok(outcome) => {
+                let mut events = Vec::new();
+                let failed = outcome
+                    .result
+                    .providers
+                    .iter()
+                    .filter_map(|provider| {
+                        let error = provider.error.as_ref()?;
+                        Some(format!("{}: {error}", provider.provider_id))
+                    })
+                    .collect::<Vec<_>>();
+                if !failed.is_empty() {
+                    events.push(self.notice_event(
+                        "models",
+                        format!("model discovery incomplete\n{}", failed.join("\n")),
+                    ));
+                }
+                events.push(ChatEvent::ModelsListed {
+                    purpose,
+                    models: outcome.result.models,
+                    providers: outcome.result.providers,
+                });
+                Ok(events)
+            }
+            Err(error) => Ok(vec![ChatEvent::Error(ChatErrorView {
+                message: format!("model discovery failed: {}", api_error(error)),
+                action: Some("set a model directly with /model <name>".into()),
+            })]),
+        }
     }
 
     async fn set_effort(
@@ -1262,6 +1336,7 @@ impl ChatSessionDriver {
             provider: self.settings.provider.clone(),
             api_kind: self.settings.api_kind.clone(),
             model: self.settings.model.clone(),
+            session_api_kind: self.session_api_kind.clone(),
             reasoning_effort: self.settings.reasoning_effort,
             max_tokens: self.settings.max_tokens,
             provider_editable: model_editable,
@@ -1781,7 +1856,7 @@ fn print_event(event: &ChatEvent) -> Result<()> {
                 println!("{} {status}", session.session_id);
             }
         }
-        ChatEvent::SkillsListed { .. } => {}
+        ChatEvent::SkillsListed { .. } | ChatEvent::ModelsListed { .. } => {}
         ChatEvent::SessionSelected(summary) => {
             let status = summary.status.map(session_status_text).unwrap_or("unknown");
             println!(

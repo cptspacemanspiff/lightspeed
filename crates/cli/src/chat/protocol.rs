@@ -74,6 +74,16 @@ pub(crate) enum ChatCommand {
     SetDraftModel {
         model: String,
     },
+    /// Provider, API kind, and model chosen together from discovery.
+    SetDraftRoute {
+        provider: String,
+        api_kind: String,
+        model: String,
+    },
+    /// Discover models through `models/list`, then open the picker for `purpose`.
+    ListModels {
+        purpose: ModelPickerPurpose,
+    },
     SetDraftReasoningEffort {
         effort: Option<ReasoningEffort>,
     },
@@ -119,6 +129,12 @@ pub(crate) enum ChatEvent {
         session_id: String,
         catalogs: Vec<api::SkillCatalogView>,
     },
+    /// `models/list` result that opens the picker for `purpose`.
+    ModelsListed {
+        purpose: ModelPickerPurpose,
+        models: Vec<api::ModelView>,
+        providers: Vec<api::ModelProviderDiscoveryView>,
+    },
     SessionSelected(ChatSessionSummary),
     HistoryReset {
         session_id: String,
@@ -158,11 +174,23 @@ pub(crate) struct ChatConnectionInfo {
     pub settings: ChatSettingsView,
 }
 
+/// Which picker a `models/list` request feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelPickerPurpose {
+    Model,
+    Provider,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ChatSettingsView {
     pub provider: String,
     pub api_kind: String,
     pub model: String,
+    /// API kind the session is pinned to, from the last `session/read`;
+    /// model choices must keep it. `None` until the session is read.
+    #[serde(default)]
+    pub session_api_kind: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tokens: Option<u32>,
     pub provider_editable: bool,

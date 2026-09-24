@@ -61,6 +61,7 @@ impl TranscriptState {
             }
             ChatEvent::SessionsListed { .. }
             | ChatEvent::SkillsListed { .. }
+            | ChatEvent::ModelsListed { .. }
             | ChatEvent::SessionSelected(_) => {}
             ChatEvent::HistoryReset { session_id } => {
                 self.cells.clear();
