@@ -36,27 +36,16 @@ pub(crate) struct ChatArgs {
     /// Start with a fresh session ID.
     #[arg(long)]
     new: bool,
-    /// Provider ID for the model adapter.
-    #[arg(
-        long,
-        env = "LIGHTSPEED_CHAT_PROVIDER",
-        default_value = crate::chat::protocol::DEFAULT_CHAT_PROVIDER
-    )]
-    provider: String,
+    /// Provider ID for the model adapter. With --api-kind and --model;
+    /// omit all three for the deployment default.
+    #[arg(long, requires_all = ["api_kind", "model"])]
+    provider: Option<String>,
     /// Provider API kind.
-    #[arg(
-        long = "api-kind",
-        env = "LIGHTSPEED_CHAT_API_KIND",
-        default_value = crate::chat::protocol::DEFAULT_CHAT_API_KIND
-    )]
-    api_kind: String,
+    #[arg(long = "api-kind", requires_all = ["provider", "model"])]
+    api_kind: Option<String>,
     /// Model name.
-    #[arg(
-        long,
-        env = "LIGHTSPEED_CHAT_MODEL",
-        default_value = crate::chat::protocol::DEFAULT_CHAT_MODEL
-    )]
-    model: String,
+    #[arg(long, requires_all = ["provider", "api_kind"])]
+    model: Option<String>,
     /// Reasoning effort: low, medium, high, or none.
     #[arg(long, env = "LIGHTSPEED_CHAT_REASONING_EFFORT", default_value = "high")]
     effort: Option<String>,
@@ -732,11 +721,18 @@ impl ChatSessionDriver {
             .await
             .map_err(api_error)?;
         let session = read.result.session;
-        self.session_api_kind = session
+        let session_model = session
             .config
             .as_ref()
-            .and_then(|config| config.model.as_ref())
-            .map(|model| model.api_kind.clone());
+            .and_then(|config| config.model.as_ref());
+        self.session_api_kind = session_model.map(|model| model.api_kind.clone());
+        if !self.settings.route_requested
+            && let Some(model) = session_model
+        {
+            self.settings.provider = model.provider_id.clone();
+            self.settings.api_kind = model.api_kind.clone();
+            self.settings.model = model.model.clone();
+        }
         let old_turns = self.turns.clone();
         let old_active_tool_chains = self.active_tool_chains.clone();
         // Detailed transcript and tool state are maintained from the bounded
@@ -1185,6 +1181,7 @@ impl ChatSessionDriver {
             })]);
         }
         self.settings.provider = provider;
+        self.settings.route_requested = true;
         Ok(vec![self.setting_status("provider updated")])
     }
 
@@ -1197,6 +1194,7 @@ impl ChatSessionDriver {
             })]);
         }
         self.settings.model = model;
+        self.settings.route_requested = true;
         Ok(vec![self.setting_status("model updated")])
     }
 
@@ -1215,6 +1213,7 @@ impl ChatSessionDriver {
         self.settings.provider = provider;
         self.settings.api_kind = api_kind;
         self.settings.model = model;
+        self.settings.route_requested = true;
         Ok(vec![self.setting_status("model updated")])
     }
 
@@ -1724,9 +1723,10 @@ fn draft_settings(args: &ChatArgs) -> Result<ChatDraftSettings> {
     };
 
     Ok(ChatDraftSettings {
-        provider: args.provider.clone(),
-        api_kind: args.api_kind.clone(),
-        model: args.model.clone(),
+        provider: args.provider.clone().unwrap_or_default(),
+        api_kind: args.api_kind.clone().unwrap_or_default(),
+        model: args.model.clone().unwrap_or_default(),
+        route_requested: args.model.is_some(),
         reasoning_effort,
         max_tokens: args.max_tokens,
         web_search: args.no_web_search.then_some(false),
@@ -1756,17 +1756,18 @@ fn mount_access(settings: &ChatDraftSettings) -> WorkspaceAccess {
     settings.filesystem_tools.unwrap_or(WorkspaceAccess::Edit)
 }
 
-fn model_config(settings: &ChatDraftSettings) -> ModelConfig {
-    ModelConfig {
+/// `None` leaves the model to the session, or to the deployment default.
+fn model_config(settings: &ChatDraftSettings) -> Option<ModelConfig> {
+    settings.route_requested.then(|| ModelConfig {
         provider_id: settings.provider.clone(),
         api_kind: settings.api_kind.clone(),
         model: settings.model.clone(),
-    }
+    })
 }
 
 fn session_start_config(settings: &ChatDraftSettings) -> api::SessionConfig {
     api::SessionConfig {
-        model: Some(model_config(settings)),
+        model: model_config(settings),
         generation: Some(generation_config(settings)),
         limits: None,
         context: None,
@@ -1781,10 +1782,11 @@ fn session_start_config(settings: &ChatDraftSettings) -> api::SessionConfig {
 /// profile/session configuration.
 fn dev_features(settings: &ChatDraftSettings) -> FeaturesConfig {
     let web_fetch = settings.web_fetch.unwrap_or(true);
+    // An unknown api kind (deployment default) is left to server validation.
     let web_search = settings.web_search.unwrap_or(true)
         && matches!(
             settings.api_kind.as_str(),
-            "openai:responses" | "anthropic:messages"
+            "" | "openai:responses" | "anthropic:messages"
         );
     FeaturesConfig {
         vfs: Some(VfsFeature {
@@ -1808,7 +1810,7 @@ fn dev_features(settings: &ChatDraftSettings) -> FeaturesConfig {
 
 fn run_start_config(settings: &ChatDraftSettings) -> RunStartConfig {
     RunStartConfig {
-        model: Some(model_config(settings)),
+        model: model_config(settings),
         generation: Some(generation_config(settings)),
         limits: None,
     }
@@ -2397,13 +2399,66 @@ mod tests {
         assert!(features.web.as_ref().is_none_or(|web| web.search.is_none()));
     }
 
+    #[test]
+    fn omitted_route_leaves_model_to_deployment_default() {
+        let args = ChatArgs {
+            provider: None,
+            api_kind: None,
+            model: None,
+            ..chat_args_with_effort(Some("high"))
+        };
+        let settings = draft_settings(&args).expect("draft settings");
+        assert!(!settings.route_requested);
+
+        let session = session_start_config(&settings);
+        assert!(session.model.is_none());
+        // Effort depends on the api kind, which is unknown until the session
+        // resolves the default; runs send it once the session is read.
+        assert_eq!(
+            session.generation.expect("generation").reasoning_effort,
+            None
+        );
+        assert!(
+            session
+                .features
+                .and_then(|features| features.web)
+                .is_some_and(|web| web.search.is_some())
+        );
+        assert!(run_start_config(&settings).model.is_none());
+    }
+
+    #[test]
+    fn route_flags_must_be_given_together() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            chat: ChatArgs,
+        }
+        use clap::Parser;
+
+        let partial = Cli::try_parse_from(["chat", "--api-url", "http://x", "--model", "gpt-5.4"]);
+        assert!(partial.is_err());
+        let full = Cli::try_parse_from([
+            "chat",
+            "--api-url",
+            "http://x",
+            "--provider",
+            "openai",
+            "--api-kind",
+            "openai:responses",
+            "--model",
+            "gpt-5.4",
+        ]);
+        assert!(full.is_ok());
+    }
+
     fn chat_args_with_effort(effort: Option<&str>) -> ChatArgs {
         ChatArgs {
             session: None,
             new: true,
-            provider: "openai".into(),
-            api_kind: "openai:responses".into(),
-            model: "gpt-5.5".into(),
+            provider: Some("openai".into()),
+            api_kind: Some("openai:responses".into()),
+            model: Some("gpt-5.5".into()),
             effort: effort.map(str::to_string),
             max_tokens: None,
             no_web_search: false,

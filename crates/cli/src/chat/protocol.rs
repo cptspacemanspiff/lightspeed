@@ -3,16 +3,19 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const GATEWAY_WORLD_ID: &str = "gateway";
-pub(crate) const DEFAULT_CHAT_PROVIDER: &str = "openai";
-pub(crate) const DEFAULT_CHAT_API_KIND: &str = "openai:responses";
-pub(crate) const DEFAULT_CHAT_MODEL: &str = "gpt-5.5";
 pub(crate) const DEFAULT_CHAT_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ChatDraftSettings {
+    /// Model route: the requested one when `route_requested`, otherwise the
+    /// session's resolved deployment default (empty until a session is read).
     pub provider: String,
     pub api_kind: String,
     pub model: String,
+    /// The route was chosen by a flag or picker and is sent with session
+    /// starts and runs; otherwise the server's deployment default applies.
+    #[serde(default)]
+    pub route_requested: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tokens: Option<u32>,
     pub web_search: Option<bool>,
@@ -37,12 +40,10 @@ pub(crate) enum ReasoningEffort {
 impl Default for ChatDraftSettings {
     fn default() -> Self {
         Self {
-            provider: std::env::var("LIGHTSPEED_CHAT_PROVIDER")
-                .unwrap_or_else(|_| DEFAULT_CHAT_PROVIDER.into()),
-            api_kind: std::env::var("LIGHTSPEED_CHAT_API_KIND")
-                .unwrap_or_else(|_| DEFAULT_CHAT_API_KIND.into()),
-            model: std::env::var("LIGHTSPEED_CHAT_MODEL")
-                .unwrap_or_else(|_| DEFAULT_CHAT_MODEL.into()),
+            provider: String::new(),
+            api_kind: String::new(),
+            model: String::new(),
+            route_requested: false,
             reasoning_effort: default_reasoning_effort_from_env(),
             max_tokens: std::env::var("LIGHTSPEED_CHAT_MAX_TOKENS")
                 .ok()
