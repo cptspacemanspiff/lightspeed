@@ -583,6 +583,7 @@ mod tests {
             output_ref: None,
             started_at_ns: 0,
             updated_at_ns: 0,
+            stats: Default::default(),
         }));
 
         let rendered = pane.status_line().to_string();

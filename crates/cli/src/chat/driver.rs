@@ -21,9 +21,10 @@ use crate::api_client::{HttpAgentApi, api_error};
 use crate::chat::preview::compact_preview;
 use crate::chat::protocol::{
     ChatCommand, ChatConnectionInfo, ChatDelta, ChatDraftSettings, ChatErrorView, ChatEvent,
-    ChatMessageView, ChatProgressStatus, ChatRunView, ChatSessionSummary, ChatSettingsView,
-    ChatStatus, ChatToolCallDisplayView, ChatToolCallView, ChatToolChainView, ChatToolDisplayGroup,
-    ChatTurn, DEFAULT_CHAT_REASONING_EFFORT, GATEWAY_WORLD_ID, run_status, session_lifecycle,
+    ChatMessageView, ChatProgressStatus, ChatRunStats, ChatRunView, ChatSessionSummary,
+    ChatSettingsView, ChatStatus, ChatToolCallDisplayView, ChatToolCallView, ChatToolChainView,
+    ChatToolDisplayGroup, ChatTurn, DEFAULT_CHAT_REASONING_EFFORT, GATEWAY_WORLD_ID,
+    run_stats_summary, run_status, session_lifecycle,
 };
 use crate::chat::session::{new_session_id, new_submission_id, validate_session_id};
 
@@ -218,6 +219,9 @@ pub(crate) struct ChatSessionDriver {
     /// Projected turns of terminal runs, keyed by run id. A terminal run
     /// never changes, so each is read through `session/runs/read` once.
     finished_turns: BTreeMap<String, ChatTurn>,
+    /// Model calls and last prompt size per run id, from observed
+    /// `turnGenerationCompleted` events; the run views do not carry them.
+    generation_stats: BTreeMap<String, GenerationStats>,
     pending_run: Option<PendingRunHandle>,
     notice_seq: u64,
 }
@@ -226,6 +230,12 @@ pub(crate) struct ChatSessionDriver {
 struct TrackedRun {
     id: String,
     status: api::RunStatus,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GenerationStats {
+    calls: u32,
+    last_input_tokens: Option<u32>,
 }
 
 type PendingRunHandle =
@@ -258,6 +268,7 @@ impl ChatSessionDriver {
             active_tool_chains: Vec::new(),
             run_states: BTreeMap::new(),
             finished_turns: BTreeMap::new(),
+            generation_stats: BTreeMap::new(),
             pending_run: None,
             notice_seq: 0,
         };
@@ -795,6 +806,12 @@ impl ChatSessionDriver {
                 continue;
             }
             let mut turn = turn_from_summary(summary, &self.settings);
+            if let (Some(run), Some(generations)) =
+                (turn.run.as_mut(), self.generation_stats.get(&summary.id))
+            {
+                run.stats.model_calls = Some(generations.calls);
+                run.stats.context_tokens = generations.last_input_tokens;
+            }
             if run_is_terminal(summary.status)
                 && let Ok(read) = self
                     .api
@@ -930,7 +947,13 @@ impl ChatSessionDriver {
             SessionEventKindView::TurnGenerationRequested { .. } => {
                 events.push(self.status_event("thinking"))
             }
-            SessionEventKindView::TurnGenerationCompleted { .. } => {}
+            SessionEventKindView::TurnGenerationCompleted { run_id, usage, .. } => {
+                let stats = self.generation_stats.entry(run_id.clone()).or_default();
+                stats.calls = stats.calls.saturating_add(1);
+                if let Some(input) = usage.as_ref().and_then(|usage| usage.input_tokens) {
+                    stats.last_input_tokens = Some(input);
+                }
+            }
             SessionEventKindView::ToolBatchStarted {
                 run_id,
                 batch_id,
@@ -1024,6 +1047,7 @@ impl ChatSessionDriver {
             output_ref: None,
             started_at_ns: observed_at_ms.saturating_mul(1_000_000),
             updated_at_ns: observed_at_ms.saturating_mul(1_000_000),
+            stats: Default::default(),
         }
     }
 
@@ -1081,6 +1105,7 @@ impl ChatSessionDriver {
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
+        self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
         self.api
@@ -1126,6 +1151,7 @@ impl ChatSessionDriver {
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
+        self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
         let mut events = vec![ChatEvent::HistoryReset { session_id }];
@@ -1303,6 +1329,17 @@ fn apply_run_detail(turn: &mut ChatTurn, run: &api::RunView) {
         _ => None,
     });
     turn.tool_chains = project_tool_chains(run);
+    if let Some(view) = turn.run.as_mut() {
+        let stats = &mut view.stats;
+        stats.usage = run.usage.clone().or(stats.usage.take());
+        stats.duration_ms =
+            run_duration_ms(run.started_at_ms, run.completed_at_ms).or(stats.duration_ms);
+        stats.tool_calls = Some(turn.tool_chains.iter().map(|chain| chain.calls.len()).sum());
+    }
+}
+
+fn run_duration_ms(started_at_ms: Option<u64>, completed_at_ms: Option<u64>) -> Option<u64> {
+    Some(completed_at_ms?.saturating_sub(started_at_ms?))
 }
 
 fn project_tool_chains(run: &api::RunView) -> Vec<ChatToolChainView> {
@@ -1556,6 +1593,11 @@ fn run_event_from_summary(
             .or(run.started_at_ms)
             .unwrap_or(run.accepted_at_ms)
             .saturating_mul(1_000_000),
+        stats: Box::new(ChatRunStats {
+            usage: run.usage.clone(),
+            duration_ms: run_duration_ms(run.started_at_ms, run.completed_at_ms),
+            ..Default::default()
+        }),
     })
 }
 
@@ -1755,6 +1797,13 @@ fn print_event(event: &ChatEvent) -> Result<()> {
                 && let Some(message) = &turn.assistant
             {
                 println!("\nassistant: {}\n", message.content);
+                if let Some(summary) = turn
+                    .run
+                    .as_ref()
+                    .and_then(|run| run_stats_summary(&run.stats))
+                {
+                    println!("{summary}\n");
+                }
             }
         }
         ChatEvent::TranscriptDelta(ChatDelta::AppendMessage { .. }) => {}
@@ -1896,6 +1945,48 @@ mod tests {
         let assistant = turn.assistant.expect("assistant message");
         assert_eq!(assistant.id, "item_5");
         assert_eq!(assistant.content, "Hello, world!");
+    }
+
+    #[test]
+    fn finished_run_turn_collects_usage_duration_and_tool_count() {
+        let summary: api::RunSummaryView = serde_json::from_value(serde_json::json!({
+            "id": "run_3",
+            "status": "completed",
+            "acceptedAtMs": 1,
+            "startedAtMs": 1_000,
+            "completedAtMs": 13_345,
+            "source": { "type": "input", "preview": "hi" },
+            "usage": { "inputTokens": 900, "outputTokens": 40, "cachedInputTokens": 800 },
+        }))
+        .expect("run summary");
+        let run: api::RunView = serde_json::from_value(serde_json::json!({
+            "id": "run_3",
+            "status": "completed",
+            "startedAtMs": 1_000,
+            "completedAtMs": 13_345,
+            "source": { "type": "input", "items": [{ "type": "text", "text": "hi" }] },
+            "usage": { "inputTokens": 1_000, "outputTokens": 50, "cachedInputTokens": 800 },
+        }))
+        .expect("run view");
+
+        let mut turn = turn_from_summary(&summary, &ChatDraftSettings::default());
+        let stats = &turn.run.as_ref().expect("run").stats;
+        assert_eq!(stats.duration_ms, Some(12_345));
+        assert_eq!(
+            stats.usage.as_ref().and_then(|usage| usage.input_tokens),
+            Some(900)
+        );
+        assert_eq!(stats.tool_calls, None);
+
+        apply_run_detail(&mut turn, &run);
+
+        let stats = &turn.run.as_ref().expect("run").stats;
+        assert_eq!(
+            stats.usage.as_ref().and_then(|usage| usage.input_tokens),
+            Some(1_000)
+        );
+        assert_eq!(stats.duration_ms, Some(12_345));
+        assert_eq!(stats.tool_calls, Some(0));
     }
 
     #[test]
