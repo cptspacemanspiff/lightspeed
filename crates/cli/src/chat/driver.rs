@@ -1174,10 +1174,8 @@ impl ChatSessionDriver {
     async fn set_provider(&mut self, provider: String) -> Result<Vec<ChatEvent>> {
         if self.model_locked() {
             return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message:
-                    "provider switching is not supported after this session has accepted a run"
-                        .into(),
-                action: Some("start a new session with /new for another provider".into()),
+                message: "provider switching is not supported while a run is active".into(),
+                action: Some("wait for the current run to finish first".into()),
             })]);
         }
         self.settings.provider = provider;
@@ -1188,9 +1186,8 @@ impl ChatSessionDriver {
     async fn set_model(&mut self, model: String) -> Result<Vec<ChatEvent>> {
         if self.model_locked() {
             return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message: "model switching is not supported after this session has accepted a run"
-                    .into(),
-                action: Some("start a new session with /new for another model".into()),
+                message: "model switching is not supported while a run is active".into(),
+                action: Some("wait for the current run to finish first".into()),
             })]);
         }
         self.settings.model = model;
