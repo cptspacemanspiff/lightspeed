@@ -44,6 +44,9 @@ pub(crate) struct ListSelectionRow {
     current: bool,
 }
 
+/// Rows visible at once; the window scrolls to keep the selection in view.
+const VISIBLE_ROWS: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PickerSelection {
     Model(String),
@@ -338,7 +341,7 @@ impl ListSelectionView {
     }
 
     pub(crate) fn desired_height(&self) -> u16 {
-        self.title_height() + self.rows.len().min(8) as u16
+        self.title_height() + self.rows.len().min(VISIBLE_ROWS) as u16
     }
 
     pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -379,6 +382,11 @@ impl ListSelectionView {
     fn render_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.rows.len() + usize::from(self.title.is_some()));
         if let Some(title) = &self.title {
+            let position = if self.rows.len() > VISIBLE_ROWS {
+                format!("  {}/{}", self.selected + 1, self.rows.len())
+            } else {
+                String::new()
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     title.clone(),
@@ -386,10 +394,14 @@ impl ListSelectionView {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("  Esc close", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{position}  Esc close"),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
         }
-        for (idx, row) in self.rows.iter().enumerate() {
+        let first = (self.selected + 1).saturating_sub(VISIBLE_ROWS);
+        for (idx, row) in self.rows.iter().enumerate().skip(first).take(VISIBLE_ROWS) {
             let selected = idx == self.selected;
             let base = if row.disabled_reason.is_some() {
                 Style::default().fg(Color::DarkGray)
@@ -505,6 +517,32 @@ mod tests {
             picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ListSelectionAction::Selected(PickerSelection::Effort(Some(ReasoningEffort::Low)))
         );
+    }
+
+    #[test]
+    fn long_picker_scrolls_to_keep_selection_visible() {
+        let rows = (0..12)
+            .map(|n| {
+                ListSelectionRow::new(
+                    format!("s-{n}"),
+                    "",
+                    PickerSelection::Session(format!("s-{n}")),
+                )
+            })
+            .collect();
+        let mut picker = ListSelectionView::new("Select session", rows);
+        for _ in 0..10 {
+            picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let lines = picker
+            .render_lines(80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1 + VISIBLE_ROWS);
+        assert!(lines[0].contains("11/12"));
+        assert!(lines.last().expect("row").starts_with("> s-10"));
+        assert!(lines[1].contains("s-3"));
     }
 
     #[test]
