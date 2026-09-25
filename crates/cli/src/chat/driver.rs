@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use api::{
-    AgentApiOutcome, EventCursor, FeaturesConfig, GenerationConfig, InlineAgentProfile, InputItem,
-    ModelConfig, ProfileId, ProfileSource, RunStartConfig, RunStartParams, RunStartResponse,
-    RunStartSource, SessionEventKindView, SessionEventView, SessionEventsReadParams,
-    SessionReadParams, SessionStartParams, SessionView, TimersFeature, ToolCallEventView,
-    VfsFeature, VfsPromptsConfig, WebFeature, WebFetchFeature, WebSearchFeature, WorkspaceAccess,
+    AgentApiOutcome, ContextEntryKindView, ContextEntryView, ContextMessageRoleView, EventCursor,
+    FeaturesConfig, GenerationConfig, InlineAgentProfile, InputItem, ModelConfig, ProfileId,
+    ProfileSource, RunReadParams, RunStartConfig, RunStartParams, RunStartResponse, RunStartSource,
+    SessionEventKindView, SessionEventView, SessionEventsReadParams, SessionReadParams,
+    SessionStartParams, SessionView, TimersFeature, ToolBatchView, ToolCallEventView, ToolCallView,
+    ToolItemStatus, VfsFeature, VfsPromptsConfig, WebFeature, WebFetchFeature, WebSearchFeature,
+    WorkspaceAccess,
 };
-#[cfg(test)]
-use api::{ContextEntryKindView, ContextEntryView, ToolBatchView, ToolCallView, ToolItemStatus};
 use clap::Args;
 use serde_json::Value;
 use tokio::task::JoinHandle;
@@ -215,6 +215,9 @@ pub(crate) struct ChatSessionDriver {
     /// reconciled against `session/read`; `/steer`, `/interrupt`, and the
     /// model lock derive the active run from this, not the transcript.
     run_states: BTreeMap<u64, TrackedRun>,
+    /// Projected turns of terminal runs, keyed by run id. A terminal run
+    /// never changes, so each is read through `session/runs/read` once.
+    finished_turns: BTreeMap<String, ChatTurn>,
     pending_run: Option<PendingRunHandle>,
     notice_seq: u64,
 }
@@ -254,6 +257,7 @@ impl ChatSessionDriver {
             turns: Vec::new(),
             active_tool_chains: Vec::new(),
             run_states: BTreeMap::new(),
+            finished_turns: BTreeMap::new(),
             pending_run: None,
             notice_seq: 0,
         };
@@ -726,6 +730,7 @@ impl ChatSessionDriver {
                 )
             })
             .collect();
+        self.turns = self.project_turns(&session).await;
 
         let mut events = Vec::new();
         events.push(ChatEvent::SessionSelected(summary_from_session(&session)));
@@ -770,6 +775,43 @@ impl ChatSessionDriver {
             settings: self.settings_view(),
         }));
         Ok(events)
+    }
+
+    /// Transcript turns for the session's runs. `session/read` carries only
+    /// run summaries, so a terminal run is read once through
+    /// `session/runs/read` for its reply and tool chains, then cached; a run
+    /// still in flight shows its input until it finishes. A failed read
+    /// (e.g. a run over the server's detail ceiling) falls back to the
+    /// summary and is retried on the next refresh.
+    async fn project_turns(&mut self, session: &SessionView) -> Vec<ChatTurn> {
+        let active = session
+            .active_run
+            .as_ref()
+            .filter(|active| !session.runs.iter().any(|run| run.id == active.id));
+        let mut turns = Vec::with_capacity(session.runs.len() + 1);
+        for summary in session.runs.iter().chain(active) {
+            if let Some(turn) = self.finished_turns.get(&summary.id) {
+                turns.push(turn.clone());
+                continue;
+            }
+            let mut turn = turn_from_summary(summary, &self.settings);
+            if run_is_terminal(summary.status)
+                && let Ok(read) = self
+                    .api
+                    .read_run(RunReadParams {
+                        session_id: self.session_id.clone(),
+                        run_id: summary.id.clone(),
+                    })
+                    .await
+            {
+                apply_run_detail(&mut turn, &read.result.run);
+                self.finished_turns.insert(summary.id.clone(), turn.clone());
+            }
+            turns.push(turn);
+        }
+        // Summaries arrive newest first; the transcript reads oldest first.
+        turns.sort_by_key(|turn| run_seq_from_id(&turn.turn_id));
+        turns
     }
 
     async fn drain_event_log(&mut self) -> Result<Vec<ChatEvent>> {
@@ -1038,6 +1080,7 @@ impl ChatSessionDriver {
         self.session_id = session_id.clone();
         self.event_cursor = None;
         self.turns.clear();
+        self.finished_turns.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
         self.api
@@ -1082,6 +1125,7 @@ impl ChatSessionDriver {
         self.session_id = session_id.clone();
         self.event_cursor = None;
         self.turns.clear();
+        self.finished_turns.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
         let mut events = vec![ChatEvent::HistoryReset { session_id }];
@@ -1206,7 +1250,61 @@ async fn build_chat_api(options: &ChatSessionDriverOptions) -> Result<ChatAgentA
     Ok(Arc::new(HttpAgentApi::new(options.api_url.clone())))
 }
 
-#[cfg(test)]
+fn run_is_terminal(status: api::RunStatus) -> bool {
+    matches!(
+        status,
+        api::RunStatus::Completed | api::RunStatus::Failed | api::RunStatus::Cancelled
+    )
+}
+
+fn turn_from_summary(summary: &api::RunSummaryView, settings: &ChatDraftSettings) -> ChatTurn {
+    let api::RunSummarySourceView::Input { preview, .. } = &summary.source;
+    let run = match run_event_from_summary(summary, settings, run_seq_from_id(&summary.id)) {
+        ChatEvent::RunChanged(run) => Some(run),
+        _ => None,
+    };
+    ChatTurn {
+        turn_id: summary.id.clone(),
+        user: preview.clone().map(|content| ChatMessageView {
+            id: format!("{}:input:0", summary.id),
+            role: "user".into(),
+            content,
+            ref_: None,
+        }),
+        assistant_reasoning: None,
+        assistant: None,
+        run,
+        tool_chains: Vec::new(),
+    }
+}
+
+/// Fills a summary turn from the full run: the untruncated text input, the
+/// last assistant message, and the run's tool chains.
+fn apply_run_detail(turn: &mut ChatTurn, run: &api::RunView) {
+    let api::RunViewSource::Input { items } = &run.source;
+    if let Some(InputItem::Text { text, .. }) = items.first()
+        && let Some(user) = turn.user.as_mut()
+    {
+        user.content = text.clone();
+    }
+    turn.assistant = run.entries.iter().rev().find_map(|entry| match entry.kind {
+        ContextEntryKindView::Message {
+            role: ContextMessageRoleView::Assistant,
+        } => Some(ChatMessageView {
+            id: entry.id.clone(),
+            role: "assistant".into(),
+            content: entry
+                .text
+                .clone()
+                .or_else(|| entry.preview.clone())
+                .unwrap_or_else(|| "[media]".to_owned()),
+            ref_: None,
+        }),
+        _ => None,
+    });
+    turn.tool_chains = project_tool_chains(run);
+}
+
 fn project_tool_chains(run: &api::RunView) -> Vec<ChatToolChainView> {
     let mut chains = run
         .tool_batches
@@ -1217,7 +1315,6 @@ fn project_tool_chains(run: &api::RunView) -> Vec<ChatToolChainView> {
     chains
 }
 
-#[cfg(test)]
 fn project_tool_batch(run_id: &str, batch: &ToolBatchView) -> ChatToolChainView {
     let calls = batch
         .calls
@@ -1235,7 +1332,6 @@ fn project_tool_batch(run_id: &str, batch: &ToolBatchView) -> ChatToolChainView 
     }
 }
 
-#[cfg(test)]
 fn project_provider_tool_chains(
     run_id: &str,
     entries: &[ContextEntryView],
@@ -1251,7 +1347,6 @@ fn project_provider_tool_chains(
         .collect()
 }
 
-#[cfg(test)]
 fn project_provider_tool_chain(
     run_id: &str,
     item_id: &str,
@@ -1330,7 +1425,6 @@ fn tool_call_from_event(index: usize, call: &ToolCallEventView) -> ChatToolCallV
     }
 }
 
-#[cfg(test)]
 fn tool_call_from_batch(index: usize, call: &ToolCallView) -> ChatToolCallView {
     ChatToolCallView {
         id: call.call_id.clone(),
@@ -1394,7 +1488,6 @@ fn tool_activity_summary(calls: &[ChatToolCallView]) -> Option<String> {
     )
 }
 
-#[cfg(test)]
 fn tool_status(status: ToolItemStatus) -> ChatProgressStatus {
     match status {
         ToolItemStatus::Requested | ToolItemStatus::Running => ChatProgressStatus::Running,
@@ -1751,6 +1844,58 @@ mod tests {
             tool_status(ToolItemStatus::Cancelled),
             ChatProgressStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn finished_run_turn_shows_full_input_and_last_assistant_message() {
+        let summary: api::RunSummaryView = serde_json::from_value(serde_json::json!({
+            "id": "run_2",
+            "status": "completed",
+            "acceptedAtMs": 1,
+            "completedAtMs": 2,
+            "source": { "type": "input", "preview": "Say hel…", "previewTruncated": true },
+        }))
+        .expect("run summary");
+        let run: api::RunView = serde_json::from_value(serde_json::json!({
+            "id": "run_2",
+            "status": "completed",
+            "source": { "type": "input", "items": [{ "type": "text", "text": "Say hello world" }] },
+            "entries": [
+                {
+                    "id": "item_3",
+                    "kind": { "type": "message", "role": "assistant" },
+                    "content": { "contentRef": "sha256:a" },
+                    "source": { "type": "assistantOutput", "runId": "run_2", "turnId": "turn_1" },
+                    "text": "draft",
+                },
+                {
+                    "id": "item_5",
+                    "kind": { "type": "message", "role": "assistant" },
+                    "content": { "contentRef": "sha256:b" },
+                    "source": { "type": "assistantOutput", "runId": "run_2", "turnId": "turn_2" },
+                    "text": "Hello, world!",
+                },
+            ],
+        }))
+        .expect("run view");
+
+        let mut turn = turn_from_summary(&summary, &ChatDraftSettings::default());
+        assert_eq!(
+            turn.user.as_ref().map(|user| user.content.as_str()),
+            Some("Say hel…")
+        );
+        assert!(turn.assistant.is_none());
+
+        apply_run_detail(&mut turn, &run);
+
+        assert_eq!(turn.turn_id, "run_2");
+        assert_eq!(
+            turn.user.as_ref().map(|user| user.content.as_str()),
+            Some("Say hello world")
+        );
+        let assistant = turn.assistant.expect("assistant message");
+        assert_eq!(assistant.id, "item_5");
+        assert_eq!(assistant.content, "Hello, world!");
     }
 
     #[test]
