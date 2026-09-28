@@ -165,7 +165,7 @@ impl BottomPaneState {
         let (current, editable) = self
             .settings
             .as_ref()
-            .map(|settings| (settings.provider.as_str(), settings.provider_editable))
+            .map(|settings| (settings.provider.as_str(), settings.model_editable))
             .unwrap_or(("", true));
         self.active_view = Some(BottomPaneView::Picker(
             ListSelectionView::discovered_providers(
@@ -174,6 +174,9 @@ impl BottomPaneState {
                 self.session_api_kind(),
                 &self.model_providers,
                 &self.models,
+                self.settings
+                    .as_ref()
+                    .and_then(|settings| settings.session_provider.as_deref()),
             ),
         ));
         self.slash_popup = None;
@@ -695,6 +698,7 @@ mod tests {
             api_kind: "openai:responses".into(),
             model: "gpt-5.5".into(),
             session_api_kind: None,
+            session_provider: None,
             reasoning_effort: None,
             max_tokens: None,
             provider_editable: true,

@@ -5,6 +5,7 @@ use crate::chat::protocol::{ReasoningEffort, parse_reasoning_effort};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlashCommand {
     Help,
+    Refresh,
     NewSession,
     Sessions(Option<String>),
     Quit,
@@ -31,6 +32,7 @@ pub(crate) enum SlashCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashCommandKind {
     Help,
+    Refresh,
     NewSession,
     Sessions,
     Model,
@@ -112,6 +114,7 @@ impl SlashCommandKind {
             SlashCommandKind::Approve,
             SlashCommandKind::Reject,
             SlashCommandKind::Help,
+            SlashCommandKind::Refresh,
             SlashCommandKind::Quit,
         ]
     }
@@ -119,6 +122,7 @@ impl SlashCommandKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
             SlashCommandKind::Help => "help",
+            SlashCommandKind::Refresh => "refresh",
             SlashCommandKind::NewSession => "new",
             SlashCommandKind::Sessions => "sessions",
             SlashCommandKind::Model => "model",
@@ -138,10 +142,11 @@ impl SlashCommandKind {
     pub(crate) fn description(self) -> &'static str {
         match self {
             SlashCommandKind::Help => "show available chat commands",
+            SlashCommandKind::Refresh => "reload the session and retry transcript reads",
             SlashCommandKind::NewSession => "start a fresh session",
             SlashCommandKind::Sessions => "choose a known session",
             SlashCommandKind::Model => "choose the model for future runs",
-            SlashCommandKind::Provider => "choose the LLM provider",
+            SlashCommandKind::Provider => "show the session provider and discovered models",
             SlashCommandKind::Effort => "choose thinking effort for future runs",
             SlashCommandKind::MaxTokens => "choose max output tokens",
             SlashCommandKind::Interrupt => "interrupt the active run",
@@ -157,6 +162,7 @@ impl SlashCommandKind {
     pub(crate) fn command_without_args(self) -> SlashCommand {
         match self {
             SlashCommandKind::Help => SlashCommand::Help,
+            SlashCommandKind::Refresh => SlashCommand::Refresh,
             SlashCommandKind::NewSession => SlashCommand::NewSession,
             SlashCommandKind::Sessions => SlashCommand::Sessions(None),
             SlashCommandKind::Model => SlashCommand::Model(None),
@@ -181,6 +187,7 @@ impl SlashCommandKind {
     fn command_with_args(self, args: &str) -> Result<SlashCommand> {
         Ok(match self {
             SlashCommandKind::Help => SlashCommand::Help,
+            SlashCommandKind::Refresh => SlashCommand::Refresh,
             SlashCommandKind::NewSession => SlashCommand::NewSession,
             SlashCommandKind::Sessions => SlashCommand::Sessions(optional_value(args)),
             SlashCommandKind::Quit => SlashCommand::Quit,
@@ -228,6 +235,7 @@ impl SlashCommandKind {
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "help" | "?" => SlashCommandKind::Help,
+            "refresh" => SlashCommandKind::Refresh,
             "new" => SlashCommandKind::NewSession,
             "sessions" | "session" => SlashCommandKind::Sessions,
             "quit" | "exit" => SlashCommandKind::Quit,
@@ -292,6 +300,18 @@ fn required_single_value(args: &str, command: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_command_reloads_the_session() {
+        assert_eq!(
+            parse_slash_command("/refresh").unwrap(),
+            Some(SlashCommand::Refresh)
+        );
+        assert_eq!(
+            matching_slash_commands("ref"),
+            vec![SlashCommandKind::Refresh]
+        );
+    }
 
     #[test]
     fn parses_skill_selection_without_lifecycle_controls() {

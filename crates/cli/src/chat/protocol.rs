@@ -192,6 +192,9 @@ pub(crate) struct ChatSettingsView {
     /// model choices must keep it. `None` until the session is read.
     #[serde(default)]
     pub session_api_kind: Option<String>,
+    /// Configured provider identity, fixed for the session lifetime.
+    #[serde(default)]
+    pub session_provider: Option<Box<str>>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tokens: Option<u32>,
     pub provider_editable: bool,

@@ -127,6 +127,7 @@ pub(crate) async fn handle(args: ChatArgs) -> Result<()> {
                 .follow_until_quiescent(Duration::from_secs(300), |_| {})
                 .await?;
         }
+        driver.ensure_transcript_loaded()?;
         println!("{}", serde_json::to_string_pretty(driver.turns())?);
         return Ok(());
     }
@@ -150,6 +151,7 @@ pub(crate) async fn handle(args: ChatArgs) -> Result<()> {
         for event in &follow_events {
             print_event(event)?;
         }
+        driver.ensure_transcript_loaded()?;
         return Ok(());
     }
 
@@ -208,8 +210,9 @@ pub(crate) struct ChatSessionDriver {
     /// Projected turns of terminal runs, keyed by run id. A terminal run
     /// never changes, so each is read through `session/runs/read` once.
     finished_turns: BTreeMap<String, ChatTurn>,
-    /// API kind the session is pinned to, from the last `session/read`.
-    session_api_kind: Option<String>,
+    /// Stored model route; provider identity and API kind are immutable.
+    session_model: Option<ModelConfig>,
+    transcript_errors: BTreeMap<String, String>,
     /// Model calls and last prompt size per run id, from observed
     /// `turnGenerationCompleted` events; the run views do not carry them.
     generation_stats: BTreeMap<String, GenerationStats>,
@@ -260,7 +263,8 @@ impl ChatSessionDriver {
             active_tool_chains: Vec::new(),
             run_states: BTreeMap::new(),
             finished_turns: BTreeMap::new(),
-            session_api_kind: None,
+            session_model: None,
+            transcript_errors: BTreeMap::new(),
             generation_stats: BTreeMap::new(),
             pending_run: None,
             notice_seq: 0,
@@ -722,18 +726,7 @@ impl ChatSessionDriver {
             .await
             .map_err(api_error)?;
         let session = read.result.session;
-        let session_model = session
-            .config
-            .as_ref()
-            .and_then(|config| config.model.as_ref());
-        self.session_api_kind = session_model.map(|model| model.api_kind.clone());
-        if !self.settings.route_requested
-            && let Some(model) = session_model
-        {
-            self.settings.provider = model.provider_id.clone();
-            self.settings.api_kind = model.api_kind.clone();
-            self.settings.model = model.model.clone();
-        }
+        self.sync_session_model(&session)?;
         let old_turns = self.turns.clone();
         let old_active_tool_chains = self.active_tool_chains.clone();
         // Detailed transcript and tool state are maintained from the bounded
@@ -752,8 +745,8 @@ impl ChatSessionDriver {
                 )
             })
             .collect();
-        self.turns = self.project_turns(&session).await;
-
+        let (turns, transcript_events) = self.project_turns(&session).await;
+        self.turns = turns;
         let mut events = Vec::new();
         events.push(ChatEvent::SessionSelected(summary_from_session(&session)));
         if old_turns != self.turns {
@@ -796,6 +789,8 @@ impl ChatSessionDriver {
             detail: None,
             settings: self.settings_view(),
         }));
+        // Emit errors after replacing the transcript so the TUI retains them.
+        events.extend(transcript_events);
         Ok(events)
     }
 
@@ -805,7 +800,10 @@ impl ChatSessionDriver {
     /// still in flight shows its input until it finishes. A failed read
     /// (e.g. a run over the server's detail ceiling) falls back to the
     /// summary and is retried on the next refresh.
-    async fn project_turns(&mut self, session: &SessionView) -> Vec<ChatTurn> {
+    async fn project_turns(&mut self, session: &SessionView) -> (Vec<ChatTurn>, Vec<ChatEvent>) {
+        let mut events = Vec::new();
+        self.transcript_errors
+            .retain(|id, _| session.runs.iter().any(|run| &run.id == id));
         let active = session
             .active_run
             .as_ref()
@@ -823,23 +821,41 @@ impl ChatSessionDriver {
                 run.stats.model_calls = Some(generations.calls);
                 run.stats.context_tokens = generations.last_input_tokens;
             }
-            if run_is_terminal(summary.status)
-                && let Ok(read) = self
+            if run_is_terminal(summary.status) {
+                match self
                     .api
                     .read_run(RunReadParams {
                         session_id: self.session_id.clone(),
                         run_id: summary.id.clone(),
                     })
                     .await
-            {
-                apply_run_detail(&mut turn, &read.result.run);
-                self.finished_turns.insert(summary.id.clone(), turn.clone());
+                {
+                    Ok(read) => {
+                        apply_run_detail(&mut turn, &read.result.run);
+                        self.finished_turns.insert(summary.id.clone(), turn.clone());
+                        self.transcript_errors.remove(&summary.id);
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "could not load transcript for {}: {}",
+                            summary.id,
+                            api_error(error)
+                        );
+                        if self.transcript_errors.get(&summary.id) != Some(&message) {
+                            events.push(ChatEvent::Error(ChatErrorView {
+                                message: message.clone(),
+                                action: Some("use /refresh to retry; oversized runs can be read through session/events/read".into()),
+                            }));
+                        }
+                        self.transcript_errors.insert(summary.id.clone(), message);
+                    }
+                }
             }
             turns.push(turn);
         }
         // Summaries arrive newest first; the transcript reads oldest first.
         turns.sort_by_key(|turn| run_seq_from_id(&turn.turn_id));
-        turns
+        (turns, events)
     }
 
     async fn drain_event_log(&mut self) -> Result<Vec<ChatEvent>> {
@@ -1116,7 +1132,8 @@ impl ChatSessionDriver {
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
-        self.session_api_kind = None;
+        self.session_model = None;
+        self.transcript_errors.clear();
         self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
@@ -1147,7 +1164,7 @@ impl ChatSessionDriver {
         let session_id = validate_session_id(&session_id)?;
         // `/sessions` lists every session the gateway holds, so any of them
         // may be opened; confirm it exists before dropping the current one.
-        if let Err(error) = self
+        let read = match self
             .api
             .read_session(SessionReadParams {
                 session_id: session_id.clone(),
@@ -1155,16 +1172,21 @@ impl ChatSessionDriver {
             })
             .await
         {
-            return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message: format!("cannot open session {session_id}: {}", api_error(error)),
-                action: Some("pick a session from /sessions or use /new".into()),
-            })]);
-        }
+            Ok(read) => read,
+            Err(error) => {
+                return Ok(vec![ChatEvent::Error(ChatErrorView {
+                    message: format!("cannot open session {session_id}: {}", api_error(error)),
+                    action: Some("pick a session from /sessions or use /new".into()),
+                })]);
+            }
+        };
+        self.settings.route_requested = false;
         self.session_id = session_id.clone();
         self.event_cursor = None;
         self.turns.clear();
         self.finished_turns.clear();
-        self.session_api_kind = None;
+        self.sync_session_model(&read.result.session)?;
+        self.transcript_errors.clear();
         self.generation_stats.clear();
         self.active_tool_chains.clear();
         self.run_states.clear();
@@ -1174,27 +1196,21 @@ impl ChatSessionDriver {
     }
 
     async fn set_provider(&mut self, provider: String) -> Result<Vec<ChatEvent>> {
-        if self.model_locked() {
-            return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message: "provider switching is not supported while a run is active".into(),
-                action: Some("wait for the current run to finish first".into()),
-            })]);
-        }
-        self.settings.provider = provider;
-        self.settings.route_requested = true;
-        Ok(vec![self.setting_status("provider updated")])
+        self.set_route(
+            provider,
+            self.settings.api_kind.clone(),
+            self.settings.model.clone(),
+        )
+        .await
     }
 
     async fn set_model(&mut self, model: String) -> Result<Vec<ChatEvent>> {
-        if self.model_locked() {
-            return Ok(vec![ChatEvent::Error(ChatErrorView {
-                message: "model switching is not supported while a run is active".into(),
-                action: Some("wait for the current run to finish first".into()),
-            })]);
-        }
-        self.settings.model = model;
-        self.settings.route_requested = true;
-        Ok(vec![self.setting_status("model updated")])
+        self.set_route(
+            self.settings.provider.clone(),
+            self.settings.api_kind.clone(),
+            model,
+        )
+        .await
     }
 
     async fn set_route(
@@ -1207,6 +1223,12 @@ impl ChatSessionDriver {
             return Ok(vec![ChatEvent::Error(ChatErrorView {
                 message: "model switching is not supported while a run is active".into(),
                 action: Some("wait for the current run to finish first".into()),
+            })]);
+        }
+        if let Err(error) = self.validate_route(&provider, &api_kind) {
+            return Ok(vec![ChatEvent::Error(ChatErrorView {
+                message: error.to_string(),
+                action: Some("start another chat with --provider, --api-kind and --model for a different route".into()),
             })]);
         }
         self.settings.provider = provider;
@@ -1304,8 +1326,55 @@ impl ChatSessionDriver {
         })
     }
 
+    fn validate_route(&self, provider: &str, api_kind: &str) -> Result<()> {
+        let pinned = self
+            .session_model
+            .as_ref()
+            .context("session model has not been loaded")?;
+        if provider != pinned.provider_id || api_kind != pinned.api_kind {
+            return Err(anyhow!(
+                "session provider and API kind are fixed to {} / {}; requested {} / {}",
+                pinned.provider_id,
+                pinned.api_kind,
+                provider,
+                api_kind
+            ));
+        }
+        Ok(())
+    }
+
+    fn sync_session_model(&mut self, session: &SessionView) -> Result<()> {
+        self.session_model = session
+            .config
+            .as_ref()
+            .and_then(|config| config.model.clone());
+        if self.settings.route_requested {
+            self.validate_route(&self.settings.provider, &self.settings.api_kind)?;
+        } else if let Some(model) = &self.session_model {
+            self.settings.provider = model.provider_id.clone();
+            self.settings.api_kind = model.api_kind.clone();
+            self.settings.model = model.model.clone();
+        }
+        Ok(())
+    }
+
+    fn ensure_transcript_loaded(&self) -> Result<()> {
+        if self.transcript_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "incomplete chat transcript: {}",
+                self.transcript_errors
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        }
+    }
+
     fn model_locked(&self) -> bool {
-        self.run_active()
+        !self.is_quiescent()
     }
 
     fn run_active(&self) -> bool {
@@ -1334,10 +1403,17 @@ impl ChatSessionDriver {
             provider: self.settings.provider.clone(),
             api_kind: self.settings.api_kind.clone(),
             model: self.settings.model.clone(),
-            session_api_kind: self.session_api_kind.clone(),
+            session_api_kind: self
+                .session_model
+                .as_ref()
+                .map(|model| model.api_kind.clone()),
+            session_provider: self
+                .session_model
+                .as_ref()
+                .map(|model| model.provider_id.clone().into_boxed_str()),
             reasoning_effort: self.settings.reasoning_effort,
             max_tokens: self.settings.max_tokens,
-            provider_editable: model_editable,
+            provider_editable: false,
             model_editable,
             effort_editable: run_editable,
             max_tokens_editable: run_editable,
@@ -1962,6 +2038,306 @@ fn run_seq_from_id(id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_fixture(provider: &str, api_kind: &str, model: &str) -> SessionView {
+        serde_json::from_value(serde_json::json!({
+            "id": "session_target", "status": "idle", "activity": "idle",
+            "retention": {"rootSessionId": "session_target"}, "managed": false,
+            "access": {"visibility": "restricted"}, "configRevision": 0,
+            "createdAtMs": 1, "updatedAtMs": 1, "activeContext": {"revision": 0},
+            "config": {"model": {"providerId": provider, "apiKind": api_kind, "model": model}},
+        }))
+        .expect("session fixture")
+    }
+
+    fn driver_fixture(
+        endpoint: &str,
+        provider: &str,
+        api_kind: &str,
+        model: &str,
+    ) -> ChatSessionDriver {
+        let mut driver = ChatSessionDriver {
+            api: Arc::new(HttpAgentApi::new(endpoint)),
+            session_id: "session_original".into(),
+            settings: ChatDraftSettings::default(),
+            event_cursor: None,
+            turns: Vec::new(),
+            active_tool_chains: Vec::new(),
+            run_states: BTreeMap::new(),
+            finished_turns: BTreeMap::new(),
+            session_model: None,
+            transcript_errors: BTreeMap::new(),
+            generation_stats: BTreeMap::new(),
+            pending_run: None,
+            notice_seq: 0,
+        };
+        driver
+            .sync_session_model(&session_fixture(provider, api_kind, model))
+            .unwrap();
+        driver
+    }
+
+    /// Expected JSON-RPC exchanges, with a finite accept deadline so a missing
+    /// request fails the test instead of hanging it.
+    async fn mock_api(exchanges: Vec<(&'static str, Value)>) -> (String, JoinHandle<Vec<Value>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (method, response) in exchanges {
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("expected request")
+                    .unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut length = None;
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let mut body = vec![0; length.expect("request length")];
+                stream.read_exact(&mut body).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["method"], method);
+                let mut response = response;
+                response["jsonrpc"] = "2.0".into();
+                response["id"] = request["id"].clone();
+                let body = serde_json::to_vec(&response).unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .get_mut()
+                    .write_all(headers.as_bytes())
+                    .await
+                    .unwrap();
+                stream.get_mut().write_all(&body).await.unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        (endpoint, task)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_commands_keep_provider_and_api_kind_fixed() {
+        let mut driver = driver_fixture("http://unused", "openai", "openai:responses", "gpt-sol");
+        for model in ["gpt-astra", "gpt-sol"] {
+            let events = driver
+                .handle_command(ChatCommand::SetDraftModel {
+                    model: model.into(),
+                })
+                .await
+                .unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, ChatEvent::Error(_)))
+            );
+            assert_eq!(model_config(&driver.settings).unwrap().model, model);
+        }
+        let before = driver.settings.clone();
+        for command in [
+            ChatCommand::SetDraftProvider {
+                provider: "other-openai-endpoint".into(),
+            },
+            ChatCommand::SetDraftRoute {
+                provider: "other-openai-endpoint".into(),
+                api_kind: "openai:responses".into(),
+                model: "gpt-sol".into(),
+            },
+            ChatCommand::SetDraftRoute {
+                provider: "openai".into(),
+                api_kind: "openai:completions".into(),
+                model: "gpt-sol".into(),
+            },
+        ] {
+            assert!(matches!(
+                driver.handle_command(command).await.unwrap().as_slice(),
+                [ChatEvent::Error(_)]
+            ));
+            assert_eq!(driver.settings, before);
+        }
+        let mut aggregator = driver_fixture(
+            "http://unused",
+            "openrouter",
+            "openai:completions",
+            "deepseek/model",
+        );
+        let events = aggregator.set_model("glm/model".into()).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ChatEvent::Error(_)))
+        );
+        assert_eq!(
+            model_config(&aggregator.settings).unwrap().provider_id,
+            "openrouter"
+        );
+        let mut direct = driver_fixture(
+            "http://unused",
+            "deepseek",
+            "openai:completions",
+            "deepseek-model",
+        );
+        assert!(matches!(
+            direct
+                .set_route(
+                    "glm".into(),
+                    "openai:completions".into(),
+                    "glm-model".into()
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+            [ChatEvent::Error(_)]
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_changes_wait_for_pending_submissions_and_active_runs() {
+        let mut driver = driver_fixture("http://unused", "openai", "openai:responses", "gpt-sol");
+        driver.pending_run = Some(tokio::spawn(std::future::pending()));
+        assert!(matches!(
+            driver
+                .set_model("gpt-astra".into())
+                .await
+                .unwrap()
+                .as_slice(),
+            [ChatEvent::Error(_)]
+        ));
+        driver.pending_run.take().unwrap().abort();
+        for status in [
+            api::RunStatus::Queued,
+            api::RunStatus::Running,
+            api::RunStatus::Parked,
+        ] {
+            driver.run_states.insert(
+                1,
+                TrackedRun {
+                    id: "run_1".into(),
+                    status,
+                },
+            );
+            assert!(matches!(
+                driver
+                    .set_model("gpt-astra".into())
+                    .await
+                    .unwrap()
+                    .as_slice(),
+                [ChatEvent::Error(_)]
+            ));
+        }
+        assert_eq!(driver.settings.model, "gpt-sol");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opening_session_validates_explicit_route_flags() {
+        use serde_json::json;
+        for (provider, kind, accepted) in [
+            ("openai", "openai:responses", true),
+            ("other", "openai:responses", false),
+            ("openai", "openai:completions", false),
+        ] {
+            let session = session_fixture("openai", "openai:responses", "gpt-sol");
+            let (endpoint, server) = mock_api(vec![
+                ("session/start", json!({"error":{"code": -32000,"message":"exists","data":{"kind":"conflict","message":"exists"}}})),
+                ("session/read", json!({"result":{"result":{"session":session,"hasOlderRuns":false}}})),
+                ("session/events/read", json!({"result":{"result":{"events":[],"complete":true}}})),
+                ("session/read", json!({"result":{"result":{"session":session,"hasOlderRuns":false}}})),
+            ]).await;
+            let result = ChatSessionDriver::open(ChatSessionDriverOptions {
+                session_id: "session_target".into(),
+                api_url: endpoint,
+                profile: None,
+                draft_settings: ChatDraftSettings {
+                    provider: provider.into(),
+                    api_kind: kind.into(),
+                    model: "gpt-astra".into(),
+                    route_requested: true,
+                    bare: true,
+                    ..Default::default()
+                },
+            })
+            .await;
+            assert_eq!(result.is_ok(), accepted, "{provider} / {kind}");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switching_session_discards_previous_model_override() {
+        use serde_json::json;
+        let session = session_fixture("anthropic", "anthropic:messages", "claude-model");
+        let (endpoint, server) = mock_api(vec![
+            (
+                "session/read",
+                json!({"result":{"result":{"session":session,"hasOlderRuns":false}}}),
+            ),
+            (
+                "session/events/read",
+                json!({"result":{"result":{"events":[],"complete":true}}}),
+            ),
+            (
+                "session/read",
+                json!({"result":{"result":{"session":session,"hasOlderRuns":false}}}),
+            ),
+        ])
+        .await;
+        let mut driver = driver_fixture(&endpoint, "openai", "openai:responses", "gpt-sol");
+        driver.set_model("gpt-astra".into()).await.unwrap();
+        driver
+            .switch_session("session_target".into())
+            .await
+            .unwrap();
+        assert_eq!(driver.settings.provider, "anthropic");
+        assert_eq!(driver.settings.api_kind, "anthropic:messages");
+        assert_eq!(driver.settings.model, "claude-model");
+        assert!(model_config(&driver.settings).is_none());
+        assert!(run_start_config(&driver.settings).model.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_transcript_reads_are_reported_retried_and_then_cached() {
+        use serde_json::json;
+        let error = json!({"error":{"code":-32603,"message":"temporary read failure"}});
+        let (endpoint, server) = mock_api(vec![
+            ("session/runs/read", error.clone()), ("session/runs/read", error),
+            ("session/runs/read", json!({"result":{"result":{"run":{
+                "id":"run_1","status":"completed","source":{"type":"input","items":[{"type":"text","text":"hello"}]},
+                "entries":[{"id":"item_1","kind":{"type":"message","role":"assistant"},"content":{"contentRef":"sha256:a"},"text":"world"}]
+            }}}})),
+        ]).await;
+        let mut driver = driver_fixture(&endpoint, "openai", "openai:responses", "gpt-sol");
+        let mut session = session_fixture("openai", "openai:responses", "gpt-sol");
+        session.runs = vec![serde_json::from_value(json!({"id":"run_1","status":"completed","acceptedAtMs":1,"source":{"type":"input","preview":"hello"}})).unwrap()];
+        let (turns, events) = driver.project_turns(&session).await;
+        assert_eq!(turns.len(), 1);
+        assert!(matches!(events.as_slice(), [ChatEvent::Error(_)]));
+        assert!(driver.finished_turns.is_empty());
+        assert!(driver.ensure_transcript_loaded().is_err());
+        assert!(
+            driver.project_turns(&session).await.1.is_empty(),
+            "same error is not repeated"
+        );
+        let (turns, events) = driver.project_turns(&session).await;
+        assert!(events.is_empty());
+        assert_eq!(turns[0].assistant.as_ref().unwrap().content, "world");
+        driver.ensure_transcript_loaded().unwrap();
+        assert_eq!(driver.project_turns(&session).await.0, turns);
+        assert_eq!(server.await.unwrap().len(), 3);
+    }
 
     #[test]
     fn cancelled_tool_status_is_rendered_neutrally() {

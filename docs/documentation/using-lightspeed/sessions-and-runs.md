@@ -142,6 +142,14 @@ Open **Session settings** to edit it, custom instructions, model configuration,
 and other setup, then choose **Apply setup**. Changes to the agent's working
 setup require an open session with no active or queued runs.
 
+A session keeps its configured provider identity and API kind for its entire
+lifetime, including before its first run. You can switch model names within
+that route, such as between OpenAI models, and switch back later. Changing
+provider or API kind requires a new session because conversation context may
+contain provider-native opaque data. An aggregator such as OpenRouter counts
+as one configured provider; model changes within it are allowed without
+checking the underlying model vendor.
+
 Existing ordinary sessions keep the setup they received at creation. Editing
 their source profile does not update them automatically. See
 [Profiles and instructions](profiles-and-instructions.md) for explicit profile
@@ -181,6 +189,19 @@ For a remote installation, use the gateway address and authentication supplied
 by the operator. A deployment key needs `LIGHTSPEED_UNIVERSE` set to the core
 universe UUID, distinct from the readable slug in the browser URL. Local
 single mode accepts neither API keys nor universe headers.
+
+Without model flags, `lightspeed chat` uses the deployment default for a new
+session and the stored model when opening an existing session. To choose a
+route for a new session, supply `--provider`, `--api-kind`, and `--model`
+together. When reopening a session, these flags may select another model
+only within that session's existing provider and API kind.
+
+Inside the terminal interface, `/model` selects a model for subsequent runs;
+`/provider` shows discovery but cannot change the session's provider. Switching
+sessions with `/sessions` discards the previous session's model override and
+uses the selected session's stored model. `/refresh` retries failed transcript
+reads; incomplete transcripts are reported as errors, including in one-shot
+and JSON output.
 
 Inside the terminal interface, `/help` lists commands. `/steer` sends an
 instruction to the active run, and `/approve` or `/reject` decides a pending

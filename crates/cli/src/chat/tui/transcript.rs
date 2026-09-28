@@ -171,9 +171,13 @@ impl TranscriptState {
                 )));
             }
             ChatEvent::Error(error) => {
+                let message = match error.action {
+                    Some(action) => format!("{}\n{action}", error.message),
+                    None => error.message,
+                };
                 self.replace_or_push_committed(Box::new(ErrorCell::new(
                     format!("error:{}", self.cells.len()),
-                    error.message,
+                    message,
                 )));
             }
         }
@@ -595,6 +599,23 @@ mod tests {
             }],
             summary: Some("1 execution groups".into()),
         }
+    }
+
+    #[test]
+    fn error_cells_show_recovery_actions() {
+        let mut state = TranscriptState::default();
+        state.apply_chat_event(ChatEvent::Error(crate::chat::protocol::ChatErrorView {
+            message: "could not load transcript".into(),
+            action: Some("use /refresh to retry".into()),
+        }));
+        let lines = state
+            .drain_pending_history_lines(80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("could not load transcript"));
+        assert!(lines.contains("/refresh"));
     }
 
     #[test]

@@ -254,23 +254,31 @@ impl ListSelectionView {
     }
 
     /// Discovered providers with credential status. Providers without the
-    /// session's API kind are listed last and disabled.
+    /// session's provider identity or API kind are listed last and disabled.
     pub(crate) fn discovered_providers(
         current: &str,
         editable: bool,
         session_api_kind: Option<&str>,
         providers: &[api::ModelProviderDiscoveryView],
         models: &[api::ModelView],
+        session_provider: Option<&str>,
     ) -> Self {
         let locked =
             (!editable).then(|| "provider switching is locked while a run is active".to_string());
         let mut providers = providers
             .iter()
             .map(|provider| {
-                let incompatible = incompatible_api_kind(
-                    session_api_kind,
-                    provider.api_kinds.iter().map(String::as_str),
-                );
+                let incompatible = session_provider
+                    .filter(|pinned| *pinned != provider.provider_id)
+                    .map(|pinned| {
+                        format!("provider is fixed to {pinned}; create a new session to change it")
+                    })
+                    .or_else(|| {
+                        incompatible_api_kind(
+                            session_api_kind,
+                            provider.api_kinds.iter().map(String::as_str),
+                        )
+                    });
                 (provider, incompatible)
             })
             .collect::<Vec<_>>();
@@ -635,6 +643,35 @@ mod tests {
     use crossterm::event::KeyModifiers;
 
     #[test]
+    fn provider_picker_keeps_same_protocol_providers_disabled() {
+        let models = [
+            model("deepseek", "openai:completions", "deepseek-model", &[]),
+            model("glm", "openai:completions", "glm-model", &[]),
+        ];
+        let providers = [
+            provider("deepseek", "configured"),
+            provider("glm", "configured"),
+        ];
+        let mut picker = ListSelectionView::discovered_providers(
+            "deepseek",
+            true,
+            None,
+            &providers,
+            &models,
+            Some("deepseek"),
+        );
+        assert_eq!(
+            enter(&mut picker),
+            ListSelectionAction::Selected(PickerSelection::ProviderModels("deepseek".into()))
+        );
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            enter(&mut picker),
+            ListSelectionAction::Rejected(_)
+        ));
+    }
+
+    #[test]
     fn picker_confirms_selected_value() {
         let mut picker = ListSelectionView::effort(None, true, None);
         assert_eq!(
@@ -731,7 +768,8 @@ mod tests {
             ListSelectionAction::Rejected("no models discovered".into())
         );
 
-        let mut no_providers = ListSelectionView::discovered_providers("", true, None, &[], &[]);
+        let mut no_providers =
+            ListSelectionView::discovered_providers("", true, None, &[], &[], None);
         assert_eq!(
             enter(&mut no_providers),
             ListSelectionAction::Rejected("no providers discovered".into())
@@ -748,8 +786,9 @@ mod tests {
             provider("openai", "configured"),
             provider("anthropic", "missing"),
         ];
-        let mut picker =
-            ListSelectionView::discovered_providers("openai", true, None, &providers, &models);
+        let mut picker = ListSelectionView::discovered_providers(
+            "openai", true, None, &providers, &models, None,
+        );
         assert_eq!(
             enter(&mut picker),
             ListSelectionAction::Selected(PickerSelection::ProviderModels("openai".into()))
@@ -817,6 +856,7 @@ mod tests {
             Some("openai:completions"),
             &providers,
             &models,
+            None,
         );
         assert_eq!(
             enter(&mut picker),

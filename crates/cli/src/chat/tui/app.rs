@@ -370,6 +370,7 @@ impl ChatTuiApp {
 
     fn apply_slash_command(&mut self, command: SlashCommand) {
         match command {
+            SlashCommand::Refresh => self.send_chat_command(ChatCommand::Refresh),
             SlashCommand::Help => self.local_notice(command_help()),
             SlashCommand::NewSession => self.send_chat_command(ChatCommand::NewSession),
             SlashCommand::Sessions(Some(session_id)) => {
@@ -1108,6 +1109,7 @@ mod tests {
             api_kind: "openai:responses".into(),
             model: "gpt-5.5".into(),
             session_api_kind: None,
+            session_provider: None,
             reasoning_effort: None,
             max_tokens: None,
             provider_editable: true,
