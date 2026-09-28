@@ -246,6 +246,7 @@ impl ChatSessionDriver {
                 config: Some(session_start_config(&options.draft_settings)),
                 profile: options.profile.clone(),
                 delete_after_close_ms: None,
+                access: None,
             })
             .await
             .map_err(api_error)?;
@@ -939,7 +940,7 @@ impl ChatSessionDriver {
                     action: None,
                 }));
             }
-            SessionEventKindView::RunCancelled { run_id } => {
+            SessionEventKindView::RunCancelled { run_id, .. } => {
                 events.push(ChatEvent::RunChanged(self.run_view_from_status(
                     run_id,
                     api::RunStatus::Cancelled,
@@ -1127,6 +1128,7 @@ impl ChatSessionDriver {
                 config: Some(session_start_config(&self.settings)),
                 profile: None,
                 delete_after_close_ms: None,
+                access: None,
             })
             .await
             .map_err(api_error)?;
@@ -2553,6 +2555,7 @@ mod tests {
             source: api::RunAcceptedSourceView::Input {
                 entries: Vec::new(),
             },
+            requested_by: None,
         }));
         assert!(!event_needs_snapshot(&SessionEventKindView::RunStarted {
             run_id: "run_1".into(),
