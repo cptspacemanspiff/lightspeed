@@ -2152,8 +2152,8 @@ export interface SessionConfig {
   limits?: LimitsConfig | null;
   /**
    * Absent on input means the deployment default model. Documents read
-   * back from a session always carry the model; the provider api kind is
-   * pinned for the session's lifetime.
+   * back from a session always carry the model. Provider identity and API
+   * kind are fixed for the session lifetime; the model name may change.
    */
   model?: ModelConfig | null;
 }
@@ -7637,6 +7637,10 @@ export interface RunReadParams {
 export interface RunStartConfig {
   generation?: GenerationConfig | null;
   limits?: RunLimitsConfig | null;
+  /**
+   * Optional model override within the session's provider identity and API
+   * kind. Changing either requires a new session, even before the first run.
+   */
   model?: ModelConfig | null;
 }
 /**

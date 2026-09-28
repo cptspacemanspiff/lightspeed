@@ -33,7 +33,7 @@ pub enum CoreAgentCommand {
         declaration: WorkflowToolDeclaration,
     },
     /// Replace the session config with a complete document. The previous
-    /// config is not consulted beyond validation (api-kind pinning) and the
+    /// config is not consulted beyond validation (provider and API-kind pinning) and the
     /// revision guard; anything omitted from the document reverts to
     /// defaults. Putting an identical document is an idempotent no-op.
     ReplaceSessionConfig {

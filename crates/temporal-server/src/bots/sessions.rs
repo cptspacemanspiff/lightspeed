@@ -302,23 +302,23 @@ fn resolve_bot_profile(profile: &AgentProfile, instructions: String) -> InlineAg
     }
 }
 
-fn proposed_api_kind(profile: &InlineAgentProfile) -> Option<&str> {
+fn proposed_provider_route(profile: &InlineAgentProfile) -> Option<(&str, &str)> {
     profile
         .document
         .config
         .as_ref()?
         .model
         .as_ref()
-        .map(|model| model.api_kind.as_str())
+        .map(|model| (model.provider_id.as_str(), model.api_kind.as_str()))
 }
 
-fn pinned_api_kind(session: &SessionView) -> Option<&str> {
+fn pinned_provider_route(session: &SessionView) -> Option<(&str, &str)> {
     session
         .config
         .as_ref()?
         .model
         .as_ref()
-        .map(|model| model.api_kind.as_str())
+        .map(|model| (model.provider_id.as_str(), model.api_kind.as_str()))
 }
 
 /// Every tool asset the declarations reference, as the bytes stored in the
@@ -493,21 +493,21 @@ pub async fn ensure_session(
     }
 
     if request.applied_profile_revision != Some(profile.revision) {
-        // A session's provider api kind is pinned for its lifetime. A
-        // profile that moved to another kind is valid for a fresh session
+        // A session's provider identity and API kind are pinned for its lifetime.
+        // A profile that moved to another provider or kind is valid for a fresh session
         // but not for this one: report that as unapplicable so the
         // controller rotates, rather than retrying into a degraded bot.
         // Checked structurally first; the engine's rejection is the backstop.
-        if let Some(proposed) = proposed_api_kind(&resolved) {
+        if let Some(proposed) = proposed_provider_route(&resolved) {
             let current = read_session_view(api, &request.session_id)
                 .await
                 .map_err(|error| activity_error("read session", error))?;
-            if let Some(pinned) = pinned_api_kind(&current)
+            if let Some(pinned) = pinned_provider_route(&current)
                 && pinned != proposed
             {
                 return Ok(BotEnsureSessionResult::ProfileUnapplicable {
                     message: format!(
-                        "session {} is pinned to provider api kind {pinned}; profile revision {} needs {proposed}",
+                        "session {} is pinned to provider route {pinned:?}; profile revision {} needs {proposed:?}",
                         request.session_id, profile.revision
                     ),
                 });
@@ -1158,9 +1158,9 @@ mod tests {
     }
 
     #[test]
-    fn pinned_kind_comes_from_the_session_config() {
+    fn pinned_provider_route_comes_from_the_session_config() {
         let mut session = session_view(SessionStatus::Idle, Vec::new());
-        assert_eq!(pinned_api_kind(&session), None);
+        assert_eq!(pinned_provider_route(&session), None);
         session.config = Some(api::SessionConfig {
             model: Some(api::ModelConfig {
                 provider_id: "anthropic".to_owned(),
@@ -1169,6 +1169,9 @@ mod tests {
             }),
             ..Default::default()
         });
-        assert_eq!(pinned_api_kind(&session), Some("anthropic_messages"));
+        assert_eq!(
+            pinned_provider_route(&session),
+            Some(("anthropic", "anthropic_messages"))
+        );
     }
 }

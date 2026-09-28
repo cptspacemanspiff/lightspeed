@@ -191,6 +191,7 @@ function LiveSessionSetup({
       ? "Automatic deletion must be a positive number of days."
       : null;
   const dirty = configDirty || instructionsDirty || activeEnvironmentDirty || metadataDirty || retentionDirty;
+  const pinnedProviderId = stringField(record(session?.config).model, "providerId");
   const pinnedApiKind = stringField(record(session?.config).model, "apiKind");
   const environmentError = activeEnvironmentSelectionError(
     configDraft,
@@ -387,6 +388,7 @@ function LiveSessionSetup({
                 />
               )}
               pinnedApiKind={pinnedApiKind || undefined}
+              pinnedProviderId={pinnedProviderId || undefined}
             />
           </section>
           {environments.error && <p className="text-sm text-destructive">{environments.error.message}</p>}

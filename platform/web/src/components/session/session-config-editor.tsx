@@ -106,6 +106,7 @@ type Props = {
   retentionSetup?: ReactNode;
   retentionDescription?: string;
   pinnedApiKind?: string;
+  pinnedProviderId?: string;
   className?: string;
 };
 
@@ -370,9 +371,14 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
   return omitEmptyRecord(result);
 }
 
-export function configError(config: SessionConfig | undefined, pinnedApiKind?: string, allowInherit = false): string | null {
+export function configError(config: SessionConfig | undefined, pinnedApiKind?: string, allowInherit = false, pinnedProviderId?: string): string | null {
+  if (!config && !pinnedApiKind && !pinnedProviderId) return null;
+  const model = record(config?.model);
+  if ((pinnedApiKind && string(model.apiKind) !== pinnedApiKind)
+    || (pinnedProviderId && string(model.providerId) !== pinnedProviderId)) {
+    return "Provider identity and API kind are fixed for this session. Create a new session to change them.";
+  }
   if (!config) return null;
-  const model = record(config.model);
   if (Object.keys(model).length && !["providerId", "apiKind", "model"].every((key) => string(model[key]))) {
     return "A model override needs provider id, API kind, and model name.";
   }
@@ -531,10 +537,11 @@ export function SessionConfigEditor({
   retentionSetup,
   retentionDescription = "Delete the retained session tree automatically after its root session closes.",
   pinnedApiKind,
+  pinnedProviderId,
   className,
 }: Props) {
   const config = normalizeSessionConfig(value) ?? {};
-  const error = configError(config, pinnedApiKind, allowInherit) ?? mcpAttachmentError(config, mcpServers);
+  const error = configError(config, pinnedApiKind, allowInherit, pinnedProviderId) ?? mcpAttachmentError(config, mcpServers);
   const [manualModel, setManualModel] = useState(false);
 
   useEffect(() => onValidityChange?.(error), [error, onValidityChange]);
@@ -582,6 +589,7 @@ export function SessionConfigEditor({
           manualModel={manualModel}
           onManualModelChange={setManualModel}
           pinnedApiKind={pinnedApiKind}
+          pinnedProviderId={pinnedProviderId}
           change={change}
         />
         <AdvancedFields config={config} change={change} />
@@ -766,12 +774,13 @@ function EnvironmentFeatureEditor({
   );
 }
 
-function ModelFields({ config, models, manualModel, onManualModelChange, pinnedApiKind, change }: {
+function ModelFields({ config, models, manualModel, onManualModelChange, pinnedApiKind, pinnedProviderId, change }: {
   config: RecordValue;
   models: ModelOption[];
   manualModel: boolean;
   onManualModelChange: (enabled: boolean) => void;
   pinnedApiKind?: string;
+  pinnedProviderId?: string;
   change: (fn: (next: RecordValue) => void) => void;
 }) {
   const model = record(config.model);
@@ -793,7 +802,7 @@ function ModelFields({ config, models, manualModel, onManualModelChange, pinnedA
       label: "Deployment default",
       search: "deployment default",
     }] : []),
-    ...modelPickerOptions(models, currentModel, pinnedApiKind)
+    ...modelPickerOptions(models, currentModel, pinnedApiKind, pinnedProviderId)
       .map((option) => ({
         key: modelOptionKey(option),
         label: `${option.displayName} (${option.providerId})`,
@@ -821,6 +830,7 @@ function ModelFields({ config, models, manualModel, onManualModelChange, pinnedA
       const nextModel = record(next.model);
       nextModel[key] = value;
       if (pinnedApiKind) nextModel.apiKind = pinnedApiKind;
+      if (pinnedProviderId) nextModel.providerId = pinnedProviderId;
       next.model = nextModel;
     });
   const generation = record(config.generation);
@@ -956,7 +966,7 @@ function ModelFields({ config, models, manualModel, onManualModelChange, pinnedA
       </div>
       {selected === "manual" && (
         <div className="grid gap-3 sm:grid-cols-3">
-          <Field><FieldLabel>Provider id</FieldLabel><Input value={string(model.providerId)} onChange={(e) => update("providerId", e.target.value)} placeholder="openai" /></Field>
+          <Field><FieldLabel>Provider id</FieldLabel><Input value={pinnedProviderId ?? string(model.providerId)} disabled={Boolean(pinnedProviderId)} onChange={(e) => update("providerId", e.target.value)} placeholder="openai" /></Field>
           <Field><FieldLabel>API kind</FieldLabel><Input value={pinnedApiKind ?? string(model.apiKind)} disabled={Boolean(pinnedApiKind)} onChange={(e) => update("apiKind", e.target.value)} placeholder="openai:responses" /></Field>
           <Field><FieldLabel>Model</FieldLabel><Input value={string(model.model)} onChange={(e) => update("model", e.target.value)} placeholder="gpt-5.5" /></Field>
         </div>
@@ -978,6 +988,7 @@ export function modelPickerOptions(
   models: ModelOption[],
   currentModel?: ModelOption,
   pinnedApiKind?: string,
+  pinnedProviderId?: string,
 ): ModelOption[] {
   const catalog = new Map<string, ModelOption>();
   const matchesCurrent = (option: ModelOption) =>
@@ -987,6 +998,7 @@ export function modelPickerOptions(
 
   for (const option of models) {
     if (pinnedApiKind && option.apiKind !== pinnedApiKind) continue;
+    if (pinnedProviderId && option.providerId !== pinnedProviderId) continue;
     const key = JSON.stringify([option.providerId, option.model]);
     const existing = catalog.get(key);
     if (
