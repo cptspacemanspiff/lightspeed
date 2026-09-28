@@ -15,6 +15,7 @@ pub(crate) enum ChatCellKind {
     ToolChain,
     Error,
     Notice,
+    RunStats,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,9 +182,88 @@ impl ChatCell for ReasoningCell {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupHeaderCell {
+    fields: Vec<(String, String)>,
+}
+
+impl StartupHeaderCell {
+    pub(crate) fn new(fields: Vec<(String, String)>) -> Self {
+        Self { fields }
+    }
+}
+
+impl ChatCell for StartupHeaderCell {
+    fn id(&self) -> &str {
+        "startup-header"
+    }
+    fn kind(&self) -> ChatCellKind {
+        ChatCellKind::Notice
+    }
+
+    fn display_lines(&self, width: u16, _state: &CellRenderState) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::default()];
+        if width >= 13 {
+            lines.push(Line::from(vec![
+                Span::styled(">> ", Style::default().fg(Color::Cyan)),
+                Span::styled("Lightspeed", Style::default().add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            for line in wrap_message_lines(">> Lightspeed", width) {
+                lines.push(Line::styled(
+                    line,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        lines.push(Line::default());
+        let label_width = self
+            .fields
+            .iter()
+            .map(|(label, _)| label.len())
+            .max()
+            .unwrap_or(0);
+        for (label, value) in &self.fields {
+            let prefix = format!("{label:label_width$}  ");
+            if usize::from(width) > prefix.len() + 8 {
+                for (index, line) in wrap_message_lines(value, width - prefix.len() as u16)
+                    .into_iter()
+                    .enumerate()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if index == 0 {
+                                prefix.clone()
+                            } else {
+                                " ".repeat(prefix.len())
+                            },
+                            Style::default().fg(Color::Gray),
+                        ),
+                        Span::raw(line),
+                    ]));
+                }
+            } else {
+                for line in wrap_message_lines(&format!("{prefix}{value}"), width) {
+                    lines.push(Line::raw(line));
+                }
+            }
+        }
+        lines.push(Line::default());
+        for line in wrap_message_lines(
+            "/help commands · /status details · /sessions switch · /quit exit",
+            width,
+        ) {
+            lines.push(Line::styled(line, Style::default().fg(Color::Gray)));
+        }
+        lines.push(Line::default());
+        lines
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NoticeCell {
     id: String,
     text: String,
+    kind: ChatCellKind,
 }
 
 impl NoticeCell {
@@ -191,6 +271,14 @@ impl NoticeCell {
         Self {
             id: id.into(),
             text: text.into(),
+            kind: ChatCellKind::Notice,
+        }
+    }
+
+    pub(crate) fn run_stats(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            kind: ChatCellKind::RunStats,
+            ..Self::new(id, text)
         }
     }
 
@@ -198,6 +286,7 @@ impl NoticeCell {
         Self {
             id: id.into(),
             text: String::new(),
+            kind: ChatCellKind::Notice,
         }
     }
 }
@@ -208,7 +297,7 @@ impl ChatCell for NoticeCell {
     }
 
     fn kind(&self) -> ChatCellKind {
-        ChatCellKind::Notice
+        self.kind
     }
 
     fn display_lines(&self, _width: u16, _state: &CellRenderState) -> Vec<Line<'static>> {
@@ -223,6 +312,7 @@ impl ChatCell for NoticeCell {
 pub(crate) struct RunCell {
     id: String,
     text: String,
+    frame: usize,
 }
 
 impl RunCell {
@@ -230,7 +320,18 @@ impl RunCell {
         Self {
             id: id.into(),
             text: text.into(),
+            frame: 0,
         }
+    }
+}
+
+impl RunCell {
+    pub(crate) fn is_animating(&self) -> bool {
+        matches!(self.text.as_str(), "thinking" | "working" | "stopping")
+    }
+
+    pub(crate) fn tick(&mut self) {
+        self.frame = (self.frame + 1) % 10;
     }
 }
 
@@ -245,7 +346,15 @@ impl ChatCell for RunCell {
 
     fn display_lines(&self, _width: u16, _state: &CellRenderState) -> Vec<Line<'static>> {
         vec![Line::styled(
-            self.text.clone(),
+            format!(
+                "{} {}",
+                if self.is_animating() {
+                    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][self.frame]
+                } else {
+                    "·"
+                },
+                self.text
+            ),
             Style::default().fg(Color::Yellow),
         )]
     }
@@ -265,10 +374,6 @@ enum ToolChainDisplay {
 }
 
 impl ToolChainCell {
-    pub(crate) fn new(id: impl Into<String>, chains: Vec<ChatToolChainView>) -> Self {
-        Self::expanded(id, chains)
-    }
-
     pub(crate) fn collapsed(id: impl Into<String>, chains: Vec<ChatToolChainView>) -> Self {
         Self {
             id: id.into(),
@@ -305,8 +410,8 @@ impl ChatCell for ToolChainCell {
                 lines.extend(reasoning_lines(&reasoning.content, width, false));
             }
             lines.push(tool_chain_header(chain));
-            lines.extend(tool_activity_lines(chain, width));
             if matches!(self.display, ToolChainDisplay::Collapsed) {
+                lines.extend(tool_activity_lines(chain, width));
                 if let Some(error) = chain
                     .calls
                     .iter()
@@ -317,19 +422,8 @@ impl ChatCell for ToolChainCell {
                 continue;
             }
 
-            let grouped = group_tool_calls(&chain.calls);
-            for group in grouped {
-                if let Some(group_index) = group.group_index {
-                    let label = if group.calls.len() > 1 {
-                        format!("  group {group_index} parallel")
-                    } else {
-                        format!("  group {group_index}")
-                    };
-                    lines.push(Line::styled(label, Style::default().fg(Color::DarkGray)));
-                }
-                for call in group.calls {
-                    lines.extend(tool_call_lines(call, width));
-                }
+            for call in &chain.calls {
+                lines.extend(tool_call_lines(call, width));
             }
         }
         lines
@@ -410,40 +504,10 @@ fn text_width(value: &str) -> usize {
         .sum()
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ToolGroup<'a> {
-    group_index: Option<u64>,
-    calls: &'a [ChatToolCallView],
-}
-
-fn group_tool_calls(calls: &[ChatToolCallView]) -> Vec<ToolGroup<'_>> {
-    if calls.is_empty() {
-        return Vec::new();
-    }
-
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    let mut current_group = calls[0].group_index;
-    for (index, call) in calls.iter().enumerate().skip(1) {
-        if call.group_index != current_group {
-            groups.push(ToolGroup {
-                group_index: current_group,
-                calls: &calls[start..index],
-            });
-            start = index;
-            current_group = call.group_index;
-        }
-    }
-    groups.push(ToolGroup {
-        group_index: current_group,
-        calls: &calls[start..],
-    });
-    groups
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolActivity {
     group: ChatToolDisplayGroup,
+    status: ChatProgressStatus,
     verb: String,
     targets: Vec<String>,
     detail: Option<String>,
@@ -471,8 +535,12 @@ fn tool_activity_lines(chain: &ChatToolChainView, width: u16) -> Vec<Line<'stati
             Line::from(vec![
                 Span::styled(prefix, Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    truncate(&text, usize::from(width.saturating_sub(4).max(12))),
+                    truncate(&text, usize::from(width.saturating_sub(16).max(12))),
                     activity_style(activity.group),
+                ),
+                Span::styled(
+                    format!(" · {}", progress_label(activity.status)),
+                    progress_style(activity.status),
                 ),
             ])
         })
@@ -487,6 +555,7 @@ fn compact_tool_activities(calls: &[ChatToolCallView]) -> Vec<ToolActivity> {
             && last.group == activity.group
             && last.verb == activity.verb
             && last.detail == activity.detail
+            && last.status == activity.status
             && activity.verb == "Read"
         {
             last.targets.extend(activity.targets);
@@ -501,6 +570,7 @@ fn tool_activity_from_call(call: &ChatToolCallView) -> ToolActivity {
     if let Some(display) = call.display.as_ref() {
         return ToolActivity {
             group: display.group,
+            status: call.status,
             verb: display.verb.clone(),
             targets: display.target.clone().into_iter().collect(),
             detail: display.detail.clone(),
@@ -517,6 +587,7 @@ fn tool_activity_from_call(call: &ChatToolCallView) -> ToolActivity {
     }
     ToolActivity {
         group: ChatToolDisplayGroup::Other,
+        status: call.status,
         verb: call.tool_name.clone(),
         targets: target.into_iter().collect(),
         detail: None,
@@ -542,7 +613,7 @@ fn tool_chain_header(chain: &ChatToolChainView) -> Line<'static> {
     } else {
         chain.title.clone()
     };
-    let mut spans = vec![
+    let spans = vec![
         Span::styled("tools ", Style::default().fg(Color::Yellow)),
         Span::styled(
             title
@@ -559,13 +630,6 @@ fn tool_chain_header(chain: &ChatToolChainView) -> Line<'static> {
             progress_style(chain.status).add_modifier(Modifier::BOLD),
         ),
     ];
-    if let Some(summary) = chain.summary.as_ref().filter(|summary| !summary.is_empty()) {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            summary.clone(),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
     Line::from(spans)
 }
 
@@ -633,7 +697,7 @@ fn progress_label(status: ChatProgressStatus) -> &'static str {
         ChatProgressStatus::Queued => "queued",
         ChatProgressStatus::Running => "running",
         ChatProgressStatus::Waiting => "waiting",
-        ChatProgressStatus::Succeeded => "ok",
+        ChatProgressStatus::Succeeded => "done",
         ChatProgressStatus::Failed => "failed",
         ChatProgressStatus::Cancelled => "cancelled",
         ChatProgressStatus::Stale => "stale",
@@ -779,8 +843,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_chain_groups_parallel_calls() {
-        let cell = ToolChainCell::new(
+    fn expanded_tool_chain_lists_calls_without_execution_group_labels() {
+        let cell = ToolChainCell::expanded(
             "tools:1",
             vec![ChatToolChainView {
                 id: "chain".into(),
@@ -826,7 +890,8 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("tools 2 calls"));
-        assert!(rendered.contains("group 1 parallel"));
+        assert!(!rendered.contains("group"));
+        assert_eq!(rendered.matches("read cell.rs").count(), 1);
         assert!(rendered.contains("rg SessionInput"));
         assert!(rendered.contains("read cell.rs"));
     }
@@ -869,7 +934,7 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("tools 1 calls"));
-        assert!(rendered.contains("ok"));
+        assert!(rendered.contains("done"));
         assert!(rendered.contains("Read README.md"));
         assert!(!rendered.contains("read_file"));
         assert!(!rendered.contains("args"));

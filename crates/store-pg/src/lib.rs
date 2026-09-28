@@ -335,11 +335,14 @@ impl PgStore {
     }
 
     pub async fn ensure_universe(&self) -> Result<(), PgStoreError> {
+        // Explicit host provisioning may name an existing unnamed universe,
+        // but must not rename one that already has a slug.
         sqlx::query(
             r#"
             INSERT INTO universes (universe_id, slug)
             VALUES ($1, $2)
-            ON CONFLICT (universe_id) DO NOTHING
+            ON CONFLICT (universe_id) DO UPDATE SET slug = EXCLUDED.slug
+            WHERE universes.slug IS NULL AND EXCLUDED.slug IS NOT NULL
             "#,
         )
         .bind(self.config.universe_id)
@@ -358,8 +361,9 @@ pub use cas_sweep::{
 };
 pub use channels::list_channel_accounts_all;
 pub use deployment::{
-    UniverseStats, create_universe, delete_universe, list_universe_object_keys,
-    list_universe_session_ids, list_universe_stats, read_universe_stats,
+    UniverseStats, create_universe, create_universe_with_slug, delete_universe,
+    list_universe_object_keys, list_universe_session_ids, list_universe_stats, put_universe_slug,
+    read_universe_stats,
 };
 pub use environment_registration::{
     find_registered_environment_universe, find_registration_key_universe,

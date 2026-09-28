@@ -160,6 +160,9 @@ from the same profile.
 
 ## Continue from the CLI
 
+For saved connections, `connect dev`, terminal-only provider setup and universe
+switching, see [Use Lightspeed from the terminal](cli.md).
+
 The CLI can open the same session as the web app. On Linux x86_64,
 [download the prebuilt CLI](../deployment/self-hosting.md#download-standalone-binaries)
 from the release matching your server. You can also build it from the repository:
@@ -208,6 +211,25 @@ instruction to the active run, and `/approve` or `/reject` decides a pending
 approval by ID. `/interrupt` cancels the newest queued run first, or the active
 run when no queued run exists. `/quit` exits the interface and leaves the
 session available to reopen.
+
+At startup, the TUI header shows the full session ID, universe and key scope,
+then the runtime endpoint and useful slash commands. Model and effort remain
+in the footer; `lightspeed --version` shows the build version.
+The TUI shows live tool activity as calls run and finish, including individual
+running, done, failed and cancelled states. An animated thinking/working
+indicator stays below the latest tool activity, just above the composer.
+Live and completed tools use the same compact layout; `--show-tool-details`
+adds arguments and results. Execution-group numbers are not displayed. Session refreshes preserve
+observed tool activity while the model continues; completed run details provide
+the final transcript. Following a run also leaves chat commands available, and
+opening an already-active session resumes live updates.
+
+Run statistics (timing, token/cache usage, call counts and context details)
+are hidden by default. Start with `lightspeed chat --show-stats` to show
+them, or use `/stats` inside chat to toggle them. `/stats on` and
+`/stats off` set visibility explicitly, including statistics already in the
+transcript. This preference lasts for the current chat process. The flag also
+applies to one-shot text output; JSON output retains all run data.
 
 Applications can use `session/runs/start`, `session/runs/read`,
 `session/runs/steer`, and `session/runs/cancel` from the

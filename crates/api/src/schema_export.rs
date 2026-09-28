@@ -64,6 +64,7 @@ pub fn export_schemas() -> ExportedSchemas {
             reference_scope = Some(spec.scope);
             let title = match spec.scope {
                 crate::MethodScope::Universe => "Universe methods",
+                crate::MethodScope::Connection => "Connection methods",
                 crate::MethodScope::Service => "Service methods",
                 crate::MethodScope::Deployment => "Deployment methods",
             };
@@ -204,13 +205,13 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), total, "duplicate method in manifest");
-        assert_eq!(total, 130);
+        assert_eq!(total, 131);
         assert_eq!(
             manifest
                 .iter()
                 .filter(|spec| spec.scope == crate::MethodScope::Deployment)
                 .count(),
-            16
+            17
         );
     }
 

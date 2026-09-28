@@ -5,7 +5,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -23,6 +23,7 @@ use crate::chat::tui::theme::composer_band_style;
 pub(crate) struct BottomPaneState {
     composer: ComposerState,
     status: String,
+    connection_label: Option<String>,
     sticky_error: Option<String>,
     run_control_active: bool,
     current_session_id: Option<String>,
@@ -55,6 +56,7 @@ impl Default for BottomPaneState {
         Self {
             composer: ComposerState::default(),
             status: "ready".into(),
+            connection_label: None,
             sticky_error: None,
             run_control_active: false,
             current_session_id: None,
@@ -68,6 +70,10 @@ impl Default for BottomPaneState {
 }
 
 impl BottomPaneState {
+    pub(crate) fn set_connection_label(&mut self, label: Option<String>) {
+        self.connection_label = label;
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> BottomPaneAction {
         if let Some(view) = self.active_view.as_mut() {
             return match view.handle_key(key) {
@@ -261,7 +267,7 @@ impl BottomPaneState {
                 );
                 if self.run_control_active {
                     self.sticky_error = None;
-                    self.status = format!("run {} running", run.run_seq);
+                    self.status = "working".into();
                 }
             }
             ChatEvent::ApprovalsPending { approvals, .. } => {
@@ -433,41 +439,50 @@ impl BottomPaneState {
     }
 
     fn status_line(&self) -> Line<'static> {
-        let status_style = if self.run_control_active {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        };
-        let mut spans = vec![Span::styled(self.status.clone(), status_style)];
+        let mut spans = vec![Span::raw(self.status.clone())];
+        if let Some(label) = &self.connection_label {
+            spans.push(Span::raw(format!(" · {label}")));
+        }
+        if let Some(id) = &self.current_session_id {
+            let label = if uuid::Uuid::parse_str(id).is_ok() {
+                format!("{}…", &id[..8])
+            } else {
+                id.clone()
+            };
+            spans.push(Span::raw(format!(" · {label}")));
+        }
         if let Some(settings) = &self.settings {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                settings.model.clone(),
-                Style::default().fg(Color::DarkGray),
-            ));
-            spans.push(Span::raw("  effort "));
-            spans.push(Span::styled(
-                reasoning_effort_label(settings.reasoning_effort),
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::raw(" · "));
+            spans.push(Span::raw(settings.model.clone()));
+            spans.push(Span::raw(" · effort "));
+            spans.push(Span::raw(reasoning_effort_label(settings.reasoning_effort)));
         }
         if self.run_control_active {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                "Ctrl-C interrupt",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::raw(" · "));
+            spans.push(Span::raw("Ctrl-C interrupt"));
         }
-        Line::from(spans)
+        Line::from(spans).style(Style::default().fg(Color::DarkGray))
     }
 }
 
 fn status_allows_run_control(status: &str) -> bool {
-    matches!(status, "running" | "cancelling" | "paused")
+    matches!(
+        status,
+        "active"
+            | "working"
+            | "running"
+            | "thinking"
+            | "planning"
+            | "queued"
+            | "running tools"
+            | "tools complete"
+            | "tool result received"
+            | "waiting for approval"
+            | "approval resolved"
+            | "steering accepted"
+            | "cancelling"
+            | "paused"
+    )
 }
 
 fn compact_error_status(message: &str) -> String {
@@ -630,6 +645,39 @@ mod tests {
     }
 
     #[test]
+    fn footer_session_tracks_switches_and_shortens_only_uuid_ids() {
+        let mut pane = BottomPaneState::default();
+        for (id, expected) in [
+            ("test1", "test1"),
+            ("session_1790600000000_1", "session_1790600000000_1"),
+            ("018f2a66-31cc-7b25-a4f7-37e3310fdc6b", "018f2a66…"),
+        ] {
+            pane.apply_chat_event(&ChatEvent::HistoryReset {
+                session_id: id.into(),
+            });
+            let line = pane.status_line().to_string();
+            assert_eq!(line, format!("ready · {expected}"));
+        }
+        assert!(!pane.status_line().to_string().contains("test1"));
+    }
+
+    #[test]
+    fn connection_label_remains_visible_while_idle_and_running() {
+        let mut pane = BottomPaneState::default();
+        pane.set_connection_label(Some("production / customer-a".into()));
+        for status in ["idle", "running"] {
+            pane.status = status.into();
+            assert!(
+                pane.status_line()
+                    .to_string()
+                    .contains("production / customer-a")
+            );
+        }
+        pane.set_connection_label(None);
+        assert!(!pane.status_line().to_string().contains(" / "));
+    }
+
+    #[test]
     fn active_run_status_shows_interrupt_hint() {
         let mut pane = BottomPaneState::default();
         pane.apply_chat_event(&ChatEvent::RunChanged(ChatRunView {
@@ -648,7 +696,7 @@ mod tests {
         }));
 
         let rendered = pane.status_line().to_string();
-        assert!(rendered.contains("run 7 running"));
+        assert!(rendered.contains("working"));
         assert!(rendered.contains("Ctrl-C interrupt"));
     }
 

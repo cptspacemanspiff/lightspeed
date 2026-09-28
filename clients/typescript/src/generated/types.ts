@@ -1755,6 +1755,9 @@ export type ProfileSource =
  */
 export type MethodAccess =
   | {
+      kind: "connection";
+    }
+  | {
       action: UniverseAction;
       kind: "universe";
     }
@@ -5289,6 +5292,14 @@ export interface CallerAccess {
    * key, such as local development.
    */
   keyPrefix?: string | null;
+  /**
+   * Credential scope, independent of a selected request universe.
+   */
+  scope: AccessScope;
+  /**
+   * True only for explicitly unauthenticated local development access.
+   */
+  single: boolean;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -7082,6 +7093,10 @@ export interface DeploymentProviderBindingPutParams {
  * via the `definition` "DeploymentUniverseCreateParams".
  */
 export interface DeploymentUniverseCreateParams {
+  /**
+   * Optional core universe slug, set only when the universe is first created.
+   */
+  slug?: string | null;
   universeId: string;
 }
 /**
@@ -7101,6 +7116,26 @@ export interface DeploymentUniverseListParams {}
  * via the `definition` "DeploymentUniverseReadParams".
  */
 export interface DeploymentUniverseReadParams {
+  universeId: string;
+}
+/**
+ * Set or change an existing universe's deployment-unique slug. The UUID and
+ * resources remain unchanged; URLs using the previous slug may stop working.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "DeploymentUniverseSlugPutParams".
+ */
+export interface DeploymentUniverseSlugPutParams {
+  /**
+   * For adoption: assign only if unnamed, or succeed if already equal.
+   * Reject a different existing slug instead of renaming it.
+   */
+  onlyIfUnset?: boolean;
+  /**
+   * 1-128 ASCII characters: an alphanumeric first character, followed by
+   * alphanumerics, underscores, hyphens, dots or colons.
+   */
+  slug: string;
   universeId: string;
 }
 /**

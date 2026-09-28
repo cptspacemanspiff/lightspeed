@@ -19,18 +19,24 @@ Reads bytes at a path in the current workspace head.
 - Params: `VfsWorkspaceFileReadParams`
 - Result: `AgentApiOutcome<BlobReadResponse>`
 
+
+## Connection methods
+
 ### `initialize`
 
 **Inspect the Lightspeed protocol**
 
-Returns protocol version, server identity, supported capabilities, and the method groups the caller's key may call, without changing universe state. Every key may call it.
+Returns protocol version, server identity, credential scope and allowed groups before universe selection. Requires authentication in authenticated mode; no universe header is accepted.
 
-- Access: `{"kind":"universe","action":"read"}`
+- Access: `{"kind":"connection"}`
 - Group: `none`
-- Role: `viewer`
+- Role: `none`
 - Target: `none`
 - Params: `InitializeParams`
 - Result: `AgentApiOutcome<InitializeResponse>`
+
+
+## Universe methods
 
 ### `session/start`
 
@@ -1553,6 +1559,19 @@ Returns one deployment tenant summary with aggregate session, workspace, profile
 - Role: `none`
 - Target: `none`
 - Params: `DeploymentUniverseReadParams`
+- Result: `AgentApiOutcome<DeploymentUniverseReadResponse>`
+
+### `deployment/universes/slug/put`
+
+**Set a universe slug**
+
+Sets or changes a deployment-unique slug without changing the universe UUID or resources. The previous slug is released and old URLs may stop working. With onlyIfUnset, a different existing slug is a conflict. Claiming another universe's slug also returns a conflict. Does not create a universe.
+
+- Access: `{"kind":"deployment"}`
+- Group: `deployment/universes`
+- Role: `none`
+- Target: `none`
+- Params: `DeploymentUniverseSlugPutParams`
 - Result: `AgentApiOutcome<DeploymentUniverseReadResponse>`
 
 ### `deployment/universes/delete`

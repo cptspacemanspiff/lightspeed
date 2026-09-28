@@ -1,10 +1,14 @@
+mod administration_cli;
 mod api_client;
 mod auth_cli;
 mod chat;
+mod connection;
 mod env_cli;
 mod mcp_cli;
+mod output;
 mod profile_cli;
 mod session_cli;
+mod session_resources;
 mod skills_cli;
 mod vfs_cli;
 mod vfs_transfer;
@@ -19,27 +23,56 @@ use clap::{Parser, Subcommand};
     about = "Lightspeed command-line tools"
 )]
 struct Cli {
+    /// Runtime endpoint override; never forwards a saved key to a different endpoint.
+    #[arg(long, global = true)]
+    api_url: Option<String>,
+    /// Use a saved runtime connection for this invocation.
+    #[arg(long, global = true)]
+    connection: Option<String>,
+    /// Universe UUID or slug for this invocation.
+    #[arg(long, global = true)]
+    universe: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Chat through a Lightspeed API gateway.
+    /// Manage local runtime connections.
+    #[command(visible_alias = "connections")]
+    Connect(connection::ConnectArgs),
+    /// Select and administer runtime universes.
+    #[command(visible_alias = "universes")]
+    Universe(administration_cli::UniverseArgs),
+    /// Administer Lightspeed gateway API keys.
+    #[command(visible_alias = "api-keys")]
+    ApiKey(administration_cli::ApiKeyArgs),
+    /// Discover models and configure model-provider connections.
+    #[command(name = "model", visible_alias = "models")]
+    Models(administration_cli::ModelsArgs),
+    /// Chat with an agent session.
+    #[command(visible_alias = "chats")]
     Chat(chat::ChatArgs),
-    /// Work with CAS-backed VFS snapshots.
+    /// Upload and download immutable VFS snapshots.
+    #[command(visible_alias = "vfses")]
     Vfs(vfs_cli::VfsArgs),
-    /// List and manage session skills.
-    Skills(skills_cli::SkillsArgs),
-    /// Manage remote MCP servers and session links.
+    /// Manage persistent VFS workspaces in the current universe.
+    #[command(visible_alias = "workspaces")]
+    Workspace(vfs_cli::WorkspaceArgs),
+    /// Manage registered MCP servers and their credentials.
+    #[command(visible_alias = "mcps")]
     Mcp(mcp_cli::McpArgs),
-    /// Manage auth grants and credentials.
+    /// Manage reusable external credentials, OAuth clients and GitHub Apps.
+    #[command(name = "credential", visible_alias = "credentials")]
     Auth(auth_cli::AuthArgs),
-    /// Manage session environments.
+    /// Provision and manage independent universe environments.
+    #[command(name = "environment", visible_aliases = ["environments", "env"])]
     Env(env_cli::EnvArgs),
-    /// Manage agent profiles.
+    /// Manage reusable agent profiles.
+    #[command(name = "profile", visible_alias = "profiles")]
     Profiles(profile_cli::ProfilesArgs),
-    /// Start, list, tag, close, and delete sessions.
+    /// Manage sessions, configuration, resource attachments and skills.
+    #[command(visible_alias = "sessions")]
     Session(session_cli::SessionArgs),
 }
 
@@ -47,10 +80,32 @@ enum Command {
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
+    if let Command::Connect(args) = cli.command {
+        return connection::handle(
+            args,
+            cli.connection.as_deref(),
+            cli.universe.as_deref(),
+            cli.api_url.as_deref(),
+        )
+        .await;
+    }
+    let active = connection::resolve(
+        cli.connection.as_deref(),
+        cli.api_url.as_deref(),
+        cli.universe.as_deref(),
+    )
+    .await?;
+    connection::ACTIVE
+        .set(active)
+        .map_err(|_| anyhow::anyhow!("connection already initialized"))?;
     match cli.command {
+        Command::Connect(_) => unreachable!(),
+        Command::Universe(args) => administration_cli::universe(args).await,
+        Command::ApiKey(args) => administration_cli::api_key(args).await,
+        Command::Models(args) => administration_cli::models(args).await,
         Command::Chat(args) => chat::handle(args).await,
         Command::Vfs(args) => vfs_cli::handle(args).await,
-        Command::Skills(args) => skills_cli::handle(args).await,
+        Command::Workspace(args) => vfs_cli::workspace(args).await,
         Command::Mcp(args) => mcp_cli::handle(args).await,
         Command::Auth(args) => auth_cli::handle(args).await,
         Command::Env(args) => env_cli::handle(args).await,
@@ -62,6 +117,141 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_tree_and_plural_aliases_are_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        for (name, plural) in [
+            ("connect", "connections"),
+            ("universe", "universes"),
+            ("api-key", "api-keys"),
+            ("model", "models"),
+            ("chat", "chats"),
+            ("workspace", "workspaces"),
+            ("mcp", "mcps"),
+            ("credential", "credentials"),
+            ("environment", "environments"),
+            ("profile", "profiles"),
+            ("session", "sessions"),
+            ("vfs", "vfses"),
+        ] {
+            let root = Cli::command();
+            let cmd = root.find_subcommand(name).unwrap();
+            assert!(
+                cmd.get_visible_aliases().any(|alias| alias == plural),
+                "{name}"
+            );
+            let error = Cli::try_parse_from(["lightspeed", plural, "--help"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+        for removed in ["auth", "skills"] {
+            assert!(Cli::try_parse_from(["lightspeed", removed]).is_err());
+        }
+    }
+
+    #[test]
+    fn every_session_option_accepts_short_s() {
+        use clap::CommandFactory;
+
+        fn check(command: &clap::Command) {
+            for arg in command.get_arguments() {
+                if arg.get_long() == Some("session") {
+                    assert_eq!(
+                        arg.get_short(),
+                        Some('s'),
+                        "{} --session",
+                        command.get_name()
+                    );
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                check(subcommand);
+            }
+        }
+        let mut command = Cli::command();
+        command.build();
+        check(&command);
+        for args in [
+            vec!["chat", "-s", "test1"],
+            vec!["session", "workspace", "list", "-s", "test1"],
+            vec!["session", "mcp", "list", "-s", "test1"],
+            vec!["session", "skill", "list", "-s", "test1"],
+            vec!["session", "environment", "list", "-s", "test1"],
+        ] {
+            Cli::try_parse_from(std::iter::once("lightspeed").chain(args))
+                .expect("-s must parse as --session");
+        }
+    }
+
+    #[test]
+    fn current_resource_commands_accept_scoped_flags() {
+        for args in [
+            vec![
+                "session",
+                "environment",
+                "attach",
+                "machine",
+                "--session",
+                "s1",
+                "--access",
+                "jobs",
+                "--working-directory",
+                "/repo",
+            ],
+            vec![
+                "session",
+                "environment",
+                "detach",
+                "machine",
+                "--session",
+                "s1",
+            ],
+            vec![
+                "session",
+                "config",
+                "put",
+                "s1",
+                "--file",
+                "config.json",
+                "--expected-revision",
+                "3",
+            ],
+            vec![
+                "environment",
+                "create",
+                "--binding",
+                "local",
+                "--template",
+                "linux-v1",
+                "--request-id",
+                "retry-1",
+            ],
+            vec![
+                "environment",
+                "register",
+                "wss://env.example/ws",
+                "--request-id",
+                "retry-2",
+            ],
+            vec!["environment", "provider", "put", "--file", "provider.json"],
+            vec!["environment", "binding", "put", "--file", "binding.json"],
+            vec!["environment", "template", "list", "--binding", "local"],
+            vec!["profile", "--json", "read", "reviewer"],
+        ] {
+            let mut command = vec![
+                "lightspeed",
+                "--connection",
+                "test",
+                "--universe",
+                "one",
+                "--api-url",
+                "http://localhost/rpc",
+            ];
+            command.extend(args);
+            Cli::try_parse_from(&command).unwrap_or_else(|error| panic!("{command:?}: {error}"));
+        }
+    }
 
     #[test]
     fn chat_parse_accepts_model_options() {
@@ -100,21 +290,65 @@ mod tests {
     }
 
     #[test]
-    fn chat_parse_accepts_mount_options() {
+    fn chat_stats_flag_parses_and_conflicts_with_listing() {
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--show-stats"]).is_ok());
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--show-stats", "hello"]).is_ok());
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--list", "--show-stats"]).is_err());
+    }
+
+    #[test]
+    fn chat_recent_session_flags_parse_and_reject_ambiguous_actions() {
+        for flag in ["--list", "--resume", "--continue"] {
+            assert!(Cli::try_parse_from(["lightspeed", "chat", flag]).is_ok());
+        }
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--list", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--continue", "hello"]).is_ok());
+        for args in [
+            vec!["--list", "--resume"],
+            vec!["--list", "-s", "s1"],
+            vec!["--list", "--new"],
+            vec!["--list", "hello"],
+            vec!["--list", "--upload", "."],
+            vec!["--list", "--bare"],
+            vec!["--continue", "--new"],
+            vec!["--resume", "-s", "s1"],
+            vec!["--resume", "--profile", "reviewer"],
+            vec!["--new", "-s", "s1"],
+        ] {
+            assert!(Cli::try_parse_from(["lightspeed", "chat"].into_iter().chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn chat_parse_accepts_workspace_options() {
         let cli = Cli::try_parse_from([
             "lightspeed",
             "chat",
             "--new",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
-            "--mount",
+            "--upload",
             ".",
-            "--mount-path",
+            "--workspace-path",
             "/workspace",
+            "--workspace-access",
+            "read",
             "hello",
         ])
-        .expect("parse chat mount");
+        .expect("parse chat upload");
         assert!(matches!(cli.command, Command::Chat(_)));
+        assert!(Cli::try_parse_from(["lightspeed", "chat", "--workspace", "w1"]).is_ok());
+        for args in [
+            vec!["--upload", ".", "--workspace", "w1"],
+            vec!["--workspace-path", "/repo"],
+            vec!["--workspace-access", "read"],
+            vec!["--workspace", "w1", "--workspace-access", "none"],
+            vec!["--mount", "."],
+            vec!["--mount-path", "/repo"],
+            vec!["--filesystem-tools", "read"],
+        ] {
+            assert!(Cli::try_parse_from(["lightspeed", "chat"].into_iter().chain(args)).is_err());
+        }
     }
 
     #[test]
@@ -137,7 +371,8 @@ mod tests {
     fn profiles_parse_accepts_apply_named_profile() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "profiles",
+            "session",
+            "profile",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
             "apply",
@@ -146,7 +381,7 @@ mod tests {
             "support",
         ])
         .expect("parse profiles apply");
-        assert!(matches!(cli.command, Command::Profiles(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
@@ -223,7 +458,6 @@ mod tests {
     fn vfs_workspace_create_parse_accepts_snapshot_ref() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
             "workspace",
             "create",
             "--api-url",
@@ -233,14 +467,13 @@ mod tests {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ])
         .expect("parse vfs workspace create");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Workspace(_)));
     }
 
     #[test]
     fn vfs_workspace_read_parse_accepts_workspace_id() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
             "workspace",
             "read",
             "--api-url",
@@ -248,14 +481,13 @@ mod tests {
             "workspace_1",
         ])
         .expect("parse vfs workspace read");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Workspace(_)));
     }
 
     #[test]
     fn vfs_workspace_update_parse_accepts_expected_revision_and_snapshot_ref() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
             "workspace",
             "update",
             "--api-url",
@@ -266,14 +498,13 @@ mod tests {
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ])
         .expect("parse vfs workspace update");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Workspace(_)));
     }
 
     #[test]
     fn vfs_workspace_update_parse_allows_omitted_expected_revision() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
             "workspace",
             "update",
             "--api-url",
@@ -282,14 +513,13 @@ mod tests {
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ])
         .expect("parse vfs workspace update without expected revision");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Workspace(_)));
     }
 
     #[test]
     fn vfs_workspace_delete_parse_accepts_workspace_id() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
             "workspace",
             "delete",
             "--api-url",
@@ -297,16 +527,16 @@ mod tests {
             "workspace_1",
         ])
         .expect("parse vfs workspace delete");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Workspace(_)));
     }
 
     #[test]
     fn vfs_mount_put_parse_accepts_workspace_mount() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
-            "mount",
-            "put",
+            "session",
+            "workspace",
+            "attach",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
             "--session",
@@ -319,7 +549,7 @@ mod tests {
             "edit",
         ])
         .expect("parse vfs mount put");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
@@ -339,7 +569,8 @@ mod tests {
     fn env_activate_parse_accepts_environment() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "env",
+            "session",
+            "environment",
             "activate",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -348,7 +579,7 @@ mod tests {
             "environment_1",
         ])
         .expect("parse env activate");
-        assert!(matches!(cli.command, Command::Env(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
@@ -532,9 +763,9 @@ mod tests {
     fn vfs_mount_delete_parse_accepts_session_and_path() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "vfs",
-            "mount",
-            "delete",
+            "session",
+            "workspace",
+            "detach",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
             "--session",
@@ -543,14 +774,15 @@ mod tests {
             "/workspace",
         ])
         .expect("parse vfs mount delete");
-        assert!(matches!(cli.command, Command::Vfs(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
     fn skills_list_parse_accepts_session() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "skills",
+            "session",
+            "skill",
             "list",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -558,14 +790,15 @@ mod tests {
             "session_1",
         ])
         .expect("parse skills list");
-        assert!(matches!(cli.command, Command::Skills(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
     fn skills_use_parse_accepts_skill_id() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "skills",
+            "session",
+            "skill",
             "use",
             "--api-url",
             "http://localhost:18080/rpc",
@@ -575,9 +808,9 @@ mod tests {
             "skill:review",
         ])
         .expect("parse skill use");
-        assert!(matches!(cli.command, Command::Skills(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
         for command in ["active", "activate", "deactivate"] {
-            assert!(Cli::try_parse_from(["lightspeed", "skills", command]).is_err());
+            assert!(Cli::try_parse_from(["lightspeed", "session", "skill", command]).is_err());
         }
     }
 
@@ -586,7 +819,6 @@ mod tests {
         let cli = Cli::try_parse_from([
             "lightspeed",
             "mcp",
-            "server",
             "put",
             "--expected-revision",
             "2",
@@ -610,8 +842,7 @@ mod tests {
     fn auth_grant_import_parse_accepts_token_env() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "auth",
-            "grant",
+            "credential",
             "import",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -630,8 +861,7 @@ mod tests {
     fn auth_grant_import_requires_a_token_source() {
         let result = Cli::try_parse_from([
             "lightspeed",
-            "auth",
-            "grant",
+            "credential",
             "import",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -643,8 +873,8 @@ mod tests {
     fn auth_client_add_parse_accepts_endpoints_and_secret_env() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "auth",
-            "client",
+            "credential",
+            "oauth-client",
             "add",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -671,8 +901,8 @@ mod tests {
     fn auth_client_add_rejects_multiple_secret_sources() {
         let result = Cli::try_parse_from([
             "lightspeed",
-            "auth",
-            "client",
+            "credential",
+            "oauth-client",
             "add",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -695,7 +925,6 @@ mod tests {
         let cli = Cli::try_parse_from([
             "lightspeed",
             "mcp",
-            "server",
             "put",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -719,7 +948,7 @@ mod tests {
     fn auth_github_app_add_parse_requires_a_key_source() {
         let parsed = Cli::try_parse_from([
             "lightspeed",
-            "auth",
+            "credential",
             "github",
             "app",
             "add",
@@ -737,7 +966,7 @@ mod tests {
 
         let missing_key = Cli::try_parse_from([
             "lightspeed",
-            "auth",
+            "credential",
             "github",
             "app",
             "add",
@@ -753,7 +982,7 @@ mod tests {
     fn auth_github_installation_grant_parse_accepts_app_and_id() {
         let parsed = Cli::try_parse_from([
             "lightspeed",
-            "auth",
+            "credential",
             "github",
             "installation",
             "grant",
@@ -772,7 +1001,7 @@ mod tests {
     fn auth_login_parse_accepts_mcp_server_client_ids() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "auth",
+            "credential",
             "login",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -786,7 +1015,7 @@ mod tests {
     fn auth_login_parse_accepts_client_and_overrides() {
         let cli = Cli::try_parse_from([
             "lightspeed",
-            "auth",
+            "credential",
             "login",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -805,8 +1034,9 @@ mod tests {
     fn mcp_link_parse_accepts_session_and_server() {
         let cli = Cli::try_parse_from([
             "lightspeed",
+            "session",
             "mcp",
-            "link",
+            "attach",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
             "--session",
@@ -814,7 +1044,7 @@ mod tests {
             "echo",
         ])
         .expect("parse mcp link");
-        assert!(matches!(cli.command, Command::Mcp(_)));
+        assert!(matches!(cli.command, Command::Session(_)));
     }
 
     #[test]
@@ -822,8 +1052,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "lightspeed",
             "mcp",
-            "server",
-            "auth",
+            "credential",
             "set",
             "--api-url",
             "http://127.0.0.1:18080/rpc",
@@ -840,7 +1069,6 @@ mod tests {
         let cli = Cli::try_parse_from([
             "lightspeed",
             "mcp",
-            "server",
             "login",
             "--api-url",
             "http://127.0.0.1:18080/rpc",

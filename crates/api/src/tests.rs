@@ -1835,6 +1835,10 @@ impl AgentApiService for TestService {
                 local_execution: false,
             },
             caller: CallerAccess {
+                scope: AccessScope::Universe {
+                    universe_id: uuid::Uuid::nil(),
+                },
+                single: true,
                 key_prefix: None,
                 groups: MethodGroup::ALL.to_vec(),
             },
@@ -3416,6 +3420,17 @@ impl DeploymentApiService for TestDeploymentService {
     ) -> Result<AgentApiOutcome<DeploymentUniverseReadResponse>, AgentApiError> {
         Ok(AgentApiOutcome::new(DeploymentUniverseReadResponse {
             universe: test_deployment_universe(&params.universe_id),
+        }))
+    }
+
+    async fn put_universe_slug(
+        &self,
+        params: DeploymentUniverseSlugPutParams,
+    ) -> Result<AgentApiOutcome<DeploymentUniverseReadResponse>, AgentApiError> {
+        let mut universe = test_deployment_universe(&params.universe_id);
+        universe.slug = Some(params.slug);
+        Ok(AgentApiOutcome::new(DeploymentUniverseReadResponse {
+            universe,
         }))
     }
 
