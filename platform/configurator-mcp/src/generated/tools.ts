@@ -772,7 +772,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model; the provider api kind is\npinned for the session's lifetime."
+              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -1756,7 +1756,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model; the provider api kind is\npinned for the session's lifetime."
+              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -2864,7 +2864,8 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Optional model override within the session's provider identity and API\nkind. Changing either requires a new session, even before the first run."
             }
           },
           "type": "object"
@@ -3970,7 +3971,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model; the provider api kind is\npinned for the session's lifetime."
+              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -5684,7 +5685,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model; the provider api kind is\npinned for the session's lifetime."
+              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -6702,7 +6703,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model; the provider api kind is\npinned for the session's lifetime."
+              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"

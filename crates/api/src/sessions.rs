@@ -265,8 +265,8 @@ fn default_feature_version() -> u32 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionConfig {
     /// Absent on input means the deployment default model. Documents read
-    /// back from a session always carry the model; the provider api kind is
-    /// pinned for the session's lifetime.
+    /// back from a session always carry the model. Provider identity and API
+    /// kind are fixed for the session lifetime; the model name may change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

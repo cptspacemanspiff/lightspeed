@@ -342,7 +342,7 @@ pub(super) fn apply_run_start_config(
         apply_run_limits_config(run_config, limits);
     }
     run_config
-        .validate_provider_compatibility(&session_config.model.api_kind)
+        .validate_provider_compatibility(&session_config.model)
         .map_err(|error| AgentApiError::invalid_request(error.to_string()))
 }
 
@@ -424,6 +424,41 @@ pub(super) fn model_selection_from_api(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_model_override_keeps_provider_identity_and_api_kind() {
+        let model = ModelSelection {
+            provider_id: "deepseek".into(),
+            api_kind: ProviderApiKind::OpenAiCompletions,
+            model: "deepseek-model".into(),
+        };
+        let session = engine_session_config_from_api(api::SessionConfig::default(), model).unwrap();
+        for (provider, kind, allowed) in [
+            ("deepseek", "openai:completions", true),
+            ("glm", "openai:completions", false),
+            ("deepseek", "openai:responses", false),
+        ] {
+            let result = apply_run_start_config(
+                &mut RunConfig::default(),
+                &session,
+                Some(api::RunStartConfig {
+                    model: Some(api::ModelConfig {
+                        provider_id: provider.into(),
+                        api_kind: kind.into(),
+                        model: "another-model".into(),
+                    }),
+                    ..Default::default()
+                }),
+            );
+            if allowed {
+                result.unwrap();
+            } else {
+                assert!(
+                    matches!(result, Err(error) if error.kind == api::AgentApiErrorKind::InvalidRequest)
+                );
+            }
+        }
+    }
 
     #[test]
     fn completions_accepts_current_openai_reasoning_vocabulary() {

@@ -80,6 +80,8 @@ pub enum RunStartSource {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStartConfig {
+    /// Optional model override within the session's provider identity and API
+    /// kind. Changing either requires a new session, even before the first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -57,6 +57,23 @@ describe("model picker ordering", () => {
     ).toEqual(["newer", "older", "unknown"]);
   });
 
+  it("rejects manual route changes in an existing session", () => {
+    const model = { providerId: "deepseek", apiKind: "openai:completions", model: "model-b" };
+    expect(configError({ model }, "openai:completions", false, "deepseek")).toBeNull();
+    expect(configError({ model: { ...model, providerId: "glm" } }, "openai:completions", false, "deepseek")).toContain("fixed");
+    expect(configError({ model: { ...model, apiKind: "openai:responses" } }, "openai:completions", false, "deepseek")).toContain("fixed");
+    expect(configError({}, "openai:completions", false, "deepseek")).toContain("fixed");
+  });
+
+  it("pins provider identity as well as API kind, but allows aggregator model changes", () => {
+    const deepseek = { ...option("deepseek-model", 1), providerId: "deepseek", apiKind: "openai:completions" };
+    const glm = { ...option("glm-model", 2), providerId: "glm", apiKind: "openai:completions" };
+    expect(modelPickerOptions([deepseek, glm], undefined, "openai:completions", "deepseek")).toEqual([deepseek]);
+    const aggregator = [deepseek, glm].map((model) => ({ ...model, providerId: "openrouter" }));
+    expect(modelPickerOptions(aggregator, undefined, "openai:completions", "openrouter")).toHaveLength(2);
+    expect(modelPickerOptions(aggregator, undefined, "openai:responses", "openrouter")).toEqual([]);
+  });
+
   it("collapses API-kind variants while preserving an existing or pinned route", () => {
     const responses = option("gpt-5.5", 1_800_000_000_000);
     const completions = option(

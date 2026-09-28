@@ -47,7 +47,7 @@ pub(crate) fn validate_config_update_for_state(
     let current = current_config(state)?;
     validate_session_is_idle_for_config_update(state)?;
     config.validate()?;
-    validate_session_api_kind_is_pinned(&current.model.api_kind, &config.model.api_kind)?;
+    validate_session_provider_is_pinned(&current.model, &config.model)?;
     validate_active_context_api_kind(state, &config.model.api_kind)?;
     validate_tool_choice_for_active_tools(state, config.generation.tool_choice.as_ref())?;
     Ok(())
@@ -626,19 +626,12 @@ pub struct RunConfig {
 impl RunConfig {
     pub fn validate_provider_compatibility(
         &self,
-        session_api_kind: &ProviderApiKind,
+        session_model: &ModelSelection,
     ) -> Result<(), DomainError> {
-        let api_kind = if let Some(model) = self.model_override.as_ref() {
-            if &model.api_kind != session_api_kind {
-                return Err(DomainError::ProviderCompatibility(format!(
-                    "run model override api kind {:?} does not match session api kind {:?}",
-                    model.api_kind, session_api_kind
-                )));
-            }
-            &model.api_kind
-        } else {
-            session_api_kind
-        };
+        if let Some(model) = self.model_override.as_ref() {
+            validate_session_provider_is_pinned(session_model, model)?;
+        }
+        let api_kind = &session_model.api_kind;
         if self.processing_tier.is_some()
             && !matches!(
                 api_kind,
@@ -669,7 +662,7 @@ pub(crate) fn validate_run_config_for_state(
     run_config: &RunConfig,
 ) -> Result<(), DomainError> {
     let config = current_config(state)?;
-    run_config.validate_provider_compatibility(&config.model.api_kind)?;
+    run_config.validate_provider_compatibility(&config.model)?;
     validate_active_context_api_kind(state, &config.model.api_kind)?;
     validate_tool_choice_for_active_tools(state, run_config.tool_choice.as_ref())?;
     Ok(())
@@ -1167,18 +1160,25 @@ fn validate_session_is_idle_for_config_update(state: &CoreAgentState) -> Result<
     }
 }
 
-fn validate_session_api_kind_is_pinned(
-    pinned: &ProviderApiKind,
-    proposed: &ProviderApiKind,
+/// Model changes retain the configured provider and API kind. Sharing a wire
+/// protocol does not make opaque context portable between providers.
+fn validate_session_provider_is_pinned(
+    pinned: &ModelSelection,
+    proposed: &ModelSelection,
 ) -> Result<(), DomainError> {
-    if proposed == pinned {
-        Ok(())
-    } else {
-        Err(DomainError::ProviderCompatibility(format!(
-            "session provider api kind is pinned to {:?}, got {:?}",
-            pinned, proposed
-        )))
+    if proposed.provider_id != pinned.provider_id {
+        return Err(DomainError::ProviderCompatibility(format!(
+            "session provider is pinned to {}, got {}; create a new session for another provider",
+            pinned.provider_id, proposed.provider_id
+        )));
     }
+    if proposed.api_kind != pinned.api_kind {
+        return Err(DomainError::ProviderCompatibility(format!(
+            "session provider api kind is pinned to {:?}, got {:?}",
+            pinned.api_kind, proposed.api_kind
+        )));
+    }
+    Ok(())
 }
 
 fn validate_active_context_api_kind(
@@ -1204,6 +1204,126 @@ mod tests {
             limits: LimitsConfig::default(),
             context: ContextConfig { compaction },
             features: FeaturesConfig::default(),
+        }
+    }
+
+    #[test]
+    fn session_route_is_pinned_at_admission_and_replay_while_models_can_change() {
+        use crate::{
+            CommandError, CommandRejectionKind, CoreAgentCommand, CoreAgentEntry, CoreAgentEvent,
+            CoreAgentLifecycleEvent, EventSeq, SessionPosition, admit_command, apply_event,
+        };
+        let mut original = config(ProviderApiKind::OpenAiCompletions, None);
+        original.model.provider_id = "openrouter".into();
+        original.model.model = "deepseek/model".into();
+        let mut state = CoreAgentState::new();
+        let mut history = Vec::new();
+        for command in [
+            CoreAgentCommand::OpenSession {
+                config: original.clone(),
+            },
+            CoreAgentCommand::ReplaceSessionConfig {
+                expected_revision: None,
+                config: {
+                    let mut changed = original.clone();
+                    changed.model.model = "glm/model".into();
+                    changed
+                },
+            },
+            CoreAgentCommand::ReplaceSessionConfig {
+                expected_revision: None,
+                config: original.clone(),
+            },
+        ] {
+            for proposal in admit_command(&state, command, 1).expect("compatible model change") {
+                let entry = CoreAgentEntry {
+                    position: SessionPosition {
+                        seq: EventSeq::new(history.len() as u64 + 1),
+                    },
+                    observed_at_ms: 1,
+                    joins: proposal.joins,
+                    event: proposal.event,
+                };
+                apply_event(&mut state, &entry).unwrap();
+                history.push(entry);
+            }
+        }
+        let mut replay = CoreAgentState::new();
+        for entry in &history {
+            apply_event(&mut replay, entry).unwrap();
+        }
+        assert_eq!(state, replay);
+        assert_eq!(
+            state.lifecycle.config.as_ref().unwrap().model,
+            original.model
+        );
+        // These checks also apply to a newly opened session with no context or runs.
+        for pinned_state in [&state, &{
+            let mut empty = CoreAgentState::new();
+            apply_event(&mut empty, &history[0]).unwrap();
+            empty
+        }] {
+            for changed in [
+                ModelSelection {
+                    provider_id: "glm".into(),
+                    ..original.model.clone()
+                },
+                ModelSelection {
+                    api_kind: ProviderApiKind::OpenAiResponses,
+                    ..original.model.clone()
+                },
+            ] {
+                let proposed = SessionConfig {
+                    model: changed.clone(),
+                    ..original.clone()
+                };
+                assert!(
+                    matches!(admit_command(pinned_state, CoreAgentCommand::ReplaceSessionConfig {
+                    expected_revision: None, config: proposed.clone()
+                }, 2), Err(CommandError::Rejected(rejection)) if rejection.kind == CommandRejectionKind::ProviderCompatibility)
+                );
+                assert!(matches!(
+                    validate_run_config_for_state(
+                        pinned_state,
+                        &RunConfig {
+                            model_override: Some(changed),
+                            ..Default::default()
+                        }
+                    ),
+                    Err(DomainError::ProviderCompatibility(_))
+                ));
+                let mut invalid_replay = pinned_state.clone();
+                let entry = CoreAgentEntry {
+                    position: SessionPosition {
+                        seq: EventSeq::new(
+                            pinned_state.reduced_to.as_ref().unwrap().seq.as_u64() + 1,
+                        ),
+                    },
+                    observed_at_ms: 2,
+                    joins: Default::default(),
+                    event: CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::ConfigChanged {
+                        config: proposed,
+                        revision: pinned_state.lifecycle.config_revision + 1,
+                    }),
+                };
+                assert!(matches!(
+                    apply_event(&mut invalid_replay, &entry),
+                    Err(DomainError::ProviderCompatibility(_))
+                ));
+            }
+            for model in ["deepseek/model", "glm/model"] {
+                validate_run_config_for_state(
+                    pinned_state,
+                    &RunConfig {
+                        model_override: Some(ModelSelection {
+                            model: model.into(),
+                            ..original.model.clone()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .expect("same aggregator allows model changes");
+            }
         }
     }
 
