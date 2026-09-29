@@ -2,6 +2,25 @@ use super::*;
 
 #[async_trait]
 pub trait AgentApiService: Send + Sync {
+    async fn start_transcription(
+        &self,
+        _params: TranscriptionStartParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        Err(AgentApiError::internal("transcription is unavailable"))
+    }
+    async fn read_transcription(
+        &self,
+        _params: TranscriptionReadParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        Err(AgentApiError::internal("transcription is unavailable"))
+    }
+    async fn cancel_transcription(
+        &self,
+        _params: TranscriptionCancelParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        Err(AgentApiError::internal("transcription is unavailable"))
+    }
+
     async fn read_vfs_workspace_file(
         &self,
         _params: VfsWorkspaceFileReadParams,
@@ -14,6 +33,20 @@ pub trait AgentApiService: Send + Sync {
         &self,
         params: InitializeParams,
     ) -> Result<AgentApiOutcome<InitializeResponse>, AgentApiError>;
+
+    async fn read_model_defaults(
+        &self,
+        _params: ModelDefaultsReadParams,
+    ) -> Result<AgentApiOutcome<ModelDefaultsResponse>, AgentApiError> {
+        Err(AgentApiError::internal("model defaults are unavailable"))
+    }
+
+    async fn put_model_defaults(
+        &self,
+        _params: ModelDefaultsPutParams,
+    ) -> Result<AgentApiOutcome<ModelDefaultsResponse>, AgentApiError> {
+        Err(AgentApiError::internal("model defaults are unavailable"))
+    }
 
     async fn list_models(
         &self,

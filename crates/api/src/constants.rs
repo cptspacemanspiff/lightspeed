@@ -60,6 +60,8 @@ pub const METHOD_ENVIRONMENTS_CREDENTIALS_UNBIND: &str = "environments/credentia
 
 // ── Universe: direct provider model discovery ───────────────────────────────
 
+pub const METHOD_MODELS_DEFAULTS_READ: &str = "models/defaults/read";
+pub const METHOD_MODELS_DEFAULTS_PUT: &str = "models/defaults/put";
 pub const METHOD_MODELS_LIST: &str = "models/list";
 
 pub const METHOD_PROFILES_CREATE: &str = "profiles/create";
@@ -175,3 +177,9 @@ pub const NOTIFY_SESSION_EVENT: &str = "session/event";
 pub const NOTIFY_SESSION_RUNS_STARTED: &str = "session/runs/started";
 pub const NOTIFY_SESSION_RUNS_COMPLETED: &str = "session/runs/completed";
 pub const NOTIFY_ERROR: &str = "error";
+
+// ── Transcriptions ───────────────────────────────────────────────────────────
+
+pub const METHOD_TRANSCRIPTIONS_START: &str = "transcriptions/start";
+pub const METHOD_TRANSCRIPTIONS_READ: &str = "transcriptions/read";
+pub const METHOD_TRANSCRIPTIONS_CANCEL: &str = "transcriptions/cancel";

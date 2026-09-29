@@ -94,7 +94,7 @@ Returns a cursor-paginated summary list ordered by most recent update, optionall
 
 **Replace session configuration**
 
-Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.
+Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.
 
 - Access: `{"kind":"universe","action":"control_session"}`
 - Group: `session`
@@ -198,7 +198,7 @@ Returns chronological events. Forward (default) follows after and supports long-
 
 **Append keyed session context**
 
-Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.
+Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.
 
 - Access: `{"kind":"universe","action":"control_session"}`
 - Group: `session`
@@ -648,6 +648,71 @@ Stops the key from admitting new daemon identities; already registered daemons k
 - Target: `none`
 - Params: `EnvironmentRegistrationKeyRevokeParams`
 - Result: `AgentApiOutcome<EnvironmentRegistrationKeyRevokeResponse>`
+
+### `transcriptions/start`
+
+**Start transcription**
+
+Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.
+
+- Access: `{"kind":"universe","action":"use_resource"}`
+- Group: `transcriptions`
+- Role: `contributor`
+- Target: `none`
+- Params: `TranscriptionStartParams`
+- Result: `AgentApiOutcome<TranscriptionResponse>`
+
+### `transcriptions/read`
+
+**Read transcription**
+
+Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `transcriptions`
+- Role: `viewer`
+- Target: `none`
+- Params: `TranscriptionReadParams`
+- Result: `AgentApiOutcome<TranscriptionResponse>`
+
+### `transcriptions/cancel`
+
+**Cancel transcription**
+
+Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.
+
+- Access: `{"kind":"universe","action":"use_resource"}`
+- Group: `transcriptions`
+- Role: `contributor`
+- Target: `none`
+- Params: `TranscriptionCancelParams`
+- Result: `AgentApiOutcome<TranscriptionResponse>`
+
+### `models/defaults/read`
+
+**Read universe model defaults**
+
+Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `models`
+- Role: `viewer`
+- Target: `none`
+- Params: `ModelDefaultsReadParams`
+- Result: `AgentApiOutcome<ModelDefaultsResponse>`
+
+### `models/defaults/put`
+
+**Set a universe model default**
+
+Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.
+
+- Access: `{"kind":"universe","action":"configure_resource"}`
+- Group: `models`
+- Role: `operator`
+- Target: `none`
+- Params: `ModelDefaultsPutParams`
+- Result: `AgentApiOutcome<ModelDefaultsResponse>`
 
 ### `models/list`
 
@@ -1591,7 +1656,7 @@ Permanently terminates live session workflows, deletes external blob objects, an
 
 **Create a scoped API key**
 
-Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Keys are immutable: revoke and mint to change what one may do.
+Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Key authority is immutable: revoke and mint to change what one may do.
 
 - Access: `{"kind":"deployment"}`
 - Group: `deployment/api-keys`
@@ -1612,6 +1677,19 @@ Returns non-secret key metadata, all keys or those of one scope, including group
 - Target: `none`
 - Params: `DeploymentApiKeyListParams`
 - Result: `AgentApiOutcome<DeploymentApiKeyListResponse>`
+
+### `deployment/api-keys/rotate`
+
+**Rotate a scoped API key**
+
+Atomically replaces an active key secret and display prefix, immediately rejecting the old secret on subsequent requests. Preserves scope, groups, actor authority, name, creator and creation time; clears last use. Returns the new secret once. Unknown or revoked prefixes are not found. Already admitted work continues.
+
+- Access: `{"kind":"deployment"}`
+- Group: `deployment/api-keys`
+- Role: `none`
+- Target: `none`
+- Params: `DeploymentApiKeyRotateParams`
+- Result: `AgentApiOutcome<DeploymentApiKeyCreateResponse>`
 
 ### `deployment/api-keys/revoke`
 

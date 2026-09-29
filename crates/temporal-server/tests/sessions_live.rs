@@ -23,9 +23,7 @@ use support::live::{
     require_storage_live_env, run_with_live_worker, start_text_run, wait_for_admission_failure,
     wait_for_session_status, wait_for_terminal_run,
 };
-use temporal_server::{
-    default_model_from_env, gateway::GatewayAgentApi, pg_store_from_env, worker::WorkerActivities,
-};
+use temporal_server::{gateway::GatewayAgentApi, pg_store_from_env, worker::WorkerActivities};
 use temporal_workflow::{AgentAdmission, AgentAdmissionFailureKind, AgentSessionWorkflow};
 use temporalio_client::{
     Client, WorkflowDescribeOptions, WorkflowSignalOptions, WorkflowTerminateOptions,
@@ -179,10 +177,10 @@ async fn run_checkpoint_and_bounded_reads_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client, store.clone())
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     api.start_session(SessionStartParams {
@@ -372,10 +370,10 @@ async fn run_fake_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     let initialized = api.initialize(InitializeParams::default()).await?;
@@ -528,6 +526,7 @@ async fn run_fake_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "hello temporal agent".to_owned(),
                 }],
@@ -546,6 +545,7 @@ async fn run_fake_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "second session-start input".to_owned(),
                 }],
@@ -566,6 +566,7 @@ async fn run_fake_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "second session-start input".to_owned(),
                 }],
@@ -583,6 +584,7 @@ async fn run_fake_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "different input".to_owned(),
                 }],
@@ -662,10 +664,10 @@ async fn run_lifecycle_delete_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client, store)
         .with_task_queue(task_queue)
-        .with_default_model(model)
         .build();
 
     api.start_session(SessionStartParams {
@@ -751,10 +753,10 @@ async fn run_continue_as_new_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .with_continue_as_new_history_threshold(1)
         .build();
 
@@ -785,6 +787,7 @@ async fn run_continue_as_new_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "first run before continue as new".to_owned(),
                 }],
@@ -812,6 +815,7 @@ async fn run_continue_as_new_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "second run after continue as new".to_owned(),
                 }],
@@ -851,10 +855,10 @@ async fn run_missing_session_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client, store)
         .with_task_queue(task_queue)
-        .with_default_model(model)
         .build();
 
     let error = api
@@ -864,6 +868,7 @@ async fn run_missing_session_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "this should not create a session".to_owned(),
                 }],
@@ -882,10 +887,10 @@ async fn run_context_append_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store.clone())
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     api.start_session(SessionStartParams {
@@ -924,6 +929,7 @@ async fn run_context_append_live_client(
                 ContextAppendEntry {
                     key: "channel.room.msg-1".to_owned(),
                     item: InputItem::TextRef {
+                        provenance_ref: None,
                         origin: None,
                         blob_ref: borrowed.to_string(),
                     },
@@ -931,6 +937,7 @@ async fn run_context_append_live_client(
                 ContextAppendEntry {
                     key: "channel.room.msg-2".to_owned(),
                     item: InputItem::Text {
+                        provenance_ref: None,
                         origin: None,
                         text: second_text.to_owned(),
                     },
@@ -992,6 +999,7 @@ async fn run_context_append_live_client(
                 ContextAppendEntry {
                     key: "channel.room.msg-1".to_owned(),
                     item: InputItem::Text {
+                        provenance_ref: None,
                         origin: None,
                         text: first_text.to_owned(),
                     },
@@ -999,6 +1007,7 @@ async fn run_context_append_live_client(
                 ContextAppendEntry {
                     key: "channel.room.msg-2".to_owned(),
                     item: InputItem::Text {
+                        provenance_ref: None,
                         origin: None,
                         text: second_text.to_owned(),
                     },
@@ -1027,6 +1036,7 @@ async fn run_context_append_live_client(
             entries: vec![ContextAppendEntry {
                 key: "channel.room.msg-2".to_owned(),
                 item: InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "[telegram:group Engineering] Bob (12:02): edited message".to_owned(),
                 },
@@ -1061,6 +1071,7 @@ async fn run_context_append_live_client(
             entries: vec![ContextAppendEntry {
                 key: "channel.room.msg-3".to_owned(),
                 item: InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "   ".to_owned(),
                 },
@@ -1081,6 +1092,7 @@ async fn run_context_append_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "summarize the room".to_owned(),
                 }],
@@ -1101,10 +1113,10 @@ async fn run_admission_failure_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     api.start_session(SessionStartParams {
@@ -1152,6 +1164,7 @@ async fn run_admission_failure_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "valid run after malformed command".to_owned(),
                 }],
@@ -1182,6 +1195,7 @@ async fn run_admission_failure_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "run after close should be rejected".to_owned(),
                 }],
@@ -1217,25 +1231,23 @@ async fn run_openai_live_client(
     let store = pg_store_from_env().await?;
     let instructions = "You are Agent in a live integration test. Do not call tools for this test. Reply with the exact phrase requested by the user.";
     let model = openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
-    api.start_session(SessionStartParams {
+    let start = SessionStartParams {
         access: None,
         metadata: Default::default(),
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
-        config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
-            ..SessionConfig::default()
-        }),
+        config: None,
         profile: Some(ProfileSource::Inline {
             profile: Box::new(InlineAgentProfile {
                 display_name: Some("OpenAI live test".to_owned()),
                 description: None,
                 document: ProfileDocument {
+                    config: Some(SessionConfig::default()),
                     instructions: Some(ProfileInstructions::Text {
                         text: instructions.to_owned(),
                     }),
@@ -1244,8 +1256,66 @@ async fn run_openai_live_client(
             }),
         }),
         delete_after_close_ms: None,
+    };
+    api.start_session(start.clone()).await?;
+    let session = read_session_view(&api, &session_id).await?;
+    assert_eq!(
+        session
+            .config
+            .as_ref()
+            .and_then(|config| config.model.as_ref()),
+        Some(&model_to_api(&model)),
+        "creation must persist the universe default"
+    );
+
+    let defaults = api
+        .read_model_defaults(api::ModelDefaultsReadParams {})
+        .await?
+        .result
+        .defaults;
+    api.put_model_defaults(api::ModelDefaultsPutParams {
+        slot: api::ModelDefaultSlot::AgentRun,
+        model: None,
+        expected_revision: defaults.revision,
     })
     .await?;
+    let missing = api
+        .start_session(SessionStartParams {
+            session_id: Some(format!("{session_id}_without_default")),
+            ..start.clone()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(missing.kind, AgentApiErrorKind::ModelDefaultUnset);
+    assert_eq!(
+        missing.model_default_slot,
+        Some(api::ModelDefaultSlot::AgentRun)
+    );
+
+    // Reopening and sparse updates use the stored model after policy is cleared.
+    api.start_session(start.clone()).await?;
+    let replaced = api
+        .put_session_config(SessionConfigPutParams {
+            session_id: session_id.as_str().to_owned(),
+            config: SessionConfig::default(),
+            expected_config_revision: Some(session.config_revision),
+        })
+        .await?
+        .result
+        .session;
+    assert_eq!(
+        read_session_view(&api, &session_id).await?.config,
+        session.config
+    );
+    api.apply_profile(api::ProfileApplyParams {
+        session_id: session_id.as_str().to_owned(),
+        profile: start.profile.expect("inline test profile"),
+        expected_config_revision: Some(replaced.config_revision),
+        expected_tools_revision: None,
+    })
+    .await?;
+    let reapplied = read_session_view(&api, &session_id).await?;
+    assert_eq!(reapplied.config, session.config);
 
     let run = api
         .start_run(RunStartParams {
@@ -1254,6 +1324,7 @@ async fn run_openai_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "Reply with exactly: real llm agent ok".to_owned(),
                 }],
@@ -1290,10 +1361,18 @@ async fn run_builtin_tool_live_client(
     session_id: SessionId,
     model: engine::ModelSelection,
 ) -> anyhow::Result<()> {
+    // gpt-6-sol requires reasoning to be disabled when combining function
+    // tools with Chat Completions. This fixture tests tool execution.
+    let generation = (model.api_kind == engine::ProviderApiKind::OpenAiCompletions).then(|| {
+        api::GenerationConfig {
+            reasoning_effort: Some("none".to_owned()),
+            ..Default::default()
+        }
+    });
     let store = pg_store_from_env().await?;
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     api.start_session(SessionStartParams {
@@ -1303,6 +1382,7 @@ async fn run_builtin_tool_live_client(
         display_name: None,
         config: Some(SessionConfig {
             model: Some(model_to_api(&model)),
+            generation,
             features: Some(FeaturesConfig {
                 timers: Some(TimersFeature {
                     version: api::CURRENT_FEATURE_VERSION,
@@ -1333,7 +1413,7 @@ async fn run_builtin_tool_live_client(
             submission_id: None,
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
-                items: vec![InputItem::Text { origin: None,
+                items: vec![InputItem::Text { provenance_ref: None, origin: None,
                     text: "Call sleep with delay_ms=1, await the returned promise, then reply exactly: temporal tool ok".to_owned(),
                 }],
             },
@@ -1341,11 +1421,6 @@ async fn run_builtin_tool_live_client(
         })
         .await?;
     let run = wait_for_terminal_run(&api, &session_id, &run.result.run.id).await?;
-    let output = final_assistant_text(&run).expect("assistant output");
-    assert!(
-        output.to_lowercase().contains("temporal tool ok"),
-        "expected completion marker: {output}"
-    );
     let events = api
         .read_session_events(SessionEventsReadParams {
             direction: Default::default(),
@@ -1358,6 +1433,21 @@ async fn run_builtin_tool_live_client(
         .await?
         .result
         .events;
+    anyhow::ensure!(
+        run.status == api::RunStatus::Completed,
+        "provider tool run ended with {:?}: {:?}",
+        run.status,
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, api::SessionEventKindView::RunFailed { run_id, .. } if run_id == &run.id))
+            .map(|event| &event.kind)
+            .collect::<Vec<_>>()
+    );
+    let output = final_assistant_text(&run).expect("assistant output");
+    assert!(
+        output.to_lowercase().contains("temporal tool ok"),
+        "expected completion marker: {output}"
+    );
     let content = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -1438,10 +1528,10 @@ async fn run_session_metadata_live_client(
     use std::collections::BTreeMap;
 
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client, store)
         .with_task_queue(task_queue)
-        .with_default_model(model)
         .build();
     let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
     // The job value is unique per run so the filter isolates this session

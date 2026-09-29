@@ -336,10 +336,10 @@ pub async fn fake_worker_activities_with_stall_switch(
 pub async fn fake_worker_activities_with_audio_transcriber(
     transcriber: Arc<dyn AudioTranscriber>,
 ) -> anyhow::Result<WorkerActivities> {
-    fake_worker_activities_with_audio_preprocessors(transcriber, None).await
+    fake_worker_activities_with_audio_processing(transcriber, None).await
 }
 
-pub async fn fake_worker_activities_with_audio_preprocessors(
+pub async fn fake_worker_activities_with_audio_processing(
     transcriber: Arc<dyn AudioTranscriber>,
     transcoder: Option<Arc<dyn AudioTranscoder>>,
 ) -> anyhow::Result<WorkerActivities> {
@@ -433,6 +433,7 @@ pub async fn start_text_run(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: text.to_owned(),
                 }],
@@ -610,7 +611,6 @@ pub fn openai_live_model() -> ModelSelection {
         model: env::var("LIGHTSPEED_OPENAI_MODEL")
             .or_else(|_| env::var("OPENAI_RESPONSES_MODEL"))
             .or_else(|_| env::var("OPENAI_LIVE_MODEL"))
-            .or_else(|_| env::var("LIGHTSPEED_CHAT_MODEL"))
             .unwrap_or_else(|_| "gpt-5.5".to_owned()),
     }
 }
@@ -622,9 +622,34 @@ pub fn openai_completions_live_model() -> ModelSelection {
         model: env::var("LIGHTSPEED_OPENAI_MODEL")
             .or_else(|_| env::var("OPENAI_COMPLETIONS_MODEL"))
             .or_else(|_| env::var("OPENAI_LIVE_MODEL"))
-            .or_else(|_| env::var("LIGHTSPEED_CHAT_MODEL"))
             .unwrap_or_else(|_| "gpt-5.5".to_owned()),
     }
+}
+
+/// Tests that exercise omitted models configure the same durable policy as clients.
+pub async fn seed_agent_default(
+    store: &store_pg::PgStore,
+    model: &ModelSelection,
+) -> anyhow::Result<()> {
+    store.ensure_universe().await?;
+    let current = store.read_model_defaults().await?;
+    store
+        .put_model_defaults(api::ModelDefaultsPutParams {
+            slot: api::ModelDefaultSlot::AgentRun,
+            model: Some(api::ModelConfig {
+                provider_id: model.provider_id.clone(),
+                api_kind: match model.api_kind {
+                    ProviderApiKind::OpenAiResponses => "openai:responses",
+                    ProviderApiKind::OpenAiCompletions => "openai:completions",
+                    ProviderApiKind::AnthropicMessages => "anthropic:messages",
+                }
+                .into(),
+                model: model.model.clone(),
+            }),
+            expected_revision: current.revision,
+        })
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

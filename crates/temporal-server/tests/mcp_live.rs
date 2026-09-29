@@ -38,7 +38,6 @@ use support::live::{
     run_with_live_worker, wait_for_terminal_run,
 };
 use temporal_server::{
-    default_model_from_env,
     gateway::{DEFAULT_MAX_REQUEST_BODY_BYTES, GatewayAgentApi, GatewayState, gateway_router},
     pg_store_from_env,
     worker::{ActivityState, FakeTools, SessionTools, WorkerActivities},
@@ -433,10 +432,10 @@ async fn run_matrix_client(
     ids: MatrixServerIds,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     put_fixture_server(
@@ -518,6 +517,7 @@ async fn run_matrix_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "Exercise the native MCP matrix".to_owned(),
                 }],
@@ -1379,10 +1379,10 @@ async fn run_approval_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client, store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
     api.start_session(SessionStartParams {
         access: None,
@@ -1407,6 +1407,7 @@ async fn run_approval_live_client(
                 session_id: session_id.as_str().to_owned(),
                 source: RunStartSource::Input {
                     items: vec![InputItem::Text {
+                        provenance_ref: None,
                         origin: None,
                         text: format!("approval test {index}"),
                     }],
@@ -1520,11 +1521,11 @@ async fn run_native_mcp_live_client(
     server_id: String,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = Arc::new(
         GatewayAgentApi::builder(client.clone(), store)
             .with_task_queue(task_queue)
-            .with_default_model(model.clone())
             .build(),
     );
     let configurator = LiveConfigurator::start(api.clone()).await?;
@@ -1579,6 +1580,7 @@ async fn run_native_mcp_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "List the configured models through the Configurator MCP".to_owned(),
                 }],
@@ -1633,11 +1635,11 @@ async fn run_mcp_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = Arc::new(
         GatewayAgentApi::builder(client.clone(), store)
             .with_task_queue(task_queue)
-            .with_default_model(model.clone())
             .build(),
     );
     let configurator = LiveConfigurator::start(api.clone()).await?;
@@ -2186,11 +2188,11 @@ async fn run_mixed_batch_live_client(
     server_id: String,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = Arc::new(
         GatewayAgentApi::builder(client.clone(), store)
             .with_task_queue(task_queue)
-            .with_default_model(model.clone())
             .build(),
     );
     let configurator = LiveConfigurator::start(api.clone()).await?;
@@ -2248,6 +2250,7 @@ async fn run_mixed_batch_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "Schedule a timer, then await it while listing models".to_owned(),
                 }],

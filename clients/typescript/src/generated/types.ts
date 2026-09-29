@@ -80,24 +80,22 @@ export type ToolParallelismView = "exclusive" | "parallelSafe";
  * via the `definition` "AgentApiErrorKind".
  */
 export type AgentApiErrorKind =
-  | (
-      | "invalid_request"
-      | "not_found"
-      | "conflict"
-      | "unsupported_audio_mime"
-      | "audio_blob_too_large"
-      | "audio_duration_too_long"
-      | "transcoder_unavailable"
-      | "transcode_failure"
-      | "transcription_failure"
-      | "internal"
-    )
+  | ("invalid_request" | "not_found" | "conflict" | "audio_blob_too_large" | "internal")
   | "rejected"
   | "unauthenticated"
   | "forbidden"
+  | "model_default_unset"
   | "session_bootstrap_failed"
   | "environment_not_ready"
   | "response_too_large";
+/**
+ * A universe's model selection for a particular use. Protocol and purpose
+ * are separate: several purposes may use the same provider API.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelDefaultSlot".
+ */
+export type ModelDefaultSlot = "agentRun" | "speechToText";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentNotification".
@@ -840,6 +838,11 @@ export type InputItem =
        * This metadata is not an authorization identity or model input text.
        */
       origin?: string | null;
+      /**
+       * Optional source blob in this universe, retained with the session.
+       * Provenance is metadata, not model input or an authorization identity.
+       */
+      provenanceRef?: string | null;
       text: string;
       type: "text";
     }
@@ -852,6 +855,11 @@ export type InputItem =
        * This metadata is not an authorization identity or model input text.
        */
       origin?: string | null;
+      /**
+       * Optional source blob in this universe, retained with the session.
+       * Provenance is metadata, not model input or an authorization identity.
+       */
+      provenanceRef?: string | null;
       type: "textRef";
     }
   | {
@@ -1278,16 +1286,7 @@ export type ChannelPairedVia = "open" | "code";
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "InputAdmissionFailureKind".
  */
-export type InputAdmissionFailureKind =
-  | "unsupportedMedia"
-  | "unsupportedAudioMime"
-  | "blobMissing"
-  | "blobTooLarge"
-  | "audioDurationTooLong"
-  | "transcoderUnavailable"
-  | "transcodeFailure"
-  | "transcriptionFailure"
-  | "admissionRejected";
+export type InputAdmissionFailureKind = "unsupportedMedia" | "blobMissing" | "admissionRejected";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ContextAppendStatus".
@@ -1310,6 +1309,7 @@ export type MethodGroup =
   | (
       | "vfs"
       | "profiles"
+      | "transcriptions"
       | "models"
       | "mcp"
       | "bots"
@@ -1613,6 +1613,18 @@ export type SkillCatalogSource =
     };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionFailureKind".
+ */
+export type TranscriptionFailureKind =
+  "invalidAudio" | "configuration" | "provider" | "timeout" | "internal";
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionStatus".
+ */
+export type TranscriptionStatus =
+  "pending" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AuthProviderConfigInput".
  */
 export type AuthProviderConfigInput =
@@ -1865,6 +1877,10 @@ export interface ToolView {
 export interface AgentApiError {
   kind: AgentApiErrorKind;
   message: string;
+  /**
+   * Present for model_default_unset; clients need not parse the message.
+   */
+  modelDefaultSlot?: ModelDefaultSlot | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -2154,7 +2170,9 @@ export interface SessionConfig {
   generation?: GenerationConfig | null;
   limits?: LimitsConfig | null;
   /**
-   * Absent on input means the deployment default model. Documents read
+   * At creation, omission uses the profile model or universe agentRun
+   * default. On configuration replacement or profile application to an
+   * existing session, omission preserves its current model. Documents read
    * back from a session always carry the model. Provider identity and API
    * kind are fixed for the session lifetime; the model name may change.
    */
@@ -3560,6 +3578,10 @@ export interface BotEventMedia {
   kind: BotEventMediaKind;
   mime: string;
   name?: string | null;
+  /**
+   * Optional prepared UTF-8 text; the source attachment remains in blobRef.
+   */
+  textRef?: string | null;
 }
 /**
  * The routed session an event was admitted to.
@@ -4357,7 +4379,7 @@ export interface AgentApiOutcomeOfDeploymentApiKeyCreateResponse {
   result: DeploymentApiKeyCreateResponse;
 }
 /**
- * A newly minted key. `secret` is returned only by create and cannot be
+ * A newly minted or rotated key. `secret` is returned only by create or rotate and cannot be
  * recovered later. Its custom `Debug` implementation redacts the DTO before
  * JSON-RPC serialization; the serialized response payload remains sensitive
  * and must not be logged.
@@ -5498,6 +5520,33 @@ export interface McpToolAnnotationsView {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfModelDefaultsResponse".
+ */
+export interface AgentApiOutcomeOfModelDefaultsResponse {
+  notifications?: AgentNotification[];
+  result: ModelDefaultsResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelDefaultsResponse".
+ */
+export interface ModelDefaultsResponse {
+  defaults: ModelDefaults;
+}
+/**
+ * Persisted universe defaults. Revision zero means no update has been made.
+ * Clearing a slot still advances the revision, so setup cannot undo a clear.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelDefaults".
+ */
+export interface ModelDefaults {
+  agentRun?: ModelConfig | null;
+  revision: number;
+  speechToText?: ModelConfig | null;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentApiOutcomeOfModelListResponse".
  */
 export interface AgentApiOutcomeOfModelListResponse {
@@ -6143,6 +6192,59 @@ export interface SkillListItem {
 export interface SkillLocationView {
   skillDirPath: string;
   skillDocPath: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfTranscriptionResponse".
+ */
+export interface AgentApiOutcomeOfTranscriptionResponse {
+  notifications?: AgentNotification[];
+  result: TranscriptionResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionResponse".
+ */
+export interface TranscriptionResponse {
+  transcription: TranscriptionView;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionView".
+ */
+export interface TranscriptionView {
+  audio: TranscriptionAudio;
+  createdAtMs: number;
+  createdBy: Attribution;
+  failure?: TranscriptionFailure | null;
+  model: ModelConfig;
+  status: TranscriptionStatus;
+  text?: string | null;
+  /**
+   * Plain UTF-8 transcript blob, usable as ordinary textRef input.
+   * Unsubmitted content can be swept after the ordinary CAS grace period.
+   */
+  transcriptRef?: string | null;
+  transcriptionId: string;
+}
+/**
+ * Immutable audio input in this universe's content store.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionAudio".
+ */
+export interface TranscriptionAudio {
+  blobRef: string;
+  mime: string;
+  name: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionFailure".
+ */
+export interface TranscriptionFailure {
+  kind: TranscriptionFailureKind;
+  message: string;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -6971,7 +7073,7 @@ export interface DeploymentApiKeyCreateParams {
   displayName: string;
   /**
    * The method groups the key may call; absent grants every group its
-   * scope allows. Keys never change: to change what a key may do, revoke
+   * scope allows. To change what a key may do, revoke
    * it and mint another.
    */
   groups?: MethodGroup[] | null;
@@ -6996,6 +7098,13 @@ export interface DeploymentApiKeyListParams {
  * via the `definition` "DeploymentApiKeyRevokeParams".
  */
 export interface DeploymentApiKeyRevokeParams {
+  keyPrefix: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "DeploymentApiKeyRotateParams".
+ */
+export interface DeploymentApiKeyRotateParams {
   keyPrefix: string;
 }
 /**
@@ -7557,6 +7666,26 @@ export interface McpServerToolsDiscoverParams {
   serverId: string;
 }
 /**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelDefaultsPutParams".
+ */
+export interface ModelDefaultsPutParams {
+  /**
+   * Revision returned by read/put; zero for a universe with no updates.
+   */
+  expectedRevision: number;
+  /**
+   * Complete selection, or explicit null to clear this slot. Required.
+   */
+  model: ModelConfig | null;
+  slot: ModelDefaultSlot;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelDefaultsReadParams".
+ */
+export interface ModelDefaultsReadParams {}
+/**
  * Direct provider model discovery. Results may be served from a brief
  * process-local cache; clients refresh by calling this method.
  *
@@ -7566,9 +7695,11 @@ export interface McpServerToolsDiscoverParams {
 export interface ModelListParams {
   /**
    * Apply Lightspeed's small, conservative selectable-model policy. It
-   * removes OpenAI model-id families that are clearly not text-generation
-   * routes (embeddings, moderation, image/video, speech, and realtime).
-   * It is an ID policy, not a provider capability claim.
+   * keeps supported file-transcription routes and filters clearly unrelated
+   * OpenAI families from agent suggestions (embeddings, moderation, image/video,
+   * speech synthesis, and realtime). Agent suggestions also have an age limit.
+   * Clients select routes by API kind for their intended use. This is an ID
+   * policy, not a provider capability claim.
    */
   selectableOnly?: boolean;
 }
@@ -7954,6 +8085,36 @@ export interface SessionStartParams {
  */
 export interface SkillListParams {
   sessionId: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionCancelParams".
+ */
+export interface TranscriptionCancelParams {
+  transcriptionId: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionReadParams".
+ */
+export interface TranscriptionReadParams {
+  transcriptionId: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "TranscriptionStartParams".
+ */
+export interface TranscriptionStartParams {
+  audio: TranscriptionAudio;
+  /**
+   * Scoped to the requester. Matching retries rejoin the original job,
+   * including after defaults change; changed requests conflict. Identity is
+   * retained for the Temporal namespace's workflow-history retention period.
+   */
+  idempotencyKey: string;
+  language?: string | null;
+  model?: ModelConfig | null;
+  prompt?: string | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

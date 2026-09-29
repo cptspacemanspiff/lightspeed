@@ -54,6 +54,11 @@ export const METHODS = [
   "environments/registration-keys/read",
   "environments/registration-keys/list",
   "environments/registration-keys/revoke",
+  "transcriptions/start",
+  "transcriptions/read",
+  "transcriptions/cancel",
+  "models/defaults/read",
+  "models/defaults/put",
   "models/list",
   "profiles/create",
   "profiles/read",
@@ -127,6 +132,7 @@ export const METHODS = [
   "deployment/universes/delete",
   "deployment/api-keys/create",
   "deployment/api-keys/list",
+  "deployment/api-keys/rotate",
   "deployment/api-keys/revoke",
   "deployment/environment-providers/put",
   "deployment/environment-providers/list",
@@ -179,7 +185,7 @@ export const METHOD_INFO = {
     scope: "universe",
     access: {"action":"control_session","kind":"universe"},
     summary: "Replace session configuration",
-    description: "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.",
+    description: "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.",
   },
   "session/rename": {
     scope: "universe",
@@ -227,7 +233,7 @@ export const METHOD_INFO = {
     scope: "universe",
     access: {"action":"control_session","kind":"universe"},
     summary: "Append keyed session context",
-    description: "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.",
+    description: "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.",
   },
   "session/context/remove": {
     scope: "universe",
@@ -432,6 +438,36 @@ export const METHOD_INFO = {
     access: {"action":"configure_resource","kind":"universe"},
     summary: "Revoke an environment registration key",
     description: "Stops the key from admitting new daemon identities; already registered daemons keep reconnecting. With closeEnvironments, also closes every non-closed environment the key admitted. Idempotent.",
+  },
+  "transcriptions/start": {
+    scope: "universe",
+    access: {"action":"use_resource","kind":"universe"},
+    summary: "Start transcription",
+    description: "Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.",
+  },
+  "transcriptions/read": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "Read transcription",
+    description: "Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.",
+  },
+  "transcriptions/cancel": {
+    scope: "universe",
+    access: {"action":"use_resource","kind":"universe"},
+    summary: "Cancel transcription",
+    description: "Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.",
+  },
+  "models/defaults/read": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "Read universe model defaults",
+    description: "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.",
+  },
+  "models/defaults/put": {
+    scope: "universe",
+    access: {"action":"configure_resource","kind":"universe"},
+    summary: "Set a universe model default",
+    description: "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.",
   },
   "models/list": {
     scope: "universe",
@@ -863,13 +899,19 @@ export const METHOD_INFO = {
     scope: "deployment",
     access: {"kind":"deployment"},
     summary: "Create a scoped API key",
-    description: "Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Keys are immutable: revoke and mint to change what one may do.",
+    description: "Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Key authority is immutable: revoke and mint to change what one may do.",
   },
   "deployment/api-keys/list": {
     scope: "deployment",
     access: {"kind":"deployment"},
     summary: "List scoped API keys",
     description: "Returns non-secret key metadata, all keys or those of one scope, including groups, revocation and last-use timestamps. Plaintext secrets are never stored or returned.",
+  },
+  "deployment/api-keys/rotate": {
+    scope: "deployment",
+    access: {"kind":"deployment"},
+    summary: "Rotate a scoped API key",
+    description: "Atomically replaces an active key secret and display prefix, immediately rejecting the old secret on subsequent requests. Preserves scope, groups, actor authority, name, creator and creation time; clears last use. Returns the new secret once. Unknown or revoked prefixes are not found. Already admitted work continues.",
   },
   "deployment/api-keys/revoke": {
     scope: "deployment",
@@ -997,7 +1039,7 @@ export interface MethodMap {
   /**
    * Replace session configuration
    *
-   * Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.
+   * Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.
    */
   "session/config/put": {
     params: Api.SessionConfigPutParams;
@@ -1069,7 +1111,7 @@ export interface MethodMap {
   /**
    * Append keyed session context
    *
-   * Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.
+   * Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.
    */
   "session/context/append": {
     params: Api.ContextAppendParams;
@@ -1380,6 +1422,51 @@ export interface MethodMap {
   "environments/registration-keys/revoke": {
     params: Api.EnvironmentRegistrationKeyRevokeParams;
     result: Api.AgentApiOutcomeOfEnvironmentRegistrationKeyRevokeResponse;
+  };
+  /**
+   * Start transcription
+   *
+   * Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.
+   */
+  "transcriptions/start": {
+    params: Api.TranscriptionStartParams;
+    result: Api.AgentApiOutcomeOfTranscriptionResponse;
+  };
+  /**
+   * Read transcription
+   *
+   * Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.
+   */
+  "transcriptions/read": {
+    params: Api.TranscriptionReadParams;
+    result: Api.AgentApiOutcomeOfTranscriptionResponse;
+  };
+  /**
+   * Cancel transcription
+   *
+   * Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.
+   */
+  "transcriptions/cancel": {
+    params: Api.TranscriptionCancelParams;
+    result: Api.AgentApiOutcomeOfTranscriptionResponse;
+  };
+  /**
+   * Read universe model defaults
+   *
+   * Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+   */
+  "models/defaults/read": {
+    params: Api.ModelDefaultsReadParams;
+    result: Api.AgentApiOutcomeOfModelDefaultsResponse;
+  };
+  /**
+   * Set a universe model default
+   *
+   * Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.
+   */
+  "models/defaults/put": {
+    params: Api.ModelDefaultsPutParams;
+    result: Api.AgentApiOutcomeOfModelDefaultsResponse;
   };
   /**
    * Discover available models
@@ -2023,7 +2110,7 @@ export interface MethodMap {
   /**
    * Create a scoped API key
    *
-   * Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Keys are immutable: revoke and mint to change what one may do.
+   * Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Key authority is immutable: revoke and mint to change what one may do.
    */
   "deployment/api-keys/create": {
     params: Api.DeploymentApiKeyCreateParams;
@@ -2037,6 +2124,15 @@ export interface MethodMap {
   "deployment/api-keys/list": {
     params: Api.DeploymentApiKeyListParams;
     result: Api.AgentApiOutcomeOfDeploymentApiKeyListResponse;
+  };
+  /**
+   * Rotate a scoped API key
+   *
+   * Atomically replaces an active key secret and display prefix, immediately rejecting the old secret on subsequent requests. Preserves scope, groups, actor authority, name, creator and creation time; clears last use. Returns the new secret once. Unknown or revoked prefixes are not found. Already admitted work continues.
+   */
+  "deployment/api-keys/rotate": {
+    params: Api.DeploymentApiKeyRotateParams;
+    result: Api.AgentApiOutcomeOfDeploymentApiKeyCreateResponse;
   };
   /**
    * Revoke a scoped API key
@@ -2180,7 +2276,7 @@ export const rpc = {
   /**
    * Replace session configuration
    *
-   * Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.
+   * Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.
    */
   sessionConfigPut(client: RpcCaller, params: Api.SessionConfigPutParams): Promise<Api.AgentApiOutcomeOfSessionConfigPutResponse> {
     return client.call("session/config/put", params);
@@ -2244,7 +2340,7 @@ export const rpc = {
   /**
    * Append keyed session context
    *
-   * Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.
+   * Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.
    */
   sessionContextAppend(client: RpcCaller, params: Api.ContextAppendParams): Promise<Api.AgentApiOutcomeOfContextAppendResponse> {
     return client.call("session/context/append", params);
@@ -2520,6 +2616,46 @@ export const rpc = {
    */
   environmentsRegistrationKeysRevoke(client: RpcCaller, params: Api.EnvironmentRegistrationKeyRevokeParams): Promise<Api.AgentApiOutcomeOfEnvironmentRegistrationKeyRevokeResponse> {
     return client.call("environments/registration-keys/revoke", params);
+  },
+  /**
+   * Start transcription
+   *
+   * Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.
+   */
+  transcriptionsStart(client: RpcCaller, params: Api.TranscriptionStartParams): Promise<Api.AgentApiOutcomeOfTranscriptionResponse> {
+    return client.call("transcriptions/start", params);
+  },
+  /**
+   * Read transcription
+   *
+   * Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.
+   */
+  transcriptionsRead(client: RpcCaller, params: Api.TranscriptionReadParams): Promise<Api.AgentApiOutcomeOfTranscriptionResponse> {
+    return client.call("transcriptions/read", params);
+  },
+  /**
+   * Cancel transcription
+   *
+   * Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.
+   */
+  transcriptionsCancel(client: RpcCaller, params: Api.TranscriptionCancelParams): Promise<Api.AgentApiOutcomeOfTranscriptionResponse> {
+    return client.call("transcriptions/cancel", params);
+  },
+  /**
+   * Read universe model defaults
+   *
+   * Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+   */
+  modelsDefaultsRead(client: RpcCaller, params: Api.ModelDefaultsReadParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
+    return client.call("models/defaults/read", params);
+  },
+  /**
+   * Set a universe model default
+   *
+   * Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.
+   */
+  modelsDefaultsPut(client: RpcCaller, params: Api.ModelDefaultsPutParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
+    return client.call("models/defaults/put", params);
   },
   /**
    * Discover available models
@@ -3092,7 +3228,7 @@ export const rpc = {
   /**
    * Create a scoped API key
    *
-   * Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Keys are immutable: revoke and mint to change what one may do.
+   * Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Key authority is immutable: revoke and mint to change what one may do.
    */
   deploymentApiKeysCreate(client: RpcCaller, params: Api.DeploymentApiKeyCreateParams): Promise<Api.AgentApiOutcomeOfDeploymentApiKeyCreateResponse> {
     return client.call("deployment/api-keys/create", params);
@@ -3104,6 +3240,14 @@ export const rpc = {
    */
   deploymentApiKeysList(client: RpcCaller, params: Api.DeploymentApiKeyListParams): Promise<Api.AgentApiOutcomeOfDeploymentApiKeyListResponse> {
     return client.call("deployment/api-keys/list", params);
+  },
+  /**
+   * Rotate a scoped API key
+   *
+   * Atomically replaces an active key secret and display prefix, immediately rejecting the old secret on subsequent requests. Preserves scope, groups, actor authority, name, creator and creation time; clears last use. Returns the new secret once. Unknown or revoked prefixes are not found. Already admitted work continues.
+   */
+  deploymentApiKeysRotate(client: RpcCaller, params: Api.DeploymentApiKeyRotateParams): Promise<Api.AgentApiOutcomeOfDeploymentApiKeyCreateResponse> {
+    return client.call("deployment/api-keys/rotate", params);
   },
   /**
    * Revoke a scoped API key

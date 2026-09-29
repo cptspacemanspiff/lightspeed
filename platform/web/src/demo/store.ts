@@ -1,6 +1,6 @@
 /// In-memory state behind the browser demo. Fixtures fill it at boot, the
 /// stub routes read and mutate it, and nothing survives a reload.
-import { effectiveFeatures, type FeatureOverrides, type UniverseRole } from "@lightspeed/platform-shared";
+import { effectiveFeatures, type FeatureOverrides, type MessageAttachment, type UniverseRole } from "@lightspeed/platform-shared";
 import type {
   BlobContent,
   ChannelsStatus,
@@ -15,6 +15,7 @@ import type {
   McpServer,
   Member,
   ModelListResponse,
+  ModelDefaults,
   ProfileDocument,
   SecretsInventory,
   SessionSummary,
@@ -98,7 +99,7 @@ export interface SessionRecord {
   queue: Array<{ runId: string; begin: () => void }>;
   /// Steering admitted while a run is in flight; consumed at the run's
   /// next turn boundary, where the entry carries its steering source.
-  steering: Array<{ text: string; steeringId: string; origin?: string }>;
+  steering: Array<{ text: string; steeringId: string; origin?: string; media?: MessageAttachment[] }>;
   timers: Set<ReturnType<typeof setTimeout>>;
   /// Long-poll wakers, notified on every appended event.
   waiters: Set<() => void>;
@@ -148,6 +149,7 @@ export interface UniverseState {
   secrets: SecretsInventory;
   githubApps: GitHubApp[];
   models: ModelListResponse;
+  modelDefaults: ModelDefaults;
   setups: UniverseSetup[];
   bots: Map<string, BotRecord>;
   /// Universe channel accounts (core wire shape), keyed by `accountId`.
@@ -206,8 +208,11 @@ export class DemoStore {
     return this.putBytes(new TextEncoder().encode(text));
   }
 
+  /// Seeded text is stored under a digest-shaped reference, so blob pages
+  /// address it the way they address real content. Uploads compute a real
+  /// SHA-256 instead; a counter padded to 64 hex digits never collides with one.
   putBytes(bytes: Uint8Array): string {
-    const blobRef = this.nextId("blob");
+    const blobRef = `sha256:${this.nextId("blob").slice("blob-".length).padStart(64, "0")}`;
     this.blobs.set(blobRef, { blobRef, bytes: bytes.length, bytesBase64: bytesToBase64(bytes) });
     return blobRef;
   }
@@ -260,6 +265,7 @@ export class DemoStore {
       secrets: { providers: [], grants: [] },
       githubApps: [],
       models: { models: [], providers: [] },
+      modelDefaults: { revision: 0, agentRun: null, speechToText: null },
       setups: [],
       bots: new Map(),
       channelAccounts: new Map(),

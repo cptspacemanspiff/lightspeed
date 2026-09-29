@@ -1,13 +1,21 @@
 import { defaultEnvironmentAttachment, environmentAttachments, isEnvironmentAttached } from "@/lib/sessions/resource-features";
+import { modelFromConfig } from "@/lib/model-defaults";
 /// Session routes over the engine simulation: the sessions browser, the
 /// transcript's long-poll tail, run control, and the settings sheet. Shapes
 /// and status codes follow the platform server's gateway so the UI cannot
 /// tell the difference.
 import { Hono, type Context } from "hono";
-import type { Environment, ProfileSessionRetention, ProfileSource, SessionView } from "@/api";
+import {
+  MAX_ATTACHMENT_BYTES,
+  attachmentUploadSchema,
+  roleAtLeast,
+  sessionMessageSchema,
+  sessionSteerSchema,
+  type MessageAttachment,
+} from "@lightspeed/platform-shared";
+import type { Environment, ModelConfig, ProfileSessionRetention, ProfileSource, SessionView } from "@/api";
 import type { ProfileInstructions } from "@lightspeed-ai/agent-client";
 import {
-  DEFAULT_MODEL,
   PROFILE_INSTRUCTIONS_KEY,
   cancelRun,
   closeSession,
@@ -110,7 +118,8 @@ export function sessionRoutes(store: DemoStore): Hono {
     if (!body.profile) return badRequest(c, "profile is required");
     const profile = resolveProfile(universe, body.profile);
     if (!profile) return notFound(c, "not found in engine");
-    const config = sessionConfig(profile.config);
+    const config = sessionConfig(profile.config, universe.modelDefaults.agentRun);
+    if (!config) return c.json({ error: "No default agent model is selected. Choose a model in Models.", kind: "model_default_unset", modelDefaultSlot: "agentRun" }, 400);
     const sessionId = store.nextId("session");
     const resolved = resolveEnvironment(universe, profile);
     if ("error" in resolved) return conflict(c, `engine conflict: ${resolved.error}`);
@@ -283,7 +292,8 @@ export function sessionRoutes(store: DemoStore): Hono {
         `engine conflict: expected config revision ${body.expectedConfigRevision}, got ${session.view.configRevision}`,
       );
     }
-    const config = sessionConfig(body.config);
+    const config = sessionConfig(body.config, modelOf(session.view.config));
+    if (!config) return badRequest(c, "Session has no model.");
     session.view.config = config;
     if (session.view.activeEnvironmentId && !isEnvironmentAttached(config, session.view.activeEnvironmentId)) session.view.activeEnvironmentId = null;
     session.view.configRevision += 1;
@@ -365,19 +375,48 @@ export function sessionRoutes(store: DemoStore): Hono {
     return c.json(session.view);
   });
 
+  const missingAttachment = (attachments: readonly MessageAttachment[]) =>
+    attachments.find((attachment) => !store.blobs.has(attachment.blobRef))?.blobRef;
+
+  /// Composer attachments: stored like any blob, content-addressed.
+  app.post("/:id/attachments", async (c) => {
+    const universe = universeFor(store, c);
+    if (!universe) return notFound(c);
+    if (store.currentUser.role !== "admin" && !roleAtLeast(universe.universe.role ?? "viewer", "contributor")) {
+      return c.json({ error: "contributor role required" }, 403);
+    }
+    const body = attachmentUploadSchema.safeParse(await readBody(c));
+    if (!body.success) return badRequest(c, "Invalid attachment upload");
+    const bytes = Uint8Array.from(atob(body.data.bytesBase64), (char) => char.charCodeAt(0));
+    if (bytes.length > MAX_ATTACHMENT_BYTES) return c.json({ error: "Attachment exceeds the 10 MiB limit." }, 413);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const blobRef = `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    store.blobs.set(blobRef, { blobRef, bytes: bytes.length, bytesBase64: body.data.bytesBase64 });
+    return c.json({ blobs: [{ blobRef, bytes: bytes.length }] });
+  });
+
   /// Acceptance boundary: the run is `running` or `queued` on return and
   /// the reply arrives on the tail. `submissionId` dedupes retries.
   app.post("/:id/sessions/:sessionId/messages", async (c) => {
     const found = lookup(c);
     if (!found) return notFound(c, "not found in engine");
     const { universe, session } = found;
-    const body = await readBody<{ text?: unknown; submissionId?: unknown }>(c);
-    if (typeof body.text !== "string" || !body.text.trim()) return badRequest(c, "text is required");
+    const body = sessionMessageSchema.safeParse(await readBody(c));
+    if (!body.success) return badRequest(c, body.error.issues[0]?.message ?? "Invalid message");
     if (session.view.status === "closed") return conflict(c, "engine conflict: session is closed");
+    const missing = missingAttachment(body.data.attachments);
+    if (missing) return badRequest(c, `blob ${missing} was not found`);
+    // The runtime keeps provider identity and API kind fixed per session.
+    const pinned = modelFromConfig(session.view.config);
+    const override = body.data.options?.model;
+    if (override && pinned && (override.providerId !== pinned.providerId || override.apiKind !== pinned.apiKind)) {
+      return badRequest(c, "a run model override must keep the session's provider and API kind");
+    }
     const run = startRun(store, universe, session, {
-      text: body.text,
+      text: body.data.text,
+      media: body.data.attachments,
       origin: `user:${store.currentUser.id}`,
-      submissionId: typeof body.submissionId === "string" ? body.submissionId : null,
+      submissionId: body.data.submissionId,
     });
     return c.json({ run: { id: run.id, status: run.status } });
   });
@@ -397,11 +436,13 @@ export function sessionRoutes(store: DemoStore): Hono {
     if (!found) return notFound(c, "not found in engine");
     const { session } = found;
     const runId = c.req.param("runId");
-    const body = await readBody<{ text?: unknown }>(c);
-    if (typeof body.text !== "string" || !body.text.trim()) return badRequest(c, "text is required");
+    const body = sessionSteerSchema.safeParse(await readBody(c));
+    if (!body.success) return badRequest(c, body.error.issues[0]?.message ?? "Invalid steering");
+    const missing = missingAttachment(body.data.attachments);
+    if (missing) return badRequest(c, `blob ${missing} was not found`);
     const run = findRun(session, runId);
     if (!run) return notFound(c, "not found in engine");
-    const steered = steerRun(store, session, runId, body.text, `user:${store.currentUser.id}`);
+    const steered = steerRun(store, session, runId, body.data.text, `user:${store.currentUser.id}`, body.data.attachments);
     if (!steered) {
       return conflict(c, `engine conflict: run ${runId} is ${run.status}; only a running run accepts steering`);
     }
@@ -488,9 +529,10 @@ function resolveProfile(universe: UniverseState, source: ProfileSource): Resolve
 
 /// The session's own copy of a profile config, with the model the demo
 /// answers as when the profile leaves it open.
-function sessionConfig(config: Record<string, unknown>): Record<string, unknown> {
+function sessionConfig(config: Record<string, unknown>, fallback?: ModelConfig | null): Record<string, unknown> | null {
   const copy = structuredClone(config);
-  return { ...copy, model: modelOf(copy) ?? { ...DEFAULT_MODEL } };
+  const model = modelOf(copy) ?? fallback;
+  return model ? { ...copy, model: { ...model } } : null;
 }
 
 function instructionText(store: DemoStore, instructions: ProfileInstructions | null): string | null {

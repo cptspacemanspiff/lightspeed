@@ -1,7 +1,8 @@
+import { useDictationAvailability } from "@/lib/use-dictation";
 import { ShareSessionDialog, SharingMark, useCanShareSession, useSessionOwner } from "@/components/session/sharing";
 import { ActivityDot, activityLabel } from "@/components/activity-dot";
 import { SessionActionsMenu } from "@/components/session/session-actions-menu";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   type InfiniteData,
   useInfiniteQuery,
@@ -82,7 +83,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { sessionDraftKey } from "@/lib/sessions/draft";
-import { SessionComposer, type ComposerMode } from "@/components/session/composer";
+import { SessionComposer, type ComposerMessage, type ComposerMode } from "@/components/session/composer";
+import { SessionResourceChips, useSessionResources } from "@/components/session/session-resources";
+import { hasResources } from "@/lib/sessions/session-resources";
+import { appHref, blobHref } from "@/lib/blob-view";
 import { Switch } from "@/components/ui/switch";
 import {
   ApprovalCards,
@@ -102,10 +106,13 @@ import { ReadError } from "@/components/read-error";
 import { useSessionTail } from "@/lib/sessions/tail";
 import {
   mediaByHandle,
+  mediaHandleFor,
   runInProgress,
   type ActiveRun,
   type TranscriptEntry,
+  type TranscriptMedia,
 } from "@/lib/sessions/transcript";
+import type { SentAttachment } from "@/lib/composer-attachments";
 import { useSessionConfigEditorOptions } from "@/lib/sessions/editor-options";
 import { managedSessionBotId, managedSessionOwnerLabel } from "@/lib/sessions/management";
 import {
@@ -113,6 +120,7 @@ import {
   setupResourceFeatureError,
 } from "@/lib/sessions/resource-features";
 import { ProviderReadinessBanner } from "@/components/provider-readiness-banner";
+import { modelFromConfig, modelLabel, resolveCreationModel, useModelDefaults, useModelDiscovery } from "@/lib/model-defaults";
 import { useActionPermissions } from "@/lib/permissions";
 import { useActiveUniverse, useFeature } from "@/lib/universes";
 import { cn } from "@/lib/utils";
@@ -158,7 +166,7 @@ export function SessionsPage({ admin }: { admin: boolean }) {
         <SessionList key={universe.id} universeId={universe.id} slug={slug!} activeId={sessionId} />
       </ListPane>
       <section className={cn("min-w-0 flex-1 flex-col", sessionId ? "flex" : "hidden md:flex")}>
-        <ProviderReadinessBanner universeId={universe.id} slug={slug!} />
+        {!sessionId && <ProviderReadinessBanner universeId={universe.id} slug={slug!} />}
         {sessionId ? (
           <SessionDetail
             key={sessionDraftKey(universe.id, sessionId)}
@@ -940,11 +948,27 @@ function NewSessionDialog({
     enabled: open && Boolean(profileId),
   });
   const editorOptions = useSessionConfigEditorOptions(universeId, open && step === "setup");
+  const defaults = useModelDefaults(universeId, open);
+  const creationProfile = profileForCreate(profileId, inlineProfile, selectedProfile.data);
+  const effectiveModel = resolveCreationModel(
+    creationProfile.kind === "inline" ? modelFromConfig(creationProfile.profile.config) : null,
+    creationProfile.kind === "named" ? modelFromConfig(selectedProfile.data?.config) : null,
+    defaults.data,
+  );
+  const modelPending = Boolean(profileId && !inlineProfile && selectedProfile.isLoading)
+    || (!effectiveModel.model && defaults.isLoading);
+  const modelMissing = !modelPending && Boolean(defaults.data) && !effectiveModel.model;
+  const modelSummary = (
+    <div className="grid gap-2">
+      <p className="text-sm"><span className="text-muted-foreground">{effectiveModel.source}: </span>{modelPending ? "Loading…" : effectiveModel.model ? modelLabel(effectiveModel.model) : defaults.error ? "Could not load default" : "Not selected"}</p>
+      <ProviderReadinessBanner universeId={universeId} slug={slug} model={effectiveModel.model ?? (defaults.data ? null : undefined)} enabled={open && !modelPending} className="rounded-lg border" />
+    </div>
+  );
   const create = useMutation({
     mutationFn: () =>
       api<SessionView>("POST", `/api/v1/universes/${universeId}/sessions`, {
         ...(displayName.trim() ? { displayName: displayName.trim() } : {}),
-        profile: profileForCreate(profileId, inlineProfile, selectedProfile.data),
+        profile: creationProfile,
       }),
     onSuccess: async (session) => {
       await queryClient.invalidateQueries({ queryKey: ["sessions", universeId] });
@@ -969,6 +993,7 @@ function NewSessionDialog({
     const resourceError = setupResourceFeatureError(
       inlineProfile ?? selectedProfile.data ?? {},
     );
+    if (modelPending || modelMissing || (creationProfile.kind === "named" && selectedProfile.error)) return;
     if (configError || retentionError || resourceError) {
       setError(configError ? `Config: ${configError}` : retentionError ? `Retention: ${retentionError}` : resourceError);
       return;
@@ -1049,12 +1074,12 @@ function NewSessionDialog({
                       {(value: string) =>
                         value
                           ? (profiles.data?.find((p) => p.profileId === value)?.displayName ?? value)
-                          : "No profile (engine defaults)"
+                          : "No profile (universe default)"
                       }
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">No profile (engine defaults)</SelectItem>
+                    <SelectItem value="">No profile (universe default)</SelectItem>
                     {(profiles.data ?? []).map((profile) => (
                       <SelectItem key={profile.profileId} value={profile.profileId}>
                         {profile.displayName ?? profile.profileId}
@@ -1066,6 +1091,7 @@ function NewSessionDialog({
                   The profile is resolved at creation; later profile edits do not change this session.
                 </FieldDescription>
               </Field>
+              {modelSummary}
               <Button
                 type="button"
                 variant="outline"
@@ -1085,7 +1111,7 @@ function NewSessionDialog({
                 <Button type="button" variant="outline" onClick={() => changeOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={create.isPending}>
+                <Button type="submit" disabled={create.isPending || modelPending || modelMissing || (creationProfile.kind === "named" && Boolean(selectedProfile.error))}>
                   {create.isPending ? "Creating…" : "Create"}
                 </Button>
               </DialogFooter>
@@ -1101,7 +1127,8 @@ function NewSessionDialog({
                   : "Inline setup for this session."}
               </DialogDescription>
             </DialogHeader>
-            <div className="min-h-0 overflow-y-auto p-6">
+            <div className="min-h-0 space-y-5 overflow-y-auto p-6">
+              {modelSummary}
               <InlineSetupEditor
                 value={inlineProfile ?? {}}
                 options={editorOptions}
@@ -1130,7 +1157,7 @@ function NewSessionDialog({
                 )}
                 <Button
                   type="button"
-                  disabled={create.isPending || Boolean(configError || retentionError || resourceFeatureError)}
+                  disabled={create.isPending || modelPending || modelMissing || Boolean(configError || retentionError || resourceFeatureError)}
                   onClick={() => create.mutate()}
                 >
                   {create.isPending ? "Creating…" : "Create session"}
@@ -1184,7 +1211,7 @@ function InlineSetupEditor({
       </SetupEditorSection>
       <SetupEditorSection
         title="Model configuration"
-        description="Choose the model and its default reasoning behavior. Unset values inherit deployment or provider defaults."
+        description="Choose a model or inherit the universe default. Unset reasoning uses the provider default."
       >
         <SessionConfigEditor
           value={value.config}
@@ -1192,6 +1219,7 @@ function InlineSetupEditor({
           workspaces={options.workspaces}
           workspacesLoading={options.workspacesLoading}
           models={options.models}
+          defaultModelLabel={options.defaultModelLabel}
           profiles={options.profiles}
           environments={options.environments}
           mcpToolDiscovery={options.mcpToolDiscovery}
@@ -1281,6 +1309,8 @@ export function SessionDetail({
   /** Where lineage links go; defaults to the Sessions page. */
   sessionHref?: (sessionId: string) => string;
 }) {
+  const dictation = useDictationAvailability(universeId);
+  const modelDiscovery = useModelDiscovery(universeId);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const tail = useSessionTail(universeId, sessionId);
@@ -1327,7 +1357,10 @@ export function SessionDetail({
     message: string;
   } | null>(null);
 
-  const { showRunStatistics, collapseCompletedRuns } = useUserPreferences();
+  const { showRunStatistics, collapseCompletedRuns, showSessionResources } = useUserPreferences();
+  const resources = useSessionResources(
+    universeId, session.data?.config, session.data?.activeEnvironmentId, showSessionResources && Boolean(session.data),
+  );
   const entries = tail.transcript.entries;
   const loadFullText = useCallback(
     async (blobRef: string) => {
@@ -1533,7 +1566,7 @@ export function SessionDetail({
       .map((message) => ({
         key: message.id,
         runId: message.runId ?? null,
-        text: message.text,
+        text: message.text || attachmentSummary(message.media),
       })),
   ];
   const closed = session.data?.status === "closed";
@@ -1575,11 +1608,16 @@ export function SessionDetail({
     return {
       botName: (botId) => names.get(botId),
       sessionHref: href,
+      // A browser address: these links open in a new tab, outside the router.
+      blobHref: (blobRef, hints) => {
+        const path = blobHref(slug, blobRef, { ...hints, session: sessionId });
+        return path && appHref(path);
+      },
       navigate: (target) => void navigate(target),
       loadMedia,
       mediaByHandle: transcriptMedia,
     };
-  }, [botRoster, sessionHref, slug, navigate, loadMedia, transcriptMedia]);
+  }, [botRoster, sessionHref, slug, sessionId, navigate, loadMedia, transcriptMedia]);
   // Operator override: the engine happily admits direct runs on a managed
   // session (they queue like any client run), so the gate here is policy,
   // not capability. Off by default because direct input bypasses the
@@ -1596,13 +1634,15 @@ export function SessionDetail({
     }
   }, [settingsOpen, runActive]);
 
-  const send = async (text: string, mode: ComposerMode | null) => {
+  const send = async (message: ComposerMessage, mode: ComposerMode | null) => {
     if (!canControl) return;
     setSendError(null);
     if (mode === "steer") {
-      await steer(text);
+      await steer(message);
       return;
     }
+    const { text } = message;
+    const media = echoMedia(message.attachments);
     // The submission id doubles as the engine idempotency key: a retried
     // POST returns the original run instead of starting a second one.
     const submissionId = crypto.randomUUID();
@@ -1612,13 +1652,18 @@ export function SessionDetail({
     ));
     setPending((prev) => [
       ...prev,
-      { id: submissionId, text, runId: null, status: "sending", expectQueued },
+      { id: submissionId, text, media, runId: null, status: "sending", expectQueued },
     ]);
     try {
       const accepted = await api<SessionRunAccepted>(
         "POST",
         `/api/v1/universes/${universeId}/sessions/${sessionId}/messages`,
-        { text, submissionId },
+        {
+          text,
+          submissionId,
+          ...(message.attachments.length ? { attachments: message.attachments.map(wireAttachment) } : {}),
+          ...(message.options ? { options: message.options } : {}),
+        },
       );
       setFollowRequest((request) => request + 1);
       setLocalSubmissions((previous) => new Map(previous).set(
@@ -1641,7 +1686,7 @@ export function SessionDetail({
     }
   };
 
-  const steer = async (text: string) => {
+  const steer = async ({ text, attachments }: ComposerMessage) => {
     if (!canControl) return;
     const runId = steerTargetRunId;
     if (!runId) {
@@ -1651,18 +1696,31 @@ export function SessionDetail({
       return;
     }
     const id = crypto.randomUUID();
-    setPendingSteers((prev) => [...prev, { id, runId, text }]);
+    setPendingSteers((prev) => [...prev, { id, runId, text, media: echoMedia(attachments) }]);
     try {
       await api<SessionRunSteered>(
         "POST",
         `/api/v1/universes/${universeId}/sessions/${sessionId}/runs/${runId}/steer`,
-        { text },
+        attachments.length ? { text, attachments: attachments.map(wireAttachment) } : { text },
       );
       setFollowRequest((request) => request + 1);
     } catch (error) {
       setPendingSteers((prev) => prev.filter((steer) => steer.id !== id));
       setSendError(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  /// The composer's model choice becomes the session default. Config
+  /// replacement needs an idle session and the revision last read.
+  const saveModelDefault = async (config: Record<string, unknown>) => {
+    const current = session.data;
+    if (!current) return;
+    const updated = await api<SessionView>(
+      "PUT",
+      `/api/v1/universes/${universeId}/sessions/${sessionId}/config`,
+      { config, expectedConfigRevision: current.configRevision },
+    );
+    queryClient.setQueryData(["session", universeId, sessionId], updated);
   };
 
   const cancelRun = async (runId: string) => {
@@ -1809,6 +1867,7 @@ export function SessionDetail({
 
   return (
     <>
+      <ProviderReadinessBanner universeId={universeId} slug={slug} model={modelFromConfig(session.data?.config)} enabled={Boolean(session.data)} />
       {!embedded && (
         <>
         <header className="flex h-12 min-w-0 shrink-0 items-center gap-3 overflow-hidden border-b px-4">
@@ -1997,6 +2056,10 @@ export function SessionDetail({
         origin={session.data?.origin ?? null}
         runRevision={runRevision}
         sessionHref={sessionHref}
+        resources={showSessionResources && session.data && hasResources(resources) ? (
+          <SessionResourceChips resources={resources} slug={slug}
+            onConfigure={!embedded && canControl ? () => setSettingsOpen(true) : undefined} />
+        ) : undefined}
       />
       <TranscriptLinksContext.Provider value={transcriptLinks}>
       <MessageScrollerProvider key={`${universeId}/${sessionId}`} autoScroll defaultScrollPosition="end">
@@ -2038,7 +2101,7 @@ export function SessionDetail({
               ))}
               {visiblePendingSteers.map((steer) => (
                 <MessageScrollerItem key={steer.id} messageId={steer.id}>
-                  <TranscriptEntrance motionKey={steer.id}><UserBand text={steer.text} steering /></TranscriptEntrance>
+                  <TranscriptEntrance motionKey={steer.id}><UserBand text={steer.text} media={steer.media} steering /></TranscriptEntrance>
                 </MessageScrollerItem>
               ))}
               {notices.map((notice) => (
@@ -2081,6 +2144,7 @@ export function SessionDetail({
         <QueuedRunsBar items={queuedItems} onCancel={canStop ? (runId) => void cancelQueued(runId) : undefined} />
       )}
       <SessionComposer
+        dictation={{ ...dictation, settingsHref: `/u/${slug}/models` }}
         key={sessionDraftKey(universeId, sessionId)}
         draftKey={sessionDraftKey(universeId, sessionId)}
         runActive={runActive}
@@ -2114,8 +2178,16 @@ export function SessionDetail({
             </span>
           </div>
         ) : undefined}
+        attachments={{ universeId, apiKind: modelFromConfig(session.data?.config)?.apiKind }}
+        model={session.data?.config ? {
+          config: session.data.config,
+          models: modelDiscovery.data?.models,
+          canSaveDefault: canControl && !closed,
+          onSaveDefault: saveModelDefault,
+        } : undefined}
         error={sendError}
-        onSend={(text, mode) => void send(text, mode)}
+        onDismissError={() => setSendError(null)}
+        onSend={(message, mode) => void send(message, mode)}
         onStop={() => void stop()}
       />
       {!embedded && canControl && (
@@ -2138,6 +2210,8 @@ export function SessionDetail({
 interface PendingMessage {
   id: string;
   text: string;
+  /// Attachments sent with the message, previewed from local files.
+  media?: TranscriptMedia[];
   /// Engine run id once the POST returned; null while in flight.
   runId: string | null;
   status: "sending" | "running" | "queued";
@@ -2149,6 +2223,32 @@ interface PendingSteer {
   id: string;
   runId: string;
   text: string;
+  media?: TranscriptMedia[];
+}
+
+/// The attachment fields the message routes accept.
+function wireAttachment({ blobRef, mime, kind, name }: SentAttachment) {
+  return { blobRef, mime, kind, name };
+}
+
+/// Attachments as transcript media for the optimistic echo, previewed from
+/// the picked files until the stored entries arrive.
+function echoMedia(attachments: SentAttachment[]): TranscriptMedia[] | undefined {
+  if (!attachments.length) return undefined;
+  return attachments.map((attachment) => ({
+    handle: mediaHandleFor(attachment.blobRef),
+    blobRef: attachment.blobRef,
+    mime: attachment.mime,
+    kind: attachment.kind,
+    name: attachment.name,
+    ...(attachment.previewUrl ? { localUrl: attachment.previewUrl } : {}),
+  }));
+}
+
+function attachmentSummary(media: TranscriptMedia[] | undefined): string {
+  const count = media?.length ?? 0;
+  if (count === 1) return media![0]!.name ?? "1 attachment";
+  return count ? `${count} attachments` : "";
 }
 
 /// Text for a queued run: from the authoritative session view when it has
@@ -2165,7 +2265,8 @@ function queuedRunText(
       return text;
     }
   }
-  return pending.find((message) => message.runId === runId)?.text ?? "(queued message)";
+  const sent = pending.find((message) => message.runId === runId);
+  return sent?.text || attachmentSummary(sent?.media) || "(queued message)";
 }
 
 function SessionScrollFollower({
@@ -2226,6 +2327,7 @@ export function SessionLineage({
   origin,
   runRevision,
   sessionHref,
+  resources,
 }: {
   universeId: string;
   slug: string;
@@ -2233,6 +2335,8 @@ export function SessionLineage({
   origin: SessionOrigin | null;
   runRevision: number;
   sessionHref?: (sessionId: string) => string;
+  /// What the session can reach, shown first in the strip.
+  resources?: ReactNode;
 }) {
   const href = sessionHref ?? ((id: string) => `/u/${slug}/sessions/${id}`);
   const parentId = origin?.parentSessionId;
@@ -2273,10 +2377,12 @@ export function SessionLineage({
   const parentName = parent.data?.displayName?.trim();
   const parentLabel = parentName || (parentId ? compactSessionId(parentId) : "");
   const tagClass = "inline-flex min-w-0 max-w-64 items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium text-foreground transition-colors hover:bg-muted";
-  if (!origin && list.length === 0) return null;
+  if (!origin && list.length === 0 && !resources) return null;
   return (
     <div className="shrink-0 border-b bg-muted/30">
       <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-1.5 text-xs text-muted-foreground md:px-8">
+      {resources}
+      {resources && (origin || list.length > 0) && <span className="hidden h-4 w-px bg-border sm:block" aria-hidden />}
       {origin && (
         <span className="flex min-w-0 flex-wrap items-center gap-1">
           <span>Parent:</span>

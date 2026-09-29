@@ -36,6 +36,21 @@ fn committed_text(name: &str) -> String {
     })
 }
 
+#[test]
+fn model_default_updates_accept_explicit_null_in_the_public_contract() {
+    let bundle = api::export_schemas().schema_bundle;
+    for model in [
+        Value::Null,
+        json!({"providerId":"private", "apiKind":"openai:completions", "model":"custom"}),
+    ] {
+        let request = json!({"slot":"agentRun", "model":model, "expectedRevision":0});
+        assert_validates(&bundle, "ModelDefaultsPutParams", &request);
+        serde_json::from_value::<api::ModelDefaultsPutParams>(request).unwrap();
+    }
+    let required = &bundle["definitions"]["ModelDefaultsPutParams"]["required"];
+    assert!(required.as_array().unwrap().contains(&json!("model")));
+}
+
 fn assert_validates(bundle: &Value, definition: &str, instance: &Value) {
     let schema = json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -62,6 +77,7 @@ fn serialized_fixtures_validate_against_exported_schemas() {
         session_id: "session_1".to_owned(),
         source: RunStartSource::Input {
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "hello".to_owned(),
             }],
@@ -81,6 +97,7 @@ fn serialized_fixtures_validate_against_exported_schemas() {
         completed_at_ms: Some(20),
         source: RunViewSource::Input {
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "hello".to_owned(),
             }],

@@ -154,7 +154,7 @@
         "action": "control_session",
         "kind": "universe"
       },
-      "description": "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.",
+      "description": "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.",
       "group": "session",
       "method": "session/config/put",
       "params": {
@@ -354,7 +354,7 @@
         "action": "control_session",
         "kind": "universe"
       },
-      "description": "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.",
+      "description": "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.",
       "group": "session",
       "method": "session/context/append",
       "params": {
@@ -1222,6 +1222,131 @@
       "role": "operator",
       "scope": "universe",
       "summary": "Revoke an environment registration key",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "use_resource",
+        "kind": "universe"
+      },
+      "description": "Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.",
+      "group": "transcriptions",
+      "method": "transcriptions/start",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/TranscriptionStartParams"
+        },
+        "type": "TranscriptionStartParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfTranscriptionResponse"
+        },
+        "type": "AgentApiOutcome<TranscriptionResponse>"
+      },
+      "role": "contributor",
+      "scope": "universe",
+      "summary": "Start transcription",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.",
+      "group": "transcriptions",
+      "method": "transcriptions/read",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/TranscriptionReadParams"
+        },
+        "type": "TranscriptionReadParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfTranscriptionResponse"
+        },
+        "type": "AgentApiOutcome<TranscriptionResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "Read transcription",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "use_resource",
+        "kind": "universe"
+      },
+      "description": "Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.",
+      "group": "transcriptions",
+      "method": "transcriptions/cancel",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/TranscriptionCancelParams"
+        },
+        "type": "TranscriptionCancelParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfTranscriptionResponse"
+        },
+        "type": "AgentApiOutcome<TranscriptionResponse>"
+      },
+      "role": "contributor",
+      "scope": "universe",
+      "summary": "Cancel transcription",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.",
+      "group": "models",
+      "method": "models/defaults/read",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/ModelDefaultsReadParams"
+        },
+        "type": "ModelDefaultsReadParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfModelDefaultsResponse"
+        },
+        "type": "AgentApiOutcome<ModelDefaultsResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "Read universe model defaults",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "configure_resource",
+        "kind": "universe"
+      },
+      "description": "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.",
+      "group": "models",
+      "method": "models/defaults/put",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/ModelDefaultsPutParams"
+        },
+        "type": "ModelDefaultsPutParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfModelDefaultsResponse"
+        },
+        "type": "AgentApiOutcome<ModelDefaultsResponse>"
+      },
+      "role": "operator",
+      "scope": "universe",
+      "summary": "Set a universe model default",
       "target": null
     },
     {
@@ -2995,7 +3120,7 @@
       "access": {
         "kind": "deployment"
       },
-      "description": "Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Keys are immutable: revoke and mint to change what one may do.",
+      "description": "Mints a key for a universe or the deployment with the method groups it may call and whether it may assert actors. The plaintext secret is returned exactly once and cannot be recovered; persist only the displayed prefix for identification. Key authority is immutable: revoke and mint to change what one may do.",
       "group": "deployment/api-keys",
       "method": "deployment/api-keys/create",
       "params": {
@@ -3037,6 +3162,30 @@
       "role": null,
       "scope": "deployment",
       "summary": "List scoped API keys",
+      "target": null
+    },
+    {
+      "access": {
+        "kind": "deployment"
+      },
+      "description": "Atomically replaces an active key secret and display prefix, immediately rejecting the old secret on subsequent requests. Preserves scope, groups, actor authority, name, creator and creation time; clears last use. Returns the new secret once. Unknown or revoked prefixes are not found. Already admitted work continues.",
+      "group": "deployment/api-keys",
+      "method": "deployment/api-keys/rotate",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/DeploymentApiKeyRotateParams"
+        },
+        "type": "DeploymentApiKeyRotateParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfDeploymentApiKeyCreateResponse"
+        },
+        "type": "AgentApiOutcome<DeploymentApiKeyCreateResponse>"
+      },
+      "role": null,
+      "scope": "deployment",
+      "summary": "Rotate a scoped API key",
       "target": null
     },
     {

@@ -11,6 +11,7 @@ import type {
   SessionEventsPage,
   SessionListPage,
   SessionView,
+  ModelDefaults,
 } from "@/api";
 import { SOFTWARE_FACTORY_UNIVERSE_ID } from "./fixtures/software-factory";
 import { applyEvents, emptyTranscript } from "@/lib/sessions/transcript";
@@ -50,6 +51,7 @@ const universeReads = [
   "secrets",
   "auth-grants",
   "models",
+  "models/defaults",
   "setups",
   "api-keys",
   "members",
@@ -61,6 +63,67 @@ const universeReads = [
 ];
 
 describe("demo router", () => {
+  it("keeps model defaults universe-scoped and revision-safe while preserving existing session models", async () => {
+    const { store, call } = await boot();
+    const base = `/api/v1/universes/${SOFTWARE_FACTORY_UNIVERSE_ID}`;
+    const other = [...store.universes.values()].find((state) => state.universe.id !== SOFTWARE_FACTORY_UNIVERSE_ID)!;
+    const otherDefaults = structuredClone(other.modelDefaults);
+    const original = (await call("GET", `${base}/models/defaults`)).json as ModelDefaults;
+    const model = { providerId: "private", apiKind: "openai:responses", model: "manual-model" };
+    const updated = await call("PUT", `${base}/models/defaults`, { slot: "agentRun", model, expectedRevision: original.revision });
+    expect(updated.status).toBe(200);
+    const revision = original.revision + 1;
+    expect(updated.json).toEqual({ ...original, agentRun: model, revision });
+    expect((await call("PUT", `${base}/models/defaults`, { slot: "agentRun", model: null, expectedRevision: original.revision })).status).toBe(409);
+    expect((await call("PUT", `${base}/models/defaults`, { slot: "agentRun", expectedRevision: revision })).status).toBe(400);
+    const created = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: {} } });
+    expect(created.status).toBe(200);
+    const session = created.json as SessionView;
+    expect(session.config).toMatchObject({ model });
+    const cleared = await call("PUT", `${base}/models/defaults`, { slot: "agentRun", model: null, expectedRevision: revision });
+    expect(cleared.json).toMatchObject({ revision: revision + 1, agentRun: null });
+    const missing = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: {} } });
+    expect(missing.status).toBe(400);
+    expect(missing.json).toMatchObject({ kind: "model_default_unset", modelDefaultSlot: "agentRun" });
+    const existing = await call("PUT", `${base}/sessions/${session.id}/config`, { config: {}, expectedConfigRevision: session.configRevision });
+    expect(existing.status).toBe(200);
+    expect(store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!.sessions.get(session.id)!.view.config).toMatchObject({ model });
+    const explicit = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: { config: { model } } } });
+    expect(explicit.status).toBe(200);
+    expect(other.modelDefaults).toEqual(otherDefaults);
+  });
+
+  it("lets demo members read defaults while reserving changes for operators", async () => {
+    const { store, call } = await boot();
+    store.currentUser.role = "user";
+    const universe = store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!;
+    universe.universe.role = "viewer";
+    const path = `/api/v1/universes/${SOFTWARE_FACTORY_UNIVERSE_ID}/models/defaults`;
+    expect((await call("GET", path)).status).toBe(200);
+    expect((await call("PUT", path, { slot: "agentRun", model: null, expectedRevision: universe.modelDefaults.revision })).status).toBe(403);
+    expect(universe.modelDefaults.agentRun).not.toBeNull();
+  });
+
+  it("uses universe defaults for demo bot sessions and refuses rotation when that choice is cleared", async () => {
+    const { store, call } = await boot();
+    const universe = store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!;
+    const base = `/api/v1/universes/${SOFTWARE_FACTORY_UNIVERSE_ID}`;
+    await call("PUT", `${base}/profiles/inherit`, { profileId: "inherit", config: {} });
+    const created = await call("POST", `${base}/bots`, { bot: { botId: "inherit-model", profileId: "inherit" } });
+    expect(created.status).toBe(201);
+    const record = universe.bots.get("inherit-model")!;
+    const sessionId = record.state.mainSessionId!;
+    const model = universe.modelDefaults.agentRun;
+    expect(universe.sessions.get(sessionId)!.view.config).toMatchObject({ model });
+    await call("PUT", `${base}/models/defaults`, { slot: "agentRun", model: null, expectedRevision: universe.modelDefaults.revision });
+    const refused = await call("POST", `${base}/bots/inherit-model/sessions/${sessionId}/rotate`);
+    expect(refused.status).toBe(400);
+    expect(refused.json).toMatchObject({ kind: "model_default_unset" });
+    expect(universe.sessions.get(sessionId)!.view.status).not.toBe("closed");
+    expect((await call("POST", `${base}/bots`, { bot: { botId: "no-model", profileId: "inherit" } })).status).toBe(400);
+    expect(universe.bots.has("no-model")).toBe(false);
+  });
+
   it("carries runtime slugs through creation and adoption without local suffixes", async () => {
     const { store, call } = await boot();
     const created = await call("POST", "/api/v1/universes", { name: "Display", slug: "chosen" });
@@ -121,6 +184,32 @@ describe("demo router", () => {
     expect(shared.json).toMatchObject({ access: { visibility: "universe" } });
     expect(universe.sessions.get("session-flaky-scheduler")!.view.access.visibility).toBe("universe");
     expect((await call("POST", `${path}/share`)).status).toBe(409);
+  });
+
+  it("uploads an attachment and runs it through the transcript as input media", async () => {
+    const { store, call } = await boot();
+    const base = `/api/v1/universes/${SOFTWARE_FACTORY_UNIVERSE_ID}`;
+    const created = (await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: {} } })).json as SessionView;
+    const uploaded = await call("POST", `${base}/attachments`, { bytesBase64: btoa("%PDF-1.7") });
+    expect(uploaded.status).toBe(200);
+    const blobRef = (uploaded.json as { blobs: { blobRef: string }[] }).blobs[0]!.blobRef;
+    const attachment = { blobRef, mime: "application/pdf", kind: "document", name: "offer.pdf" };
+    const path = `${base}/sessions/${created.id}`;
+    expect((await call("POST", `${path}/messages`, { submissionId: "missing", attachments: [{ ...attachment, blobRef: `sha256:${"0".repeat(64)}` }] })).status).toBe(400);
+    const pinned = created.config!.model as { providerId: string; apiKind: string };
+    expect((await call("POST", `${path}/messages`, {
+      text: "hi", submissionId: "wrong-route", options: { model: { providerId: "elsewhere", apiKind: pinned.apiKind, model: "x" } },
+    })).status).toBe(400);
+    const accepted = await call("POST", `${path}/messages`, { text: "Summarize this", submissionId: "with-file", attachments: [attachment] });
+    expect(accepted.status).toBe(200);
+    const session = store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!.sessions.get(created.id)!;
+    const transcript = applyEvents(emptyTranscript(), session.events);
+    expect(transcript.entries[0]).toMatchObject({
+      kind: "message",
+      role: "user",
+      text: "Summarize this",
+      media: [{ blobRef, mime: "application/pdf", kind: "document", name: "offer.pdf" }],
+    });
   });
 
   it("keeps full run output after its entries leave active context", async () => {
@@ -329,6 +418,22 @@ describe("demo router", () => {
     expect(listed.find((key) => key.keyPrefix === apiKey.keyPrefix)).toMatchObject({ groups: ["channels/inbound"], scope: { kind: "universe" } });
     expect(listed.find((key) => key.keyPrefix === "lsk_platform")).toMatchObject({ scope: { kind: "deployment" } });
     expect((await call("DELETE", `/api/v1/admin/api-keys/${apiKey.keyPrefix}`)).status).toBe(200);
+  });
+
+  it.each(["admin", "universe"])("rotates %s keys immediately and refuses stale or revoked prefixes", async (scope) => {
+    const { store, call } = await boot();
+    const universe = store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!;
+    const base = scope === "admin" ? "/api/v1/admin/api-keys" : `/api/v1/universes/${universe.universe.id}/api-keys`;
+    const created = await call("POST", base, { displayName: "Rotation test", groups: ["session"], scope: { kind: "deployment" } });
+    const before = created.json as { apiKey: Record<string, unknown> & { keyPrefix: string }; secret: string };
+    const rotated = await call("POST", `${base}/${before.apiKey.keyPrefix}/rotate`);
+    expect(rotated.status).toBe(200);
+    const after = rotated.json as typeof before;
+    expect(after.secret).not.toBe(before.secret);
+    expect(after.apiKey).toEqual({ ...before.apiKey, keyPrefix: after.secret.slice(0, 12), lastUsedAtMs: null });
+    expect((await call("POST", `${base}/${before.apiKey.keyPrefix}/rotate`)).status).toBe(404);
+    expect((await call("DELETE", `${base}/${after.apiKey.keyPrefix}`)).status).toBe(200);
+    expect((await call("POST", `${base}/${after.apiKey.keyPrefix}/rotate`)).status).toBe(404);
   });
 
   it("updates a user's admin-managed account fields and accepts a password reset", async () => {

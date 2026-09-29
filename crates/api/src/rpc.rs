@@ -13,12 +13,9 @@ pub enum AgentApiErrorKind {
     Unauthenticated,
     /// The authenticated caller lacks permission for this operation or target.
     Forbidden,
-    UnsupportedAudioMime,
+    /// No model was supplied and this universe has no default for the requested use.
+    ModelDefaultUnset,
     AudioBlobTooLarge,
-    AudioDurationTooLong,
-    TranscoderUnavailable,
-    TranscodeFailure,
-    TranscriptionFailure,
     /// The session's agent workflow exists but failed during bootstrap
     /// (rehydration) and cannot serve runs. Distinct from `NotFound` (no
     /// workflow) so clients/bridges treat it as a session recovery problem
@@ -42,6 +39,9 @@ pub enum AgentApiErrorKind {
 pub struct AgentApiError {
     pub kind: AgentApiErrorKind,
     pub message: String,
+    /// Present for model_default_unset; clients need not parse the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default_slot: Option<ModelDefaultSlot>,
 }
 
 impl AgentApiError {
@@ -49,6 +49,18 @@ impl AgentApiError {
         Self {
             kind,
             message: message.into(),
+            model_default_slot: None,
+        }
+    }
+
+    pub fn model_default_unset(slot: ModelDefaultSlot) -> Self {
+        Self {
+            kind: AgentApiErrorKind::ModelDefaultUnset,
+            message: format!(
+                "no universe model default is configured for {}; choose a model or set it with models/defaults/put",
+                slot.as_str()
+            ),
+            model_default_slot: Some(slot),
         }
     }
 
@@ -79,28 +91,8 @@ impl AgentApiError {
         Self::new(AgentApiErrorKind::Forbidden, "request is not authorized")
     }
 
-    pub fn unsupported_audio_mime(message: impl Into<String>) -> Self {
-        Self::new(AgentApiErrorKind::UnsupportedAudioMime, message)
-    }
-
     pub fn audio_blob_too_large(message: impl Into<String>) -> Self {
         Self::new(AgentApiErrorKind::AudioBlobTooLarge, message)
-    }
-
-    pub fn audio_duration_too_long(message: impl Into<String>) -> Self {
-        Self::new(AgentApiErrorKind::AudioDurationTooLong, message)
-    }
-
-    pub fn transcoder_unavailable(message: impl Into<String>) -> Self {
-        Self::new(AgentApiErrorKind::TranscoderUnavailable, message)
-    }
-
-    pub fn transcode_failure(message: impl Into<String>) -> Self {
-        Self::new(AgentApiErrorKind::TranscodeFailure, message)
-    }
-
-    pub fn transcription_failure(message: impl Into<String>) -> Self {
-        Self::new(AgentApiErrorKind::TranscriptionFailure, message)
     }
 
     pub fn session_bootstrap_failed(message: impl Into<String>) -> Self {
@@ -121,21 +113,16 @@ impl AgentApiError {
 
     pub fn json_rpc_code(&self) -> i64 {
         match self.kind {
-            AgentApiErrorKind::InvalidRequest
-            | AgentApiErrorKind::UnsupportedAudioMime
-            | AgentApiErrorKind::AudioBlobTooLarge
-            | AgentApiErrorKind::AudioDurationTooLong
-            | AgentApiErrorKind::TranscoderUnavailable => -32602,
+            AgentApiErrorKind::InvalidRequest | AgentApiErrorKind::AudioBlobTooLarge => -32602,
             AgentApiErrorKind::Unauthenticated => -32001,
             AgentApiErrorKind::Forbidden => -32003,
             AgentApiErrorKind::NotFound => -32004,
             AgentApiErrorKind::Conflict => -32009,
-            AgentApiErrorKind::Rejected
-            | AgentApiErrorKind::TranscodeFailure
-            | AgentApiErrorKind::TranscriptionFailure => -32010,
+            AgentApiErrorKind::Rejected => -32010,
             AgentApiErrorKind::SessionBootstrapFailed => -32011,
             AgentApiErrorKind::EnvironmentNotReady => -32012,
             AgentApiErrorKind::ResponseTooLarge => -32013,
+            AgentApiErrorKind::ModelDefaultUnset => -32014,
             AgentApiErrorKind::Internal => -32603,
         }
     }
@@ -358,7 +345,7 @@ api_methods! {
     METHOD_SESSION_LIST => list_sessions(SessionListParams) -> SessionListResponse =>
         ["List sessions", "Returns a cursor-paginated summary list ordered by most recent update, optionally narrowed by the audience of each session's root: createdBy, visibility, or visibleTo (shared with the universe or created by that actor). Pages may shift while sessions are changing."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_SESSION_CONFIG_PUT => put_session_config(SessionConfigPutParams) -> SessionConfigPutResponse =>
-        ["Replace session configuration", "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op."], access: MethodAccess::Universe(UniverseAction::ControlSession),
+        ["Replace session configuration", "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op."], access: MethodAccess::Universe(UniverseAction::ControlSession),
     METHOD_SESSION_RENAME => rename_session(SessionRenameParams) -> SessionRenameResponse =>
         ["Rename a session", "Sets the display name, or clears it when displayName is omitted."], access: MethodAccess::Universe(UniverseAction::ControlSession),
     METHOD_SESSION_METADATA_PUT => put_session_metadata(SessionMetadataPutParams) -> SessionMetadataPutResponse =>
@@ -374,7 +361,7 @@ api_methods! {
     METHOD_SESSION_EVENTS_READ => read_session_events(SessionEventsReadParams) -> SessionEventsReadResponse =>
         ["Read the session event stream", "Returns chronological events. Forward (default) follows after and supports long-polling. Backward reads the latest window below before (or the head); pass nextCursor as before until complete. Follow live events after the initial backward headCursor. Windows may split runs/tool batches; keep historical reconstruction separate from live controls."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_SESSION_CONTEXT_APPEND => append_context(ContextAppendParams) -> ContextAppendResponse =>
-        ["Append keyed session context", "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries."], access: MethodAccess::Universe(UniverseAction::ControlSession),
+        ["Append keyed session context", "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries."], access: MethodAccess::Universe(UniverseAction::ControlSession),
     METHOD_SESSION_CONTEXT_REMOVE => remove_context(ContextRemoveParams) -> ContextRemoveResponse =>
         ["Remove keyed session context", "Removes active entries by stable key with per-key results. Missing keys are idempotent no-ops; runtime-reserved run keys cannot be removed."], access: MethodAccess::Universe(UniverseAction::ControlSession),
     METHOD_SESSION_CONTEXT_COMPACT => compact_context(ContextCompactParams) -> ContextCompactResponse =>
@@ -443,6 +430,16 @@ api_methods! {
         ["List environment registration keys", "Lists this universe's registration keys with policy, status, and derived counts. Each key is the group of the environments it admitted."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
     METHOD_ENVIRONMENTS_REGISTRATION_KEYS_REVOKE => revoke_environment_registration_key(EnvironmentRegistrationKeyRevokeParams) -> EnvironmentRegistrationKeyRevokeResponse =>
         ["Revoke an environment registration key", "Stops the key from admitting new daemon identities; already registered daemons keep reconnecting. With closeEnvironments, also closes every non-closed environment the key admitted. Idempotent."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
+    METHOD_TRANSCRIPTIONS_START => start_transcription(TranscriptionStartParams) -> TranscriptionResponse =>
+        ["Start transcription", "Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created."], access: MethodAccess::Universe(UniverseAction::UseResource),
+    METHOD_TRANSCRIPTIONS_READ => read_transcription(TranscriptionReadParams) -> TranscriptionResponse =>
+        ["Read transcription", "Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire."], access: MethodAccess::Universe(UniverseAction::Read),
+    METHOD_TRANSCRIPTIONS_CANCEL => cancel_transcription(TranscriptionCancelParams) -> TranscriptionResponse =>
+        ["Cancel transcription", "Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority."], access: MethodAccess::Universe(UniverseAction::UseResource),
+    METHOD_MODELS_DEFAULTS_READ => read_model_defaults(ModelDefaultsReadParams) -> ModelDefaultsResponse =>
+        ["Read universe model defaults", "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers."], access: MethodAccess::Universe(UniverseAction::Read),
+    METHOD_MODELS_DEFAULTS_PUT => put_model_defaults(ModelDefaultsPutParams) -> ModelDefaultsResponse =>
+        ["Set a universe model default", "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
     METHOD_MODELS_LIST => list_models(ModelListParams) -> ModelListResponse =>
         ["Discover available models", "Queries supported providers directly, with a brief process-local burst cache, and returns best-effort selectable routes. One provider failure does not discard successful results from others."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_PROFILES_CREATE => create_profile(ProfileCreateParams) -> ProfileCreateResponse =>

@@ -27,6 +27,7 @@ mod handshake;
 mod ids;
 mod mcp;
 mod model;
+mod model_defaults;
 mod models;
 mod notifications;
 mod profiles;
@@ -37,6 +38,7 @@ mod service;
 mod sessions;
 mod skills;
 mod storage;
+mod transcriptions;
 mod views;
 
 pub use access::*;
@@ -50,6 +52,7 @@ pub use handshake::*;
 pub use ids::*;
 pub use mcp::*;
 pub use model::*;
+pub use model_defaults::*;
 pub use models::*;
 pub use notifications::*;
 pub use profiles::*;
@@ -60,6 +63,7 @@ pub use service::*;
 pub use sessions::*;
 pub use skills::*;
 pub use storage::*;
+pub use transcriptions::*;
 pub use views::*;
 
 #[cfg(test)]

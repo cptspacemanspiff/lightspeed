@@ -772,7 +772,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -1232,7 +1232,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     "method": "session/config/put",
     "group": "session",
     "summary": "Replace session configuration",
-    "description": "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked and an identical document is a no-op.",
+    "description": "Replaces the complete sparse config while the session is idle. Use the current config revision for safe read-modify-write; omitted features are revoked, an omitted model preserves the current model, and an identical document is a no-op.",
     "paramsType": "SessionConfigPutParams",
     "resultType": "AgentApiOutcome<SessionConfigPutResponse>",
     "inputSchema": {
@@ -1756,7 +1756,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -2354,7 +2354,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     "method": "session/context/append",
     "group": "session",
     "summary": "Append keyed session context",
-    "description": "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; media preprocessing can fail one entry without discarding successful entries.",
+    "description": "Admits a batch of context entries with per-entry results. Stable keys make same-content retries no-ops; invalid input can fail one entry without discarding successful entries.",
     "paramsType": "ContextAppendParams",
     "resultType": "AgentApiOutcome<ContextAppendResponse>",
     "inputSchema": {
@@ -2403,6 +2403,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                     "null"
                   ]
                 },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "text": {
                   "type": "string"
                 },
@@ -2424,6 +2431,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 },
                 "origin": {
                   "description": "Application-supplied display provenance (1–200 nonblank bytes).\nThe platform uses `user:<id>` for direct human input and `event` for\nbot deliveries; other values are allowed. Omitted means unknown.\nThis metadata is not an authorization identity or model input text.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
                   "type": [
                     "string",
                     "null"
@@ -2678,6 +2692,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                     "null"
                   ]
                 },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "text": {
                   "type": "string"
                 },
@@ -2699,6 +2720,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 },
                 "origin": {
                   "description": "Application-supplied display provenance (1–200 nonblank bytes).\nThe platform uses `user:<id>` for direct human input and `event` for\nbot deliveries; other values are allowed. Omitted means unknown.\nThis metadata is not an authorization identity or model input text.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
                   "type": [
                     "string",
                     "null"
@@ -3158,6 +3186,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                     "null"
                   ]
                 },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "text": {
                   "type": "string"
                 },
@@ -3179,6 +3214,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 },
                 "origin": {
                   "description": "Application-supplied display provenance (1–200 nonblank bytes).\nThe platform uses `user:<id>` for direct human input and `event` for\nbot deliveries; other values are allowed. Omitted means unknown.\nThis metadata is not an authorization identity or model input text.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "provenanceRef": {
+                  "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
                   "type": [
                     "string",
                     "null"
@@ -3971,7 +4013,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -5034,6 +5076,237 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_transcriptions_start",
+    "method": "transcriptions/start",
+    "group": "transcriptions",
+    "summary": "Start transcription",
+    "description": "Admit or rejoin a requester-scoped audio transcription. The resolved model is immutable. No session or run is created.",
+    "paramsType": "TranscriptionStartParams",
+    "resultType": "AgentApiOutcome<TranscriptionResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "audio": {
+          "$ref": "#/definitions/TranscriptionAudio"
+        },
+        "idempotencyKey": {
+          "description": "Scoped to the requester. Matching retries rejoin the original job,\nincluding after defaults change; changed requests conflict. Identity is\nretained for the Temporal namespace's workflow-history retention period.",
+          "type": "string"
+        },
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "idempotencyKey",
+        "audio"
+      ],
+      "type": "object",
+      "definitions": {
+        "ModelConfig": {
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "TranscriptionAudio": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Immutable audio input in this universe's content store.",
+          "properties": {
+            "blobRef": {
+              "type": "string"
+            },
+            "mime": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "blobRef",
+            "mime",
+            "name"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  {
+    "name": "lightspeed_transcriptions_read",
+    "method": "transcriptions/read",
+    "group": "transcriptions",
+    "summary": "Read transcription",
+    "description": "Read status and transcript text. An asserted actor may only read their own drafts; direct universe keys retain method-group authority. Unsubmitted CAS results may expire.",
+    "paramsType": "TranscriptionReadParams",
+    "resultType": "AgentApiOutcome<TranscriptionResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "transcriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transcriptionId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "lightspeed_transcriptions_cancel",
+    "method": "transcriptions/cancel",
+    "group": "transcriptions",
+    "summary": "Cancel transcription",
+    "description": "Cancel unfinished transcription. Repeated cancellation is safe; completed results remain unchanged. An asserted actor may only cancel their own drafts; direct universe keys retain method-group authority.",
+    "paramsType": "TranscriptionCancelParams",
+    "resultType": "AgentApiOutcome<TranscriptionResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "transcriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transcriptionId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "lightspeed_models_defaults_read",
+    "method": "models/defaults/read",
+    "group": "models",
+    "summary": "Read universe model defaults",
+    "description": "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.",
+    "paramsType": "ModelDefaultsReadParams",
+    "resultType": "AgentApiOutcome<ModelDefaultsResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "lightspeed_models_defaults_put",
+    "method": "models/defaults/put",
+    "group": "models",
+    "summary": "Set a universe model default",
+    "description": "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.",
+    "paramsType": "ModelDefaultsPutParams",
+    "resultType": "AgentApiOutcome<ModelDefaultsResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "expectedRevision": {
+          "description": "Revision returned by read/put; zero for a universe with no updates.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Complete selection, or explicit null to clear this slot. Required."
+        },
+        "slot": {
+          "$ref": "#/definitions/ModelDefaultSlot"
+        }
+      },
+      "required": [
+        "slot",
+        "model",
+        "expectedRevision"
+      ],
+      "type": "object",
+      "definitions": {
+        "ModelConfig": {
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ModelDefaultSlot": {
+          "description": "A universe's model selection for a particular use. Protocol and purpose\nare separate: several purposes may use the same provider API.",
+          "enum": [
+            "agentRun",
+            "speechToText"
+          ],
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
     "name": "lightspeed_models_list",
     "method": "models/list",
     "group": "models",
@@ -5046,7 +5319,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       "description": "Direct provider model discovery. Results may be served from a brief\nprocess-local cache; clients refresh by calling this method.",
       "properties": {
         "selectableOnly": {
-          "description": "Apply Lightspeed's small, conservative selectable-model policy. It\nremoves OpenAI model-id families that are clearly not text-generation\nroutes (embeddings, moderation, image/video, speech, and realtime).\nIt is an ID policy, not a provider capability claim.",
+          "description": "Apply Lightspeed's small, conservative selectable-model policy. It\nkeeps supported file-transcription routes and filters clearly unrelated\nOpenAI families from agent suggestions (embeddings, moderation, image/video,\nspeech synthesis, and realtime). Agent suggestions also have an age limit.\nClients select routes by API kind for their intended use. This is an ID\npolicy, not a provider capability claim.",
           "type": "boolean"
         }
       },
@@ -5685,7 +5958,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"
@@ -6703,7 +6976,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                   "type": "null"
                 }
               ],
-              "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
             }
           },
           "type": "object"

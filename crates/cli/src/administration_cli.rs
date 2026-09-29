@@ -183,6 +183,10 @@ enum ApiKeyCommand {
         #[arg(long)]
         assert_actor: bool,
     },
+    /// Replace an active key secret immediately; prints the new secret once.
+    Rotate {
+        key_prefix: String,
+    },
     Revoke {
         key_prefix: String,
     },
@@ -261,6 +265,21 @@ pub async fn api_key(args: ApiKeyArgs) -> Result<()> {
             }
             crate::output::show(args.json, &response)?;
         }
+        ApiKeyCommand::Rotate { key_prefix } => {
+            let response: api::DeploymentApiKeyCreateResponse = client
+                .request(
+                    api::METHOD_DEPLOYMENT_API_KEYS_ROTATE,
+                    api::DeploymentApiKeyRotateParams { key_prefix },
+                )
+                .await?
+                .result;
+            if !args.json {
+                println!(
+                    "API key rotated. The old secret no longer works. Save the new secret now."
+                );
+            }
+            crate::output::show(args.json, &response)?;
+        }
         ApiKeyCommand::Revoke { key_prefix } => {
             let response: api::DeploymentApiKeyRevokeResponse = client
                 .request(
@@ -281,6 +300,8 @@ pub struct ModelsArgs {
 }
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
+    /// Inspect, set, or clear universe model defaults.
+    Defaults(crate::model_defaults_cli::ModelDefaultsArgs),
     /// Configure provider endpoints and their API-key or OAuth credentials.
     #[command(visible_alias = "providers")]
     Provider(crate::auth_cli::AuthModelArgs),
@@ -293,6 +314,7 @@ enum ModelsCommand {
 }
 pub async fn models(args: ModelsArgs) -> Result<()> {
     let (json, all) = match args.command {
+        ModelsCommand::Defaults(args) => return crate::model_defaults_cli::run(args).await,
         ModelsCommand::Provider(args) => return crate::auth_cli::model(args).await,
         ModelsCommand::List { json, all } => (json, all),
     };

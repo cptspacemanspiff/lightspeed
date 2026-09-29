@@ -81,6 +81,17 @@
         },
         "message": {
           "type": "string"
+        },
+        "modelDefaultSlot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelDefaultSlot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present for model_default_unset; clients need not parse the message."
         }
       },
       "required": [
@@ -96,12 +107,7 @@
             "invalid_request",
             "not_found",
             "conflict",
-            "unsupported_audio_mime",
             "audio_blob_too_large",
-            "audio_duration_too_long",
-            "transcoder_unavailable",
-            "transcode_failure",
-            "transcription_failure",
             "internal"
           ],
           "type": "string"
@@ -119,6 +125,11 @@
         {
           "const": "forbidden",
           "description": "The authenticated caller lacks permission for this operation or target.",
+          "type": "string"
+        },
+        {
+          "const": "model_default_unset",
+          "description": "No model was supplied and this universe has no default for the requested use.",
           "type": "string"
         },
         {
@@ -1719,6 +1730,23 @@
       ],
       "type": "object"
     },
+    "AgentApiOutcomeOfModelDefaultsResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/ModelDefaultsResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
     "AgentApiOutcomeOfModelListResponse": {
       "properties": {
         "notifications": {
@@ -2171,6 +2199,23 @@
         },
         "result": {
           "$ref": "#/definitions/SkillListResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "AgentApiOutcomeOfTranscriptionResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/TranscriptionResponse"
         }
       },
       "required": [
@@ -4538,6 +4583,13 @@
           "type": "string"
         },
         "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "textRef": {
+          "description": "Optional prepared UTF-8 text; the source attachment remains in blobRef.",
           "type": [
             "string",
             "null"
@@ -7979,7 +8031,7 @@
           "type": "string"
         },
         "groups": {
-          "description": "The method groups the key may call; absent grants every group its\nscope allows. Keys never change: to change what a key may do, revoke\nit and mint another.",
+          "description": "The method groups the key may call; absent grants every group its\nscope allows. To change what a key may do, revoke\nit and mint another.",
           "items": {
             "$ref": "#/definitions/MethodGroup"
           },
@@ -8004,7 +8056,7 @@
       "type": "object"
     },
     "DeploymentApiKeyCreateResponse": {
-      "description": "A newly minted key. `secret` is returned only by create and cannot be\nrecovered later. Its custom `Debug` implementation redacts the DTO before\nJSON-RPC serialization; the serialized response payload remains sensitive\nand must not be logged.",
+      "description": "A newly minted or rotated key. `secret` is returned only by create or rotate and cannot be\nrecovered later. Its custom `Debug` implementation redacts the DTO before\nJSON-RPC serialization; the serialized response payload remains sensitive\nand must not be logged.",
       "properties": {
         "apiKey": {
           "$ref": "#/definitions/DeploymentApiKeyView"
@@ -8068,6 +8120,18 @@
       },
       "required": [
         "apiKey"
+      ],
+      "type": "object"
+    },
+    "DeploymentApiKeyRotateParams": {
+      "additionalProperties": false,
+      "properties": {
+        "keyPrefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "keyPrefix"
       ],
       "type": "object"
     },
@@ -10592,13 +10656,7 @@
     "InputAdmissionFailureKind": {
       "enum": [
         "unsupportedMedia",
-        "unsupportedAudioMime",
         "blobMissing",
-        "blobTooLarge",
-        "audioDurationTooLong",
-        "transcoderUnavailable",
-        "transcodeFailure",
-        "transcriptionFailure",
         "admissionRejected"
       ],
       "type": "string"
@@ -10629,6 +10687,13 @@
                 "null"
               ]
             },
+            "provenanceRef": {
+              "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "text": {
               "type": "string"
             },
@@ -10650,6 +10715,13 @@
             },
             "origin": {
               "description": "Application-supplied display provenance (1–200 nonblank bytes).\nThe platform uses `user:<id>` for direct human input and `event` for\nbot deliveries; other values are allowed. Omitted means unknown.\nThis metadata is not an authorization identity or model input text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provenanceRef": {
+              "description": "Optional source blob in this universe, retained with the session.\nProvenance is metadata, not model input or an authorization identity.",
               "type": [
                 "string",
                 "null"
@@ -11701,6 +11773,7 @@
           "enum": [
             "vfs",
             "profiles",
+            "transcriptions",
             "models",
             "mcp",
             "bots",
@@ -11823,6 +11896,95 @@
       ],
       "type": "object"
     },
+    "ModelDefaultSlot": {
+      "description": "A universe's model selection for a particular use. Protocol and purpose\nare separate: several purposes may use the same provider API.",
+      "enum": [
+        "agentRun",
+        "speechToText"
+      ],
+      "type": "string"
+    },
+    "ModelDefaults": {
+      "additionalProperties": false,
+      "description": "Persisted universe defaults. Revision zero means no update has been made.\nClearing a slot still advances the revision, so setup cannot undo a clear.",
+      "properties": {
+        "agentRun": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "speechToText": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ModelDefaultsPutParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedRevision": {
+          "description": "Revision returned by read/put; zero for a universe with no updates.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Complete selection, or explicit null to clear this slot. Required."
+        },
+        "slot": {
+          "$ref": "#/definitions/ModelDefaultSlot"
+        }
+      },
+      "required": [
+        "slot",
+        "model",
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "ModelDefaultsReadParams": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ModelDefaultsResponse": {
+      "properties": {
+        "defaults": {
+          "$ref": "#/definitions/ModelDefaults"
+        }
+      },
+      "required": [
+        "defaults"
+      ],
+      "type": "object"
+    },
     "ModelEndpointConfig": {
       "properties": {
         "apiKinds": {
@@ -11851,7 +12013,7 @@
       "description": "Direct provider model discovery. Results may be served from a brief\nprocess-local cache; clients refresh by calling this method.",
       "properties": {
         "selectableOnly": {
-          "description": "Apply Lightspeed's small, conservative selectable-model policy. It\nremoves OpenAI model-id families that are clearly not text-generation\nroutes (embeddings, moderation, image/video, speech, and realtime).\nIt is an ID policy, not a provider capability claim.",
+          "description": "Apply Lightspeed's small, conservative selectable-model policy. It\nkeeps supported file-transcription routes and filters clearly unrelated\nOpenAI families from agent suggestions (embeddings, moderation, image/video,\nspeech synthesis, and realtime). Agent suggestions also have an age limit.\nClients select routes by API kind for their intended use. This is an ID\npolicy, not a provider capability claim.",
           "type": "boolean"
         }
       },
@@ -13452,7 +13614,7 @@
               "type": "null"
             }
           ],
-          "description": "Absent on input means the deployment default model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+          "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
         }
       },
       "type": "object"
@@ -16977,6 +17139,193 @@
       "required": [
         "toolId",
         "kind"
+      ],
+      "type": "object"
+    },
+    "TranscriptionAudio": {
+      "additionalProperties": false,
+      "description": "Immutable audio input in this universe's content store.",
+      "properties": {
+        "blobRef": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blobRef",
+        "mime",
+        "name"
+      ],
+      "type": "object"
+    },
+    "TranscriptionCancelParams": {
+      "additionalProperties": false,
+      "properties": {
+        "transcriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transcriptionId"
+      ],
+      "type": "object"
+    },
+    "TranscriptionFailure": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TranscriptionFailureKind"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "TranscriptionFailureKind": {
+      "enum": [
+        "invalidAudio",
+        "configuration",
+        "provider",
+        "timeout",
+        "internal"
+      ],
+      "type": "string"
+    },
+    "TranscriptionReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "transcriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transcriptionId"
+      ],
+      "type": "object"
+    },
+    "TranscriptionResponse": {
+      "properties": {
+        "transcription": {
+          "$ref": "#/definitions/TranscriptionView"
+        }
+      },
+      "required": [
+        "transcription"
+      ],
+      "type": "object"
+    },
+    "TranscriptionStartParams": {
+      "additionalProperties": false,
+      "properties": {
+        "audio": {
+          "$ref": "#/definitions/TranscriptionAudio"
+        },
+        "idempotencyKey": {
+          "description": "Scoped to the requester. Matching retries rejoin the original job,\nincluding after defaults change; changed requests conflict. Identity is\nretained for the Temporal namespace's workflow-history retention period.",
+          "type": "string"
+        },
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "idempotencyKey",
+        "audio"
+      ],
+      "type": "object"
+    },
+    "TranscriptionStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "TranscriptionView": {
+      "properties": {
+        "audio": {
+          "$ref": "#/definitions/TranscriptionAudio"
+        },
+        "createdAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "createdBy": {
+          "$ref": "#/definitions/Attribution"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TranscriptionFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        },
+        "status": {
+          "$ref": "#/definitions/TranscriptionStatus"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transcriptRef": {
+          "description": "Plain UTF-8 transcript blob, usable as ordinary textRef input.\nUnsubmitted content can be swept after the ordinary CAS grace period.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transcriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transcriptionId",
+        "createdBy",
+        "audio",
+        "model",
+        "status",
+        "createdAtMs"
       ],
       "type": "object"
     },

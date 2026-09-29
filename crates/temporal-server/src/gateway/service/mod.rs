@@ -19,10 +19,12 @@ mod github_api;
 mod input;
 mod mcp_api;
 pub(crate) mod mcp_discovery;
+mod model_defaults;
 mod models_api;
 mod oauth_api;
 mod parse;
 mod profiles;
+mod transcriptions;
 pub(crate) use crate::environments::provider_controllers;
 mod session_jobs;
 mod session_lifecycle;
@@ -137,7 +139,7 @@ use vfs::{
 use super::{
     AgentAdmission, AgentAdmissionFailure, AgentAdmissionFailureKind, AgentSessionArgs,
     AgentSessionStatus, AgentSessionWorkflow, DEFAULT_TASK_QUEUE, DEFAULT_TEMPORAL_NAMESPACE,
-    DEFAULT_TEMPORAL_TARGET, connect_temporal, default_model_from_env, pg_store_from_env,
+    DEFAULT_TEMPORAL_TARGET, connect_temporal, pg_store_from_env,
 };
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -393,9 +395,7 @@ async fn context_append_result(
     let entry = project_context_entry_inputs(std::slice::from_ref(input))
         .into_iter()
         .next();
-    let activation_text = if is_audio_transcript_entry(input) {
-        api_projection::project_content_text(store, &input.content).await?
-    } else if context_append_entry_has_activation_text(input) {
+    let activation_text = if context_append_entry_has_activation_text(input) {
         // The submitted text is reused when it produced this exact entry so
         // plain-text appends do not pay a blob read per response entry.
         match submitted_text {
@@ -482,35 +482,11 @@ fn active_entry_input(entry: &ContextEntry) -> ContextEntryInput {
 }
 
 fn active_context_entry_matches_input(active: &ContextEntry, input: &ContextEntryInput) -> bool {
-    let active_input = active_entry_input(active);
-    active_input == *input || audio_input_matches_transcript(input, &active_input)
-}
-
-fn audio_input_matches_transcript(input: &ContextEntryInput, active: &ContextEntryInput) -> bool {
-    input
-        .content
-        .media_type
-        .as_deref()
-        .is_some_and(|mime| mime.trim().to_ascii_lowercase().starts_with("audio/"))
-        && is_audio_transcript_entry(active)
-        && active.provenance_ref.as_ref() == Some(&input.content.content_ref)
-}
-
-fn is_audio_transcript_entry(input: &ContextEntryInput) -> bool {
-    input.content.provider_kind.as_deref()
-        == Some(llm_clients::content::AUDIO_TRANSCRIPT_PROVIDER_KIND)
+    active_entry_input(active) == *input
 }
 
 fn input_admission_failure_from_api_error(error: AgentApiError) -> InputAdmissionFailureView {
     let kind = match error.kind {
-        AgentApiErrorKind::UnsupportedAudioMime => InputAdmissionFailureKind::UnsupportedAudioMime,
-        AgentApiErrorKind::AudioBlobTooLarge => InputAdmissionFailureKind::BlobTooLarge,
-        AgentApiErrorKind::AudioDurationTooLong => InputAdmissionFailureKind::AudioDurationTooLong,
-        AgentApiErrorKind::TranscoderUnavailable => {
-            InputAdmissionFailureKind::TranscoderUnavailable
-        }
-        AgentApiErrorKind::TranscodeFailure => InputAdmissionFailureKind::TranscodeFailure,
-        AgentApiErrorKind::TranscriptionFailure => InputAdmissionFailureKind::TranscriptionFailure,
         AgentApiErrorKind::NotFound => InputAdmissionFailureKind::BlobMissing,
         _ => InputAdmissionFailureKind::UnsupportedMedia,
     };
@@ -524,21 +500,6 @@ fn input_admission_failure_from_workflow(
     failure: &AgentAdmissionFailure,
 ) -> InputAdmissionFailureView {
     let kind = match failure.kind {
-        AgentAdmissionFailureKind::UnsupportedAudioMime => {
-            InputAdmissionFailureKind::UnsupportedAudioMime
-        }
-        AgentAdmissionFailureKind::AudioBlobMissing => InputAdmissionFailureKind::BlobMissing,
-        AgentAdmissionFailureKind::AudioBlobTooLarge => InputAdmissionFailureKind::BlobTooLarge,
-        AgentAdmissionFailureKind::AudioDurationTooLong => {
-            InputAdmissionFailureKind::AudioDurationTooLong
-        }
-        AgentAdmissionFailureKind::TranscoderUnavailable => {
-            InputAdmissionFailureKind::TranscoderUnavailable
-        }
-        AgentAdmissionFailureKind::TranscodeFailure => InputAdmissionFailureKind::TranscodeFailure,
-        AgentAdmissionFailureKind::TranscriptionFailure => {
-            InputAdmissionFailureKind::TranscriptionFailure
-        }
         AgentAdmissionFailureKind::RejectedCommand => InputAdmissionFailureKind::AdmissionRejected,
     };
     InputAdmissionFailureView {
@@ -553,7 +514,6 @@ pub struct GatewayAgentApiBuilder {
     task_queue: String,
     bot_task_queue: String,
     channel_task_queue: String,
-    default_model: ModelSelection,
     continue_as_new_history_threshold: Option<u32>,
     poll_interval: Duration,
     operation_timeout: Duration,
@@ -632,11 +592,6 @@ impl GatewayAgentApiBuilder {
         connector: Arc<dyn ProviderControllerConnector>,
     ) -> Self {
         self.provider_controller_connector = connector;
-        self
-    }
-
-    pub fn with_default_model(mut self, model: ModelSelection) -> Self {
-        self.default_model = model;
         self
     }
 
@@ -754,7 +709,6 @@ impl GatewayAgentApiBuilder {
             task_queue: self.task_queue,
             bot_task_queue: self.bot_task_queue,
             channel_task_queue: self.channel_task_queue,
-            default_model: self.default_model,
             continue_as_new_history_threshold: self.continue_as_new_history_threshold,
             poll_interval: self.poll_interval,
             operation_timeout: self.operation_timeout,
@@ -781,7 +735,6 @@ pub struct GatewayAgentApi {
     task_queue: String,
     pub(crate) bot_task_queue: String,
     pub(crate) channel_task_queue: String,
-    default_model: ModelSelection,
     continue_as_new_history_threshold: Option<u32>,
     poll_interval: Duration,
     operation_timeout: Duration,
@@ -818,7 +771,6 @@ impl GatewayAgentApi {
             task_queue: DEFAULT_TASK_QUEUE.to_owned(),
             bot_task_queue: temporal_workflow::bots::DEFAULT_BOTS_TASK_QUEUE.to_owned(),
             channel_task_queue: crate::config::DEFAULT_CHANNELS_TASK_QUEUE.to_owned(),
-            default_model: default_model_from_env(),
             continue_as_new_history_threshold: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
@@ -2022,6 +1974,57 @@ impl AgentApiService for GatewayAgentApi {
             .map(AgentApiOutcome::new)
     }
 
+    async fn start_transcription(
+        &self,
+        params: TranscriptionStartParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        self.start_transcription_impl(params).await
+    }
+    async fn read_transcription(
+        &self,
+        params: TranscriptionReadParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        self.read_transcription_impl(params).await
+    }
+    async fn cancel_transcription(
+        &self,
+        params: TranscriptionCancelParams,
+    ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
+        self.cancel_transcription_impl(params).await
+    }
+
+    async fn read_model_defaults(
+        &self,
+        _params: api::ModelDefaultsReadParams,
+    ) -> Result<AgentApiOutcome<api::ModelDefaultsResponse>, AgentApiError> {
+        self.authorize_method(api::METHOD_MODELS_DEFAULTS_READ, None)
+            .await?;
+        let defaults = self
+            .store
+            .read_model_defaults()
+            .await
+            .map_err(model_defaults::map_store_error)?;
+        Ok(AgentApiOutcome::new(api::ModelDefaultsResponse {
+            defaults,
+        }))
+    }
+
+    async fn put_model_defaults(
+        &self,
+        params: api::ModelDefaultsPutParams,
+    ) -> Result<AgentApiOutcome<api::ModelDefaultsResponse>, AgentApiError> {
+        self.authorize_method(api::METHOD_MODELS_DEFAULTS_PUT, None)
+            .await?;
+        let defaults = self
+            .store
+            .put_model_defaults(params)
+            .await
+            .map_err(model_defaults::map_store_error)?;
+        Ok(AgentApiOutcome::new(api::ModelDefaultsResponse {
+            defaults,
+        }))
+    }
+
     async fn list_models(
         &self,
         params: ModelListParams,
@@ -2227,7 +2230,10 @@ impl AgentApiService for GatewayAgentApi {
                 )));
             }
         }
-        let config = engine_session_config_from_api(params.config, self.default_model.clone())?;
+        let config = engine_session_config_from_api(
+            params.config,
+            model_defaults::current_session_model(&loaded.state)?,
+        )?;
         config
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;

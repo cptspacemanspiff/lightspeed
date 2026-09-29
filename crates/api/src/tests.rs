@@ -59,6 +59,7 @@ fn notification_serializes_as_json_rpc_lite_shape() {
             completed_at_ms: Some(20),
             source: RunViewSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "hello".to_owned(),
                 }],
@@ -3464,6 +3465,17 @@ impl DeploymentApiService for TestDeploymentService {
         }))
     }
 
+    async fn rotate_api_key(
+        &self,
+        params: DeploymentApiKeyRotateParams,
+    ) -> Result<AgentApiOutcome<DeploymentApiKeyCreateResponse>, AgentApiError> {
+        assert_eq!(params.key_prefix, "lsk_ab12cd34");
+        Ok(AgentApiOutcome::new(DeploymentApiKeyCreateResponse {
+            api_key: test_deployment_api_key("lsk_rotated1"),
+            secret: "lsk_rotated_secret".to_owned(),
+        }))
+    }
+
     async fn revoke_api_key(
         &self,
         _params: DeploymentApiKeyRevokeParams,
@@ -3684,6 +3696,19 @@ async fn dispatch_deployment_json_rpc_routes_scoped_api_key_management() {
     let result = list.result.expect("list result");
     assert_eq!(result["result"]["apiKeys"].as_array().unwrap().len(), 1);
     assert!(result["result"]["apiKeys"][0].get("secret").is_none());
+
+    let rotate = dispatch_deployment_json_rpc(
+        &TestDeploymentService,
+        JsonRpcRequest {
+            id: RequestId::Number(4),
+            method: METHOD_DEPLOYMENT_API_KEYS_ROTATE.to_owned(),
+            params: Some(json!({ "keyPrefix": "lsk_ab12cd34" })),
+        },
+    )
+    .await;
+    let result = rotate.result.expect("rotate result");
+    assert_eq!(result["result"]["apiKey"]["keyPrefix"], "lsk_rotated1");
+    assert_eq!(result["result"]["secret"], "lsk_rotated_secret");
 
     let revoke = dispatch_deployment_json_rpc(
         &TestDeploymentService,

@@ -334,7 +334,7 @@ async fn run_case(
         features["environments"]["environments"][0]["workingDirectory"] = json!(root);
         features["environments"]["prompts"] = json!({"roots":[".agents/prompts"]});
     }
-    let mut model = temporal_server::default_model_from_env();
+    let mut model = support::live::openai_live_model();
     model.api_kind = provider;
     let profile = api.create_profile(api::ProfileCreateParams { profile: api::AgentProfileInput {
         profile_id: api::ProfileId::new(format!("profile_{session}")), display_name: None, description: None,
@@ -357,6 +357,7 @@ async fn run_case(
             session_id: session.to_string(),
             source: api::RunStartSource::Input {
                 items: vec![api::InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "run transfer checks".into(),
                 }],

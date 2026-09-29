@@ -1,4 +1,5 @@
 import type { FeatureStates, UniverseRole } from "@lightspeed/platform-shared";
+export type { ModelConfig, ModelDefaults, ModelDefaultsPutParams } from "@lightspeed-ai/agent-client";
 import type {
   Attribution,
   ResourceAccessSummary,
@@ -56,8 +57,9 @@ function extractMessage(body: unknown): string | null {
   return error;
 }
 
-export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
+    signal,
     method,
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -277,7 +279,7 @@ export interface SecretProvider {
 export interface ModelEndpointConfig {
   baseUrl: string;
   headers?: Record<string, string>;
-  apiKinds: Array<"openai:responses" | "openai:completions">;
+  apiKinds: Array<"openai:responses" | "openai:completions" | "openai:audio-transcriptions">;
 }
 
 export interface SecretsInventory {

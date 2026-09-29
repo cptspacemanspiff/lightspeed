@@ -19,7 +19,7 @@ use support::live::{
     read_run, require_storage_live_env, run_with_live_worker, start_text_run,
     terminate_live_session, wait_for_terminal_run, wait_until,
 };
-use temporal_server::{default_model_from_env, gateway::GatewayAgentApi, pg_store_from_env};
+use temporal_server::{gateway::GatewayAgentApi, pg_store_from_env};
 use temporal_workflow::LLM_RETRY_MAX_ATTEMPTS;
 use temporalio_client::{Client, WorkflowDescribeOptions, WorkflowTerminateOptions};
 
@@ -220,10 +220,10 @@ async fn run_control_api(
     with_tools: bool,
 ) -> anyhow::Result<GatewayAgentApi> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
     let config = if with_tools {
         let workspace = api
@@ -456,6 +456,7 @@ async fn run_steering_live_client(
             session_id: session_id.as_str().to_owned(),
             run_id: run.id.clone(),
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "also mention the moon".to_owned(),
             }],
@@ -489,6 +490,7 @@ async fn run_steering_live_client(
             session_id: session_id.as_str().to_owned(),
             run_id: run.id.clone(),
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "too late".to_owned(),
             }],
@@ -521,6 +523,7 @@ async fn run_steering_final_turn_live_client(
             session_id: session_id.as_str().to_owned(),
             run_id: run.id.clone(),
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "one more thing".to_owned(),
             }],
@@ -622,6 +625,7 @@ async fn run_queue_live_client(
             session_id: session_id.as_str().to_owned(),
             run_id: second.id.clone(),
             items: vec![InputItem::Text {
+                provenance_ref: None,
                 origin: None,
                 text: "nope".to_owned(),
             }],
@@ -725,10 +729,10 @@ async fn run_parallel_tool_batch_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     // A read-only workspace attachment derives parallel-safe function tools
@@ -757,6 +761,7 @@ async fn run_parallel_tool_batch_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "run a parallel tool batch".to_owned(),
                 }],
@@ -853,10 +858,10 @@ async fn run_transient_llm_retry_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model)
         .build();
 
     api.start_session(SessionStartParams {
@@ -877,6 +882,7 @@ async fn run_transient_llm_retry_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "retry through transient provider failures".to_owned(),
                 }],
@@ -934,10 +940,10 @@ async fn run_llm_retry_exhaustion_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model)
         .build();
 
     api.start_session(SessionStartParams {
@@ -958,6 +964,7 @@ async fn run_llm_retry_exhaustion_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "exhaust the provider retry budget".to_owned(),
                 }],
@@ -1007,6 +1014,7 @@ async fn run_llm_retry_exhaustion_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "recover after the provider outage".to_owned(),
                 }],
@@ -1042,10 +1050,10 @@ async fn run_unbounded_hosted_run_live_client(
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let store = pg_store_from_env().await?;
-    let model = default_model_from_env();
+    let model = support::live::openai_live_model();
+    support::live::seed_agent_default(&store, &model).await?;
     let api = GatewayAgentApi::builder(client.clone(), store)
         .with_task_queue(task_queue)
-        .with_default_model(model.clone())
         .build();
 
     api.start_session(SessionStartParams {
@@ -1084,6 +1092,7 @@ async fn run_unbounded_hosted_run_live_client(
             session_id: session_id.as_str().to_owned(),
             source: RunStartSource::Input {
                 items: vec![InputItem::Text {
+                    provenance_ref: None,
                     origin: None,
                     text: "complete thirty verification tool rounds".to_owned(),
                 }],
