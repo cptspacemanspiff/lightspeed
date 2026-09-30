@@ -1937,6 +1937,44 @@
           "type": "function"
         },
         {
+          "description": "Run one standalone model call and return its reply. The model sees only instructions and input: not this conversation, files, or tools. Pass output_schema (a JSON Schema) to get a JSON reply validated against it in the json field; a reply that does not match fails the call. Several calls in one turn run concurrently.\n\nAvailable models (default grader):\n- grader: Cheap classifier\n- vision",
+          "name": "model_generate",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "description": "The user message: text, or any JSON value, which the model receives as JSON."
+              },
+              "input_schema": {
+                "description": "Optional JSON Schema that input must match; checked before the model runs.",
+                "type": "object"
+              },
+              "instructions": {
+                "description": "System instructions for the model.",
+                "type": "string"
+              },
+              "model": {
+                "description": "Model to run; defaults to grader.",
+                "enum": [
+                  "grader",
+                  "vision"
+                ],
+                "type": "string"
+              },
+              "output_schema": {
+                "description": "Optional JSON Schema the reply must match. Prefer an object schema with declared properties, required fields, and additionalProperties false.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "input"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
           "description": "Create a timer promise that resolves after the requested delay. Use await to park on the returned promise.",
           "name": "sleep",
           "parameters": {
@@ -3933,6 +3971,42 @@
           "name": "job_submit"
         },
         {
+          "description": "Run one standalone model call and return its reply. The model sees only instructions and input: not this conversation, files, or tools. Pass output_schema (a JSON Schema) to get a JSON reply validated against it in the json field; a reply that does not match fails the call. Several calls in one turn run concurrently.\n\nAvailable models (default grader):\n- grader: Cheap classifier\n- vision",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "description": "The user message: text, or any JSON value, which the model receives as JSON."
+              },
+              "input_schema": {
+                "description": "Optional JSON Schema that input must match; checked before the model runs.",
+                "type": "object"
+              },
+              "instructions": {
+                "description": "System instructions for the model.",
+                "type": "string"
+              },
+              "model": {
+                "description": "Model to run; defaults to grader.",
+                "enum": [
+                  "grader",
+                  "vision"
+                ],
+                "type": "string"
+              },
+              "output_schema": {
+                "description": "Optional JSON Schema the reply must match. Prefer an object schema with declared properties, required fields, and additionalProperties false.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "input"
+            ],
+            "type": "object"
+          },
+          "name": "model_generate"
+        },
+        {
           "cache_control": {
             "type": "ephemeral"
           },
@@ -5908,6 +5982,46 @@
               },
               "required": [
                 "jobs"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Run one standalone model call and return its reply. The model sees only instructions and input: not this conversation, files, or tools. Pass output_schema (a JSON Schema) to get a JSON reply validated against it in the json field; a reply that does not match fails the call. Several calls in one turn run concurrently.\n\nAvailable models (default grader):\n- grader: Cheap classifier\n- vision",
+            "name": "model_generate",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "input": {
+                  "description": "The user message: text, or any JSON value, which the model receives as JSON."
+                },
+                "input_schema": {
+                  "description": "Optional JSON Schema that input must match; checked before the model runs.",
+                  "type": "object"
+                },
+                "instructions": {
+                  "description": "System instructions for the model.",
+                  "type": "string"
+                },
+                "model": {
+                  "description": "Model to run; defaults to grader.",
+                  "enum": [
+                    "grader",
+                    "vision"
+                  ],
+                  "type": "string"
+                },
+                "output_schema": {
+                  "description": "Optional JSON Schema the reply must match. Prefer an object schema with declared properties, required fields, and additionalProperties false.",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "input"
               ],
               "type": "object"
             },

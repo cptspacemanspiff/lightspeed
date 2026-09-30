@@ -1475,6 +1475,10 @@ fn is_core_subagent_binding(binding: &engine::WorkflowToolBinding) -> bool {
     tools::subagents::is_subagent_workflow_tool_id(binding.definition.tool_id.as_str())
 }
 
+fn is_core_model_generate_binding(binding: &engine::WorkflowToolBinding) -> bool {
+    binding.definition.tool_id.as_str() == tools::model_generate::MODEL_GENERATE_WORKFLOW_TOOL_ID
+}
+
 fn validate_subagent_deadline_for_existing_bindings(
     state: &engine::CoreAgentState,
     features: &engine::FeaturesConfig,

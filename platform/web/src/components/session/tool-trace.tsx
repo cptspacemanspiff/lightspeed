@@ -428,7 +428,7 @@ function ToolCallDetail({
                 blobRef={call.outputContentRef}
                 loadFullText={loadFullText}
               >
-                {(text) => <DetailBlock value={text} tone={failed ? "warning" : "default"} />}
+                {(text) => <DetailBlock value={readableJsonResult(text)} tone={failed ? "warning" : "default"} />}
               </ExpandableContent>
             </TabsContent>
           )}
@@ -516,6 +516,22 @@ function reasoningTitle(text: string): string {
   const heading = /^#{1,6}\s+(.+)$/.exec(first)?.[1];
   const title = bold ?? heading ?? first.replace(/^[-*]\s+/, "");
   return title.length > 120 ? `${title.slice(0, 117)}…` : title;
+}
+
+/// Indent a compact JSON object or array result, such as a workflow tool's
+/// reply envelope, the way arguments are shown. It is reformatted only when
+/// re-serializing reproduces the text exactly, so a large integer, a float
+/// spelling, or key order is never displayed differently from what the tool
+/// returned; anything else is shown as returned.
+export function readableJsonResult(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return JSON.stringify(parsed) === trimmed ? JSON.stringify(parsed, null, 2) : value;
+  } catch {
+    return value;
+  }
 }
 
 function prettyJson(value: string): string {

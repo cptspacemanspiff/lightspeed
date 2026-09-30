@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, type Environment } from "@/api";
 import type { McpServerOption, WorkspaceOption } from "@/components/session/session-config-editor";
-import { Clock3, FolderOpen, Globe2, Network, Server, Settings2, Wrench, type LucideIcon } from "lucide-react";
+import { Clock3, FolderOpen, Globe2, Network, Server, Settings2, Sparkles, Wrench, type LucideIcon } from "lucide-react";
 import { sessionResources, type ResourceTone, type SessionResources } from "@/lib/sessions/session-resources";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -72,7 +72,7 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
   /// Opens the session's settings; absent when the viewer cannot change them.
   onConfigure?: () => void;
 }) {
-  const { environments, files, mcp, agents, web, timers } = resources;
+  const { environments, files, mcp, agents, generate, web, timers } = resources;
   const footer = (page?: { to: string; label: string }) => (
     <Footer onConfigure={onConfigure} page={page} />
   );
@@ -164,6 +164,18 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
           {(agents.maxDepth !== undefined || agents.maxConcurrent !== undefined) && (
             <Note>{[agents.maxDepth !== undefined && `Up to ${agents.maxDepth} levels deep`, agents.maxConcurrent !== undefined && `${agents.maxConcurrent} open at once`].filter(Boolean).join(" · ")}.</Note>
           )}
+          {footer()}
+        </Chip>
+      )}
+      {generate && (
+        <Chip icon={Sparkles} label={generate.models.length ? plural(generate.models.length, "model") : "Model generation"} title="Model generation">
+          <Heading title="Model generation" detail="Standalone model calls the agent may make." />
+          {generate.models.length === 0
+            ? <Empty>Calls use the session's own model.</Empty>
+            : generate.models.map((model, index) => (
+              <Row key={model.name} primary={<span className="font-mono">{model.name}</span>}
+                secondary={model.route} badges={[index === 0 && "Default"]} />
+            ))}
           {footer()}
         </Chip>
       )}

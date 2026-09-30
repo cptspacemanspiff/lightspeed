@@ -16,12 +16,12 @@ use crate::worker::{
     ACTIVITY_CONTEXT_COMPACT, ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
     ACTIVITY_ENVIRONMENT_JOB_START, ACTIVITY_LLM_GENERATE, ACTIVITY_MATERIALIZE_AWAIT_RESULT,
-    ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PUT_BLOB, ACTIVITY_READ_BLOB,
-    ACTIVITY_RUNTIME_PROJECTION_REFRESH, ACTIVITY_START_WORKFLOW_TOOL_EXECUTION,
-    ACTIVITY_SUBAGENT_CLOSE, ACTIVITY_SUBAGENT_PREPARE, ACTIVITY_SUBAGENT_RESOLVE,
-    ACTIVITY_TOOL_INVOKE_BATCH, ACTIVITY_TOOL_INVOKE_CALL, ACTIVITY_TOOL_PREPARE_PROMISE_CONTROLS,
-    ACTIVITY_VALIDATE_WORKFLOW_TOOL_REPLY, AppendEventsRequest,
-    AwaitEnvironmentReadyActivityRequest, AwaitEnvironmentReadyActivityResult,
+    ACTIVITY_MODEL_GENERATE, ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PUT_BLOB,
+    ACTIVITY_READ_BLOB, ACTIVITY_RUNTIME_PROJECTION_REFRESH,
+    ACTIVITY_START_WORKFLOW_TOOL_EXECUTION, ACTIVITY_SUBAGENT_CLOSE, ACTIVITY_SUBAGENT_PREPARE,
+    ACTIVITY_SUBAGENT_RESOLVE, ACTIVITY_TOOL_INVOKE_BATCH, ACTIVITY_TOOL_INVOKE_CALL,
+    ACTIVITY_TOOL_PREPARE_PROMISE_CONTROLS, ACTIVITY_VALIDATE_WORKFLOW_TOOL_REPLY,
+    AppendEventsRequest, AwaitEnvironmentReadyActivityRequest, AwaitEnvironmentReadyActivityResult,
     ContextCompactActivityRequest, CreateOrLoadSessionRequest, CreateOrLoadSessionResult,
     EnvironmentJobCancelActivityRequest, EnvironmentJobPollActivityRequest,
     EnvironmentJobPollActivityResult, EnvironmentJobStartActivityRequest,
@@ -38,6 +38,7 @@ mod compaction;
 mod context_refresh;
 mod environment_jobs;
 mod llm;
+mod model_generate;
 mod transcriptions;
 pub use context_refresh::subagent_catalog_snapshot;
 mod state;
@@ -297,6 +298,10 @@ mod tests {
             WorkerActivities::subagent_close.name(),
             temporal_workflow::WorkflowActivities::subagent_close.name()
         );
+        assert_eq!(
+            WorkerActivities::model_generate.name(),
+            temporal_workflow::WorkflowActivities::model_generate.name()
+        );
     }
 
     #[test]
@@ -345,6 +350,7 @@ mod tests {
                     active_environment_id: None,
                     environment_policy: None,
                     subagents_policy: None,
+                    generate_policy: None,
                     workspace_attachments: Vec::new(),
                     calls: vec![ToolInvocationRequest {
                         builtin: None,
@@ -762,6 +768,19 @@ impl WorkerActivities {
     ) -> Result<(), ActivityError> {
         let state = self.state_for_universe(request.universe_id).await?;
         subagents::close(state.subagents(), request).await
+    }
+
+    /// Standalone generations run under the calling session's universe; the
+    /// execution id carries no session, so routing uses the start args.
+    #[activity(name = ACTIVITY_MODEL_GENERATE)]
+    pub async fn model_generate(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ModelGenerateActivityRequest,
+    ) -> Result<engine::PromiseResolution, ActivityError> {
+        let state = self.state_for_universe(request.start.universe_id).await?;
+        let attempt = ctx.info().attempt;
+        common::cancellable(&ctx, model_generate::execute(state.llm(), attempt, request)).await
     }
 }
 

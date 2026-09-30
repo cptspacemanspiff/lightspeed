@@ -6,6 +6,7 @@ import {
   ToolGroupTrace,
   TranscriptLinksContext,
   batchTitle,
+  readableJsonResult,
   shortenTarget,
   subagentSessionId,
   type TranscriptLinks,
@@ -109,5 +110,37 @@ describe("step rows", () => {
   it("labels a call whose start is outside the loaded window", () => {
     const html = render(group([call({ toolName: "Tool activity (continued)", status: "running", continuation: true })], "running"));
     expect(text(html)).toBe("Tool activity started before the loaded history");
+  });
+});
+
+describe("result formatting", () => {
+  it("indents a compact JSON reply envelope with its nested values", () => {
+    const envelope = '{"status":"completed","model":{"name":"grader","provider_id":"openai"},"json":{"verdict":"pass","notes":["cited"]}}';
+    expect(readableJsonResult(envelope)).toBe([
+      "{",
+      '  "status": "completed",',
+      '  "model": {',
+      '    "name": "grader",',
+      '    "provider_id": "openai"',
+      "  },",
+      '  "json": {',
+      '    "verdict": "pass",',
+      '    "notes": [',
+      '      "cited"',
+      "    ]",
+      "  }",
+      "}",
+    ].join("\n"));
+  });
+
+  it.each([
+    ["plain text", "Hello there"],
+    ["a truncated envelope", '{"status":"completed","text":"Hel'],
+    ["an integer beyond double precision", '{"id":12345678901234567890}'],
+    ["a float spelling JSON.parse would rewrite", '{"score":1.0}'],
+    ["integer-like keys JSON.parse would reorder", '{"b":1,"2":0}'],
+    ["already indented JSON", '{\n  "a": 1\n}'],
+  ])("shows %s exactly as returned", (_, value) => {
+    expect(readableJsonResult(value)).toBe(value);
   });
 });

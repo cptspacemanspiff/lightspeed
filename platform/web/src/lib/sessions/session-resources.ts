@@ -36,6 +36,8 @@ export interface SessionResources {
     servers: Array<{ serverId: string; label: string; tools: string[] | null; toolTotal?: number; approval: boolean; tone: ResourceTone; status?: string }>;
   };
   agents?: { profiles: string[]; maxDepth?: number; maxConcurrent?: number };
+  /// Models the agent may call standalone; empty means the session's own model.
+  generate?: { models: Array<{ name: string; route: string }> };
   web?: { search: boolean; fetch: boolean };
   timers: boolean;
 }
@@ -162,6 +164,18 @@ export function sessionResources(
     };
   }
 
+  if ("generate" in features) {
+    result.generate = {
+      models: list(record(features.generate).models).map((entry) => {
+        const model = record(entry.model);
+        return {
+          name: text(entry.name) ?? "",
+          route: [text(model.model), text(model.providerId)].filter(Boolean).join(" · "),
+        };
+      }),
+    };
+  }
+
   if ("web" in features) {
     const feature = record(features.web);
     result.web = { search: "search" in feature, fetch: "fetch" in feature };
@@ -171,5 +185,5 @@ export function sessionResources(
 }
 
 export function hasResources(resources: SessionResources): boolean {
-  return Boolean(resources.environments || resources.files || resources.mcp || resources.agents || resources.web || resources.timers);
+  return Boolean(resources.environments || resources.files || resources.mcp || resources.agents || resources.generate || resources.web || resources.timers);
 }

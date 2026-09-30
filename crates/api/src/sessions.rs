@@ -393,6 +393,8 @@ pub struct FeaturesConfig {
     pub environments: Option<EnvironmentsFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<GenerateFeature>,
 }
 
 /// Grants the session virtual filesystem. Workspace attachments declare the
@@ -552,6 +554,43 @@ fn default_subagent_deadline_ms() -> u64 {
 pub struct TimersFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
+}
+
+/// Grants `model_generate`: one standalone model call per tool call. The
+/// call supplies instructions and input, optionally validated against an
+/// input schema, and may require a JSON result matching an output schema.
+/// The generation has no conversation state and no tools. The model list is
+/// the authority: the model picks an entry by `name`, the first entry is the
+/// default, and any other name fails the call. An empty list lets the tool
+/// use only the calling turn's model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenerateFeature {
+    #[serde(default = "default_feature_version")]
+    pub version: u32,
+    /// Models a call may select, at most 32, with unique names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<GenerateModelOption>,
+}
+
+/// One model the generation tool may select.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenerateModelOption {
+    /// Name the model uses to select this entry: 1–64 ASCII letters, digits,
+    /// `-`, `_`, or `.`.
+    pub name: String,
+    /// Shown to the model to help it choose, at most 1024 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Provider route, resolved and authenticated like a session model.
+    pub model: ModelConfig,
+    /// Provider-native reasoning effort for calls using this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Output-token cap for calls using this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Grants session environments. The `environments` list is the allowed set:
