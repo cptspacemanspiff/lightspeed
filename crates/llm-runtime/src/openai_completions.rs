@@ -949,6 +949,34 @@ fn materialize_reasoning_effort(
             }
             Ok((effort != "none").then(|| effort.to_owned()))
         }
+        // OpenRouter translates `reasoning.effort` into each upstream model's
+        // vocabulary and accepts `max` there; its OpenAI-style top-level
+        // `reasoning_effort` does neither. Other `reasoning` fields supplied
+        // through provider params are kept.
+        CompletionDialect::OpenRouter => {
+            let reasoning = extra
+                .entry("reasoning".to_owned())
+                .or_insert_with(|| json!({}));
+            let Some(reasoning) = reasoning.as_object_mut() else {
+                return Err(LlmAdapterError::InvalidProviderRequest {
+                    message: "OpenRouter reasoning provider param must be an object".to_owned(),
+                });
+            };
+            match reasoning.get("effort") {
+                Some(existing) if existing != effort => {
+                    return Err(LlmAdapterError::InvalidProviderRequest {
+                        message:
+                            "OpenRouter reasoning provider param conflicts with reasoning_effort"
+                                .to_owned(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    reasoning.insert("effort".to_owned(), json!(effort));
+                }
+            }
+            Ok(None)
+        }
         CompletionDialect::OpenAi
             if model.to_ascii_lowercase().starts_with("gpt-5.5")
                 && matches!(effort, "minimal" | "max") =>
@@ -1843,6 +1871,51 @@ mod tests {
             error,
             LlmAdapterError::InvalidProviderRequest { .. }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn openrouter_sends_effort_in_its_reasoning_object() {
+        let blobs = InMemoryBlobStore::new();
+        let mut plain = request(Vec::new());
+        plain.model = model_for("openrouter", "anthropic/claude-opus-4.7");
+        plain.reasoning_effort = Some("max".to_owned());
+        let value = serde_json::to_value(
+            materialize_create_request(&blobs, &plain)
+                .await
+                .expect("OpenRouter request"),
+        )
+        .expect("json");
+        assert!(value.get("reasoning_effort").is_none());
+        assert_eq!(value["reasoning"], json!({"effort":"max"}));
+
+        let mut merged = request(Vec::new());
+        merged.model = model_for("openrouter", "google/gemini-3-pro");
+        merged.reasoning_effort = Some("high".to_owned());
+        merged.params = Some(ProviderParams::new(
+            ProviderApiKind::OpenAiCompletions,
+            json!({"extra":{"reasoning":{"exclude":true}}}),
+        ));
+        let merged = materialize_create_request(&blobs, &merged)
+            .await
+            .expect("merged OpenRouter request");
+        assert_eq!(
+            merged.extra["reasoning"],
+            json!({"effort":"high","exclude":true})
+        );
+
+        for reasoning in [json!({"effort":"low"}), json!("high")] {
+            let mut conflicting = request(Vec::new());
+            conflicting.model = model_for("openrouter", "openai/gpt-5.5");
+            conflicting.reasoning_effort = Some("high".to_owned());
+            conflicting.params = Some(ProviderParams::new(
+                ProviderApiKind::OpenAiCompletions,
+                json!({"extra":{"reasoning":reasoning}}),
+            ));
+            assert!(matches!(
+                materialize_create_request(&blobs, &conflicting).await,
+                Err(LlmAdapterError::InvalidProviderRequest { .. })
+            ));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

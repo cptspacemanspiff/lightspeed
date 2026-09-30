@@ -148,6 +148,31 @@ describe("OpenAI processing tier config", () => {
     expect(reasoning).toBeGreaterThan(capabilities);
   });
 
+  it("suggests the API kind's effort tiers when discovery reports none", () => {
+    const model = {
+      providerId: "openrouter",
+      apiKind: "openai:completions",
+      model: "anthropic/claude-opus-4.7",
+      displayName: "anthropic/claude-opus-4.7",
+      capabilities: {},
+    } satisfies ModelOption;
+    const discovered = renderToString(createElement(SessionConfigEditor, {
+      value: { model },
+      onChange: () => {},
+      models: [model],
+    }));
+    const manual = renderToString(createElement(SessionConfigEditor, {
+      value: { model: { providerId: "openrouter", apiKind: "openai:completions", model: "unlisted/model" } },
+      onChange: () => {},
+      models: [],
+    }));
+
+    for (const html of [discovered, manual]) {
+      expect(html).toContain('<option value="max">');
+      expect(html).toContain("Choose a known tier");
+    }
+  });
+
   it("persists the tier in generation defaults for built-in OpenAI", () => {
     expect(normalizeSessionConfig({
       model: {

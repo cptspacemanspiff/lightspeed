@@ -1,4 +1,4 @@
-import { AGENT_MODEL_API_KINDS } from "@lightspeed/platform-shared";
+import { AGENT_MODEL_API_KINDS, reasoningEffortTiers } from "@lightspeed/platform-shared";
 import { useEffect, useId, useState, type ReactNode } from "react";
 import type { WorkspaceAttachmentDraft } from "@/api";
 import {
@@ -840,9 +840,16 @@ function ModelFields({ config, models, defaultModelLabel, manualModel, onManualM
     });
   const generation = record(config.generation);
   const reasoningEffort = string(generation.reasoningEffort);
+  // Discovery reports no tiers for some providers, such as OpenRouter; the
+  // route's API kind still bounds which tiers the runtime accepts.
+  const discoveredEfforts = currentModel?.capabilities.reasoningEfforts ?? [];
+  const routeApiKind = currentModel?.apiKind ?? pinnedApiKind ?? string(model.apiKind);
+  const knownEfforts = discoveredEfforts.length
+    ? discoveredEfforts
+    : routeApiKind ? reasoningEffortTiers(routeApiKind) : [];
   const reasoningOptions = [
     ...new Set([
-      ...(currentModel?.capabilities.reasoningEfforts ?? []),
+      ...knownEfforts,
       ...(reasoningEffort ? [reasoningEffort] : []),
     ]),
   ];
@@ -963,7 +970,7 @@ function ModelFields({ config, models, defaultModelLabel, manualModel, onManualM
             </datalist>
           )}
           <FieldDescription className="text-xs">
-            {currentModel?.capabilities.reasoningEfforts?.length
+            {knownEfforts.length
               ? "Choose a known tier or enter any provider-supported value."
               : "No tiers are known. Enter a provider-supported value, or leave unset for its default."}
           </FieldDescription>
