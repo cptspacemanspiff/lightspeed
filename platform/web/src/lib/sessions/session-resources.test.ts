@@ -70,3 +70,24 @@ it("uses ids until catalogs load and reports nothing for an empty config", () =>
 it("treats sleeping machines as idle because tools wake them", () => {
   expect(["ready", "paused", "booting", "failed"].map(environmentTone)).toEqual(["ok", "idle", "busy", "problem"]);
 });
+
+it("lists generation models with the default first", () => {
+  const resources = sessionResources({
+    features: {
+      generate: {
+        models: [
+          { name: "grader", model: { providerId: "openai", apiKind: "openai:responses", model: "gpt-small" } },
+          { name: "vision", model: { providerId: "anthropic", apiKind: "anthropic:messages", model: "claude" } },
+        ],
+      },
+    },
+  }, null);
+  expect(resources.generate).toEqual({
+    models: [
+      { name: "grader", route: "gpt-small · openai" },
+      { name: "vision", route: "claude · anthropic" },
+    ],
+  });
+  expect(hasResources(resources)).toBe(true);
+  expect(sessionResources({ features: { generate: {} } }, null).generate).toEqual({ models: [] });
+});

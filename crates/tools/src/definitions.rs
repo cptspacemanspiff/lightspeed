@@ -12,6 +12,9 @@ use crate::{
     concurrency::{ConcurrencyToolsetConfig, concurrency_tool_definitions},
     environment::control::environment_control_tool_definitions,
     error::{ToolError, ToolResult},
+    model_generate::{
+        GenerateModelChoice, MODEL_GENERATE_LOGICAL_ID, model_generate_tool_definition,
+    },
     runtime::{FunctionDefinition, ToolBinding, ToolTarget},
     subagents::{SubagentToolKind, subagent_tool_definition},
     toolset::BuiltinToolPresentation,
@@ -39,6 +42,9 @@ pub struct BuiltinSettings {
     pub blocked_domains: Vec<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub mcp_server_index: String,
+    /// Granted `model_generate` models, enumerated in its advertised schema.
+    #[serde(skip_serializing_if = "is_default")]
+    pub generate_models: Vec<GenerateModelChoice>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -150,6 +156,7 @@ pub fn resolve(
         "web.fetch" => web_fetch_definition(),
         "subagent.run" => subagent_tool_definition(SubagentToolKind::Run)?,
         "subagent.spawn" => subagent_tool_definition(SubagentToolKind::Spawn)?,
+        MODEL_GENERATE_LOGICAL_ID => model_generate_tool_definition(&settings.generate_models),
         "mcp.find_tools" => FunctionDefinition::new(
             "mcp_find_tools",
             format!(

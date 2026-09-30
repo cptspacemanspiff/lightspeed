@@ -54,6 +54,25 @@ fn registered(case: &str, api: &ProviderApiKind) -> Vec<ToolSpec> {
             );
             registered.tools.insert(tool.name.clone(), tool);
         }
+        let tool = tools::definitions::register(
+            tools::model_generate::MODEL_GENERATE_LOGICAL_ID,
+            tools::definitions::BuiltinSettings {
+                generate_models: vec![
+                    tools::model_generate::GenerateModelChoice {
+                        name: "grader".into(),
+                        description: Some("Cheap classifier".into()),
+                    },
+                    tools::model_generate::GenerateModelChoice {
+                        name: "vision".into(),
+                        description: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        registered.tools.insert(tool.name.clone(), tool);
         for operation in [
             BuiltinToolOperation::JobSubmit,
             BuiltinToolOperation::JobRun,

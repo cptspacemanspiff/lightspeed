@@ -1194,6 +1194,109 @@ fn features_default_off_for_sessions() {
     assert!(config.features.vfs.is_none());
 }
 
+fn generate_option(name: &str, api_kind: &str) -> api::GenerateModelOption {
+    api::GenerateModelOption {
+        name: name.to_owned(),
+        description: Some("Cheap classifier".to_owned()),
+        model: api::ModelConfig {
+            provider_id: "anthropic".to_owned(),
+            api_kind: api_kind.to_owned(),
+            model: "small".to_owned(),
+        },
+        reasoning_effort: Some("low".to_owned()),
+        max_output_tokens: Some(800),
+    }
+}
+
+fn generate_config(models: Vec<api::GenerateModelOption>) -> api::SessionConfig {
+    api::SessionConfig {
+        features: Some(api::FeaturesConfig {
+            generate: Some(api::GenerateFeature {
+                version: api::CURRENT_FEATURE_VERSION,
+                models,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn generate_feature_maps_models_and_rejects_non_generation_protocols() {
+    let config = engine_session_config_from_api(
+        generate_config(vec![generate_option("grader", "anthropic:messages")]),
+        openai_model(),
+    )
+    .expect("map generate feature");
+    let generate = config.features.generate.expect("generate grant");
+    assert_eq!(generate.models.len(), 1);
+    let entry = &generate.models[0];
+    assert_eq!(entry.name, "grader");
+    assert_eq!(entry.model.api_kind, ProviderApiKind::AnthropicMessages);
+    assert_eq!(entry.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(entry.max_output_tokens, Some(800));
+
+    let error = engine_session_config_from_api(
+        generate_config(vec![generate_option(
+            "transcriber",
+            "openai:audio-transcriptions",
+        )]),
+        openai_model(),
+    )
+    .expect_err("transcription routes cannot generate");
+    assert_eq!(error.kind, AgentApiErrorKind::InvalidRequest);
+    assert!(
+        error.message.contains("\"transcriber\""),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn generate_models_are_published_into_the_tool_schema_only() {
+    let mut toolset = tools::toolset::RegisteredToolset::default();
+    let tool = tools::definitions::register(
+        tools::model_generate::MODEL_GENERATE_LOGICAL_ID,
+        Default::default(),
+        engine::ToolParallelism::ParallelSafe,
+        Default::default(),
+    );
+    toolset.tools.insert(tool.name.clone(), tool.clone());
+    let feature = engine::GenerateFeature {
+        models: vec![engine::GenerateModelConfig {
+            name: "grader".to_owned(),
+            description: Some("Cheap classifier".to_owned()),
+            model: openai_model(),
+            reasoning_effort: None,
+            max_output_tokens: None,
+        }],
+        ..Default::default()
+    };
+    session_preparation::publish_generate_models(&mut toolset, &feature).expect("publish models");
+
+    let engine::ToolKind::Builtin(spec) = &toolset.tools[&tool.name].kind else {
+        panic!("model generation is a built-in tool");
+    };
+    let resolved = tools::definitions::resolve(
+        &tool.name,
+        spec,
+        &tools::runtime::ToolTarget::from(&openai_model()),
+    )
+    .expect("resolve published definition");
+    let tools::definitions::Definition::Function(function) = &resolved[0].definition else {
+        panic!("model generation is a function tool");
+    };
+    assert_eq!(
+        function.input_schema["properties"]["model"]["enum"],
+        serde_json::json!(["grader"])
+    );
+    let published = serde_json::to_string(&spec.settings).expect("settings");
+    assert!(
+        !published.contains("gpt-5.5") && !published.contains("openai"),
+        "provider routes never reach the model-facing settings: {published}"
+    );
+}
+
 fn environments_feature(attachments: Vec<api::EnvironmentAttachment>) -> api::EnvironmentsFeature {
     api::EnvironmentsFeature {
         version: api::CURRENT_FEATURE_VERSION,

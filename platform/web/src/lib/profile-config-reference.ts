@@ -41,6 +41,25 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       },
       "version": 0,
     },
+    // Grants \`model_generate\`: one standalone model call per tool call. The call supplies instructions and input, optionally validated against an input schema, and may require a JSON result matching an output schema. The generation has no conversation state and no tools. The model list is the authority: the model picks an entry by \`name\`, the first entry is the default, and any other name fails the call. An empty list lets the tool use only the calling turn's model.
+    "generate": {
+      // Models a call may select, at most 32, with unique names.
+      "models": [{
+        // Shown to the model to help it choose, at most 1024 bytes.
+        "description": "string",
+        // Output-token cap for calls using this entry.
+        "maxOutputTokens": 0,
+        // Provider route, resolved and authenticated like a session model.
+        // (required when this object is present)
+        "model": "…",
+        // Name the model uses to select this entry: 1–64 ASCII letters, digits, \`-\`, \`_\`, or \`.\`.
+        // (required when this object is present)
+        "name": "string",
+        // Provider-native reasoning effort for calls using this entry.
+        "reasoningEffort": "string",
+      }],
+      "version": 0,
+    },
     // Grants remote MCP tools by declaring attached servers from the universe MCP catalog. Server ids must be unique; an empty list grants no MCP tools.
     "mcp": {
       "servers": [{

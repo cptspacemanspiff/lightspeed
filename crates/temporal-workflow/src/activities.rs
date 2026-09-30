@@ -12,14 +12,14 @@ use crate::{
     EnvironmentJobPollActivityRequest, EnvironmentJobPollActivityResult,
     EnvironmentJobPrepareWorkflowToolRequest, EnvironmentJobStartActivityRequest,
     EnvironmentJobStartActivityResult, JoinedContextPreparationRequest, LlmGenerateActivityRequest,
-    PutBlobRequest, ReadBlobRequest, ReadBlobResult, RuntimeProjectionRefreshActivityRequest,
-    RuntimeProjectionRefreshActivityResult, SubagentCloseActivityRequest,
-    SubagentPrepareActivityRequest, SubagentPrepareActivityResult, SubagentResolveActivityRequest,
-    ToolInvokeBatchActivityRequest, ToolInvokeCallActivityRequest, ToolInvokeCallActivityResult,
-    ToolPreparePromiseControlsActivityRequest, WorkflowToolExecutionCancelRequest,
-    WorkflowToolExecutionCheckRequest, WorkflowToolReplyValidationRequest,
-    WorkflowToolReplyValidationResult, WorkflowToolStartActivityRequest,
-    WorkflowToolStartActivityResult,
+    ModelGenerateActivityRequest, PutBlobRequest, ReadBlobRequest, ReadBlobResult,
+    RuntimeProjectionRefreshActivityRequest, RuntimeProjectionRefreshActivityResult,
+    SubagentCloseActivityRequest, SubagentPrepareActivityRequest, SubagentPrepareActivityResult,
+    SubagentResolveActivityRequest, ToolInvokeBatchActivityRequest, ToolInvokeCallActivityRequest,
+    ToolInvokeCallActivityResult, ToolPreparePromiseControlsActivityRequest,
+    WorkflowToolExecutionCancelRequest, WorkflowToolExecutionCheckRequest,
+    WorkflowToolReplyValidationRequest, WorkflowToolReplyValidationResult,
+    WorkflowToolStartActivityRequest, WorkflowToolStartActivityResult,
 };
 
 pub const ACTIVITY_CREATE_OR_LOAD_SESSION: &str = "WorkflowActivities::create_or_load_session";
@@ -53,6 +53,7 @@ pub const ACTIVITY_AWAIT_ENVIRONMENT_READY: &str = "WorkflowActivities::await_en
 pub const ACTIVITY_SUBAGENT_PREPARE: &str = "WorkflowActivities::subagent_prepare";
 pub const ACTIVITY_SUBAGENT_RESOLVE: &str = "WorkflowActivities::subagent_resolve";
 pub const ACTIVITY_SUBAGENT_CLOSE: &str = "WorkflowActivities::subagent_close";
+pub const ACTIVITY_MODEL_GENERATE: &str = "WorkflowActivities::model_generate";
 
 pub struct WorkflowActivities;
 
@@ -299,6 +300,17 @@ impl WorkflowActivities {
         _ctx: ActivityContext,
         _request: SubagentCloseActivityRequest,
     ) -> Result<(), ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    /// Run one standalone generation from the pinned model selection and
+    /// return the caller's `reply` resolution. Provider transients fail the
+    /// attempt for Temporal to retry; every other outcome is a resolution.
+    #[activity(name = ACTIVITY_MODEL_GENERATE)]
+    pub async fn model_generate(
+        _ctx: ActivityContext,
+        _request: ModelGenerateActivityRequest,
+    ) -> Result<engine::PromiseResolution, ActivityError> {
         unimplemented!("workflow activity definition only")
     }
 }

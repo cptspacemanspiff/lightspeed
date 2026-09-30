@@ -217,6 +217,58 @@ impl SessionPreparationService {
         Ok(declarations)
     }
 
+    pub(crate) async fn core_model_generate_workflow_tool_declaration(
+        &self,
+    ) -> Result<WorkflowToolDeclaration, AgentApiError> {
+        use tools::model_generate::{
+            MODEL_GENERATE_DEADLINE_AFTER_MS, MODEL_GENERATE_LOGICAL_ID,
+            MODEL_GENERATE_WORKFLOW_SEMANTIC_TYPE, MODEL_GENERATE_WORKFLOW_TOOL_ID,
+            MODEL_GENERATE_WORKFLOW_TYPE,
+        };
+        let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
+            workflow_type: MODEL_GENERATE_WORKFLOW_TYPE.to_owned(),
+            task_queue: self.task_queue.clone(),
+        })
+        .map_err(|error| {
+            AgentApiError::internal(format!("encode core model generation recipe: {error}"))
+        })?;
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe_bytes);
+        let recipe_ref = self
+            .store
+            .put_bytes(recipe_bytes)
+            .await
+            .map_err(map_blob_store_error)?;
+        // The binding stays independent of the grant: the granted models are
+        // published into the session toolset at each preparation and pinned
+        // per call, so the immutable binding never changes with the profile.
+        let tool = tools::definitions::register(
+            MODEL_GENERATE_LOGICAL_ID,
+            Default::default(),
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        Ok(WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(MODEL_GENERATE_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: MODEL_GENERATE_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool,
+            },
+            WorkflowToolTarget::Start {
+                start: WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: MODEL_GENERATE_DEADLINE_AFTER_MS,
+            },
+        ))
+    }
+
     pub(crate) async fn prepare_toolset(
         &self,
         source: SessionToolsetSource,
@@ -229,6 +281,7 @@ impl SessionPreparationService {
             .and_then(|environments| environments.tool_access())
             .is_some_and(|access| access.allows_jobs());
         let subagents = session_config.features.subagents.is_some();
+        let generate = session_config.features.generate.as_ref();
         let mut declarations = Vec::new();
         if jobs {
             declarations.extend(
@@ -238,6 +291,9 @@ impl SessionPreparationService {
         }
         if subagents {
             declarations.extend(self.core_subagent_workflow_tool_declarations().await?);
+        }
+        if generate.is_some() {
+            declarations.push(self.core_model_generate_workflow_tool_declaration().await?);
         }
         for declaration in &declarations {
             let id = &declaration.definition.tool_id;
@@ -279,6 +335,7 @@ impl SessionPreparationService {
             .filter(|binding| {
                 (jobs || !is_core_environment_job_binding(binding))
                     && (subagents || !is_core_subagent_binding(binding))
+                    && (generate.is_some() || !is_core_model_generate_binding(binding))
             })
             .collect::<Vec<_>>();
         let mut config = Self::session_toolset_config(
@@ -292,6 +349,9 @@ impl SessionPreparationService {
         register_workflow_tools(&mut toolset, materialized.iter().copied()).map_err(|e| {
             AgentApiError::invalid_request(format!("materialize workflow tools: {e}"))
         })?;
+        if let Some(generate) = generate {
+            publish_generate_models(&mut toolset, generate)?;
+        }
         let desired_mcp = self.desired_mcp_tools(&session_config.features).await?;
         if let Some(name) = toolset
             .tools
@@ -450,4 +510,38 @@ impl GatewayAgentApi {
             task_queue: self.task_queue.clone(),
         }
     }
+}
+
+/// Advertise the granted generation models in `model_generate`'s schema.
+/// Only names and descriptions are published; routes stay in the grant,
+/// which the runtime pins per call.
+pub(super) fn publish_generate_models(
+    toolset: &mut tools::toolset::RegisteredToolset,
+    generate: &engine::GenerateFeature,
+) -> Result<(), AgentApiError> {
+    let name = engine::ToolName::new(tools::model_generate::MODEL_GENERATE_LOGICAL_ID);
+    let Some(tool) = toolset.tools.get_mut(&name) else {
+        return Ok(());
+    };
+    let engine::ToolKind::Builtin(spec) = &mut tool.kind else {
+        return Err(AgentApiError::internal(
+            "model generation tool is not a built-in definition",
+        ));
+    };
+    let mut settings: tools::definitions::BuiltinSettings = if spec.settings.is_null() {
+        Default::default()
+    } else {
+        serde_json::from_value(spec.settings.clone()).map_err(|error| {
+            AgentApiError::internal(format!("decode model generation settings: {error}"))
+        })?
+    };
+    settings.generate_models = generate
+        .models
+        .iter()
+        .map(tools::model_generate::GenerateModelChoice::from)
+        .collect();
+    spec.settings = serde_json::to_value(settings).map_err(|error| {
+        AgentApiError::internal(format!("encode model generation settings: {error}"))
+    })?;
+    Ok(())
 }

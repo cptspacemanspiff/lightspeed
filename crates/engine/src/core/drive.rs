@@ -902,6 +902,17 @@ pub fn next_tool_batch_request(
             .config
             .as_ref()
             .and_then(|config| config.features.subagents.clone()),
+        generate_policy: state.lifecycle.config.as_ref().and_then(|config| {
+            let feature = config.features.generate.clone()?;
+            Some(crate::GeneratePolicy {
+                feature,
+                turn_model: active_run
+                    .run_config
+                    .model_override
+                    .clone()
+                    .unwrap_or_else(|| config.model.clone()),
+            })
+        }),
         calls,
     }))
 }
@@ -2547,6 +2558,8 @@ mod tests {
         };
         session_config.features.environments = Some(environments.clone());
         session_config.features.subagents = Some(test_subagents_feature());
+        session_config.features.generate = Some(crate::GenerateFeature::default());
+        let session_model = session_config.model.clone();
         open_session_with_config(&mut drive, session_config);
         let set_active = drive
             .admit_command(
@@ -2568,6 +2581,14 @@ mod tests {
         );
         assert_eq!(request.environment_policy, Some(environments));
         assert_eq!(request.subagents_policy, Some(test_subagents_feature()));
+        assert_eq!(
+            request.generate_policy,
+            Some(crate::GeneratePolicy {
+                feature: crate::GenerateFeature::default(),
+                turn_model: session_model,
+            }),
+            "the generate grant is pinned with the turn's effective model"
+        );
     }
 
     #[test]
@@ -7889,6 +7910,7 @@ mod tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
+            generate_policy: None,
             calls: vec![
                 ToolInvocationRequest {
                     builtin: None,

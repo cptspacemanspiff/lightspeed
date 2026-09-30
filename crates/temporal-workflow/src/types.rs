@@ -569,6 +569,30 @@ pub struct SubagentExecutionSnapshot {
     pub resolution: Option<engine::PromiseResolution>,
 }
 
+/// Model generation: one standalone model call supervised by
+/// `ModelGenerateWorkflow`, started on call by the calling session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelGenerateActivityRequest {
+    pub start: WorkflowToolStartArgs,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelGenerateExecutionPhase {
+    #[default]
+    Starting,
+    Generating,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelGenerateExecutionSnapshot {
+    pub phase: ModelGenerateExecutionPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<engine::PromiseResolution>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentJobPrepareWorkflowToolRequest {
     pub start: WorkflowToolStartArgs,

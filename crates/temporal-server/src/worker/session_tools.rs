@@ -700,6 +700,63 @@ impl SessionTools {
                     .await
                     .map_err(map_blob_error)?,
             )
+        } else if tools::model_generate::is_model_generate_binding(
+            binding.definition.tool_id.as_str(),
+            binding.definition.semantic_type.as_str(),
+        ) {
+            // Model generation admission: the grant on the batch request is
+            // the authority. Select the model from its list, or the turn's
+            // model when it lists none, and pin the route for the execution
+            // so the model-facing arguments never carry a provider route.
+            let Some(policy) = request.generate_policy.as_ref() else {
+                return failed_result(
+                    self.blobs.as_ref(),
+                    call.call_id.clone(),
+                    format!(
+                        "{} requires the generate grant",
+                        binding.definition.tool.name
+                    ),
+                )
+                .await;
+            };
+            let args: tools::model_generate::ModelGenerateArgs =
+                match self.read_tool_args(call).await {
+                    Ok(args) => args,
+                    Err(error) => {
+                        return failed_result(
+                            self.blobs.as_ref(),
+                            call.call_id.clone(),
+                            error.to_string(),
+                        )
+                        .await;
+                    }
+                };
+            let selection = match args
+                .validate()
+                .and_then(|()| tools::model_generate::select_model(policy, args.model.as_deref()))
+            {
+                Ok(selection) => selection,
+                Err(error) => {
+                    return failed_result(
+                        self.blobs.as_ref(),
+                        call.call_id.clone(),
+                        error.to_string(),
+                    )
+                    .await;
+                }
+            };
+            let context = tools::model_generate::ModelGenerateExecutionContextV1 {
+                version: tools::model_generate::MODEL_GENERATE_EXECUTION_CONTEXT_VERSION,
+                session_id: request.session_id.as_str().to_owned(),
+                run_id: request.run_id.as_u64(),
+                selection,
+            };
+            Some(
+                self.blobs
+                    .put_bytes(serde_json::to_vec(&context).map_err(io_error)?)
+                    .await
+                    .map_err(map_blob_error)?,
+            )
         } else {
             None
         };
@@ -2283,6 +2340,7 @@ mod tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
+            generate_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call_self"),
@@ -2596,6 +2654,7 @@ mod tests {
                     active_environment_id: None,
                     environment_policy: Some(test_environment_policy(&[])),
                     subagents_policy: None,
+                    generate_policy: None,
                     calls,
                 })
                 .await
@@ -2759,6 +2818,7 @@ mod tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
+            generate_policy: None,
             workspace_attachments: Vec::new(),
             calls,
         };
@@ -2927,6 +2987,7 @@ mod tests {
             active_environment_id: Some(EnvironmentId::new("environment-original")),
             environment_policy: Some(test_environment_policy(&["environment-original"])),
             subagents_policy: None,
+            generate_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![call.clone()],
         };
@@ -2982,6 +3043,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: Some(test_environment_policy(&[])),
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![call.clone()],
             })
@@ -3076,6 +3138,7 @@ mod tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: policy,
+            generate_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
@@ -3242,6 +3305,258 @@ mod tests {
             }
         }
         assert_eq!(retried, first);
+    }
+
+    /// The `model_generate` system binding as the gateway admits it.
+    async fn model_generate_binding(blobs: &InMemoryBlobStore) -> engine::WorkflowToolBinding {
+        let tool = tools::definitions::register(
+            tools::model_generate::MODEL_GENERATE_LOGICAL_ID,
+            Default::default(),
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        let recipe = b"test model generation recipe".to_vec();
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe);
+        let recipe_ref = blobs.put_bytes(recipe).await.expect("put recipe");
+        engine::WorkflowToolBinding::admit(
+            uuid::Uuid::from_u128(1),
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(
+                    tools::model_generate::MODEL_GENERATE_WORKFLOW_TOOL_ID,
+                ),
+                revision: 1,
+                semantic_type: tools::model_generate::MODEL_GENERATE_WORKFLOW_SEMANTIC_TYPE
+                    .to_owned(),
+                tool,
+            },
+            engine::WorkflowToolTarget::Start {
+                start: engine::WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            engine::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: tools::model_generate::MODEL_GENERATE_DEADLINE_AFTER_MS,
+            },
+        )
+        .expect("admit model_generate binding")
+    }
+
+    fn generate_model(name: &str) -> engine::GenerateModelConfig {
+        engine::GenerateModelConfig {
+            name: name.to_owned(),
+            description: None,
+            model: engine::ModelSelection {
+                api_kind: ProviderApiKind::OpenAiResponses,
+                provider_id: "openai".into(),
+                model: format!("{name}-model"),
+            },
+            reasoning_effort: Some("low".into()),
+            max_output_tokens: None,
+        }
+    }
+
+    fn generate_policy(models: Vec<engine::GenerateModelConfig>) -> engine::GeneratePolicy {
+        engine::GeneratePolicy {
+            feature: engine::GenerateFeature {
+                models,
+                ..engine::GenerateFeature::default()
+            },
+            turn_model: test_builtin_runtime().model,
+        }
+    }
+
+    /// A `model_generate` call as the turn advertised it: the published
+    /// settings enumerate the granted models.
+    async fn model_generate_batch(
+        blobs: &InMemoryBlobStore,
+        binding: &engine::WorkflowToolBinding,
+        arguments: serde_json::Value,
+        policy: Option<engine::GeneratePolicy>,
+    ) -> ToolInvocationBatchRequest {
+        let arguments_ref = blobs
+            .put_bytes(serde_json::to_vec(&arguments).expect("encode arguments"))
+            .await
+            .expect("put generation arguments");
+        let choices = policy
+            .as_ref()
+            .map(|policy| {
+                policy
+                    .feature
+                    .models
+                    .iter()
+                    .map(tools::model_generate::GenerateModelChoice::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let settings = tools::definitions::BuiltinSettings {
+            generate_models: choices,
+            ..Default::default()
+        };
+        ToolInvocationBatchRequest {
+            vfs_working_directory: None,
+            session_id: SessionId::new("session-caller"),
+            run_id: RunId::new(4),
+            turn_id: TurnId::new(2),
+            batch_id: ToolBatchId::new(1),
+            promise_id_base: 1,
+            active_environment_id: None,
+            environment_policy: None,
+            subagents_policy: None,
+            generate_policy: policy,
+            workspace_attachments: Vec::new(),
+            calls: vec![engine::ToolInvocationRequest {
+                builtin: Some(engine::BuiltinToolCallRuntime {
+                    spec: engine::BuiltinToolSpec {
+                        settings: serde_json::to_value(settings).expect("settings"),
+                    },
+                    ..test_builtin_runtime()
+                }),
+                call_id: ToolCallId::new("call-generate"),
+                tool_id: Some(binding.definition.tool.name.clone()),
+                tool_name: ToolName::new(tools::model_generate::MODEL_GENERATE_TOOL_NAME),
+                arguments_ref,
+                workflow_tool: Some(engine::WorkflowToolCallRuntime::v1(binding.clone(), 0)),
+                promise_control: None,
+                remote_mcp: None,
+            }],
+        }
+    }
+
+    async fn pinned_generation_context(
+        blobs: &InMemoryBlobStore,
+        result: &ToolInvocationResult,
+    ) -> tools::model_generate::ModelGenerateExecutionContextV1 {
+        assert_eq!(result.status, ToolCallStatus::Succeeded);
+        let context_ref = BlobRef::parse(
+            result.effects[0]
+                .data
+                .get("execution_context_ref")
+                .expect("execution context ref")
+                .clone(),
+        )
+        .expect("valid execution context ref");
+        serde_json::from_slice(
+            &blobs
+                .read_bytes(&context_ref)
+                .await
+                .expect("read execution context"),
+        )
+        .expect("decode execution context")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_generate_requires_the_generate_grant() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = model_generate_binding(&blobs).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let outcome = tools
+            .invoke_batch(
+                model_generate_batch(&blobs, &binding, serde_json::json!({"input": "hi"}), None)
+                    .await,
+            )
+            .await
+            .expect("invoke model_generate")
+            .completed_result()
+            .expect("completed batch");
+        let error = failure_text(&blobs, &outcome.results[0]).await;
+        assert!(error.contains("requires the generate grant"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_generate_admits_only_granted_models_and_pins_the_route() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = model_generate_binding(&blobs).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let policy = generate_policy(vec![generate_model("grader"), generate_model("vision")]);
+
+        let ungranted = tools
+            .invoke_batch(
+                model_generate_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"model": "large", "input": "hi"}),
+                    Some(policy.clone()),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke ungranted model")
+            .completed_result()
+            .expect("completed batch");
+        let error = failure_text(&blobs, &ungranted.results[0]).await;
+        assert!(
+            error.contains("\"large\" is not granted") && error.contains("grader, vision"),
+            "{error}"
+        );
+
+        let chosen = tools
+            .invoke_batch(
+                model_generate_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"model": "vision", "input": "hi"}),
+                    Some(policy.clone()),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke granted model")
+            .completed_result()
+            .expect("completed batch");
+        let context = pinned_generation_context(&blobs, &chosen.results[0]).await;
+        assert_eq!(context.session_id, "session-caller");
+        assert_eq!(context.run_id, 4);
+        assert_eq!(context.selection.name.as_deref(), Some("vision"));
+        assert_eq!(context.selection.model.model, "vision-model");
+        assert_eq!(context.selection.reasoning_effort.as_deref(), Some("low"));
+
+        let defaulted = tools
+            .invoke_batch(
+                model_generate_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"input": "hi"}),
+                    Some(policy),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke default model")
+            .completed_result()
+            .expect("completed batch");
+        let context = pinned_generation_context(&blobs, &defaulted.results[0]).await;
+        assert_eq!(context.selection.name.as_deref(), Some("grader"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_generate_without_listed_models_uses_the_turn_model() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = model_generate_binding(&blobs).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let outcome = tools
+            .invoke_batch(
+                model_generate_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({
+                        "input": {"claim": "x"},
+                        "output_schema": {"type": "object"}
+                    }),
+                    Some(generate_policy(Vec::new())),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke model_generate")
+            .completed_result()
+            .expect("completed batch");
+        let context = pinned_generation_context(&blobs, &outcome.results[0]).await;
+        assert_eq!(context.selection.name, None);
+        assert_eq!(context.selection.model, test_builtin_runtime().model);
     }
 
     #[derive(Default)]
@@ -3864,6 +4179,7 @@ mod tests {
                 "environment-allowed-2",
             ])),
             subagents_policy: None,
+            generate_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-environment-list"),
@@ -3936,6 +4252,7 @@ mod tests {
             active_environment_id: Some(EnvironmentId::new("environment-pending")),
             environment_policy: Some(test_environment_policy(&["environment-pending"])),
             subagents_policy: None,
+            generate_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-read-file"),
@@ -4065,6 +4382,7 @@ mod tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
+            generate_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-await"),
@@ -4120,6 +4438,7 @@ mod tests {
                 "environment-allowed-2",
             ])),
             subagents_policy: None,
+            generate_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
@@ -4243,6 +4562,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments,
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4288,6 +4608,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments,
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(engine::BuiltinToolCallRuntime {
@@ -4346,6 +4667,7 @@ mod tests {
                 active_environment_id: Some(EnvironmentId::new("test")),
                 environment_policy: Some(test_environment_policy(&["test"])),
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments,
                 calls: vec![
                     engine::ToolInvocationRequest {
@@ -4482,6 +4804,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![
                     engine::ToolInvocationRequest {
@@ -4587,6 +4910,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4638,6 +4962,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4694,6 +5019,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4768,6 +5094,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![sleep_call("call_sleep_a"), sleep_call("call_sleep_b")],
             })
@@ -4853,6 +5180,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4899,6 +5227,7 @@ mod tests {
                 active_environment_id: None,
                 environment_policy: None,
                 subagents_policy: None,
+                generate_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),

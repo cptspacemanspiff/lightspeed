@@ -10420,6 +10420,16 @@
               }
             ]
           },
+          "generate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerateFeature"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "mcp": {
             "anyOf": [
               {
@@ -10471,6 +10481,72 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "GenerateFeature": {
+        "additionalProperties": false,
+        "description": "Grants `model_generate`: one standalone model call per tool call. The\ncall supplies instructions and input, optionally validated against an\ninput schema, and may require a JSON result matching an output schema.\nThe generation has no conversation state and no tools. The model list is\nthe authority: the model picks an entry by `name`, the first entry is the\ndefault, and any other name fails the call. An empty list lets the tool\nuse only the calling turn's model.",
+        "properties": {
+          "models": {
+            "description": "Models a call may select, at most 32, with unique names.",
+            "items": {
+              "$ref": "#/components/schemas/GenerateModelOption"
+            },
+            "type": "array"
+          },
+          "version": {
+            "default": 1,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "GenerateModelOption": {
+        "additionalProperties": false,
+        "description": "One model the generation tool may select.",
+        "properties": {
+          "description": {
+            "description": "Shown to the model to help it choose, at most 1024 bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxOutputTokens": {
+            "description": "Output-token cap for calls using this entry.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelConfig"
+              }
+            ],
+            "description": "Provider route, resolved and authenticated like a session model."
+          },
+          "name": {
+            "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
+            "type": "string"
+          },
+          "reasoningEffort": {
+            "description": "Provider-native reasoning effort for calls using this entry.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "model"
+        ],
         "type": "object"
       },
       "GenerationConfig": {

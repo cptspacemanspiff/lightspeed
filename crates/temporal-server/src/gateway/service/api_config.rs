@@ -241,6 +241,41 @@ fn features_from_api(
                 })
                 .collect(),
         }),
+        generate: features
+            .generate
+            .map(|generate| {
+                Ok::<_, AgentApiError>(engine::GenerateFeature {
+                    version: generate.version,
+                    models: generate
+                        .models
+                        .into_iter()
+                        .map(generate_model_from_api)
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            })
+            .transpose()?,
+    })
+}
+
+/// Generation entries use agent-generation protocols; the provider route is
+/// otherwise resolved and authenticated at call time like a session model.
+fn generate_model_from_api(
+    option: api::GenerateModelOption,
+) -> Result<engine::GenerateModelConfig, AgentApiError> {
+    api::ModelDefaultSlot::AgentRun
+        .validate_model(&option.model)
+        .map_err(|error| {
+            AgentApiError::invalid_request(format!(
+                "generate model {:?}: {}",
+                option.name, error.message
+            ))
+        })?;
+    Ok(engine::GenerateModelConfig {
+        name: option.name,
+        description: option.description,
+        model: model_selection_from_api(option.model)?,
+        reasoning_effort: option.reasoning_effort,
+        max_output_tokens: option.max_output_tokens,
     })
 }
 

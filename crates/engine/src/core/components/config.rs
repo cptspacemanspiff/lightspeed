@@ -143,6 +143,8 @@ pub struct FeaturesConfig {
     pub environments: Option<EnvironmentsFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<GenerateFeature>,
 }
 
 impl FeaturesConfig {
@@ -400,6 +402,51 @@ impl Default for TimersFeature {
         }
     }
 }
+
+/// Grants `model_generate`: one standalone model call per tool call, with no
+/// conversation state or tools. The model list is the authority: a call may
+/// name only a listed model, and the first entry is the default. An empty
+/// list grants the calling turn's own model only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateFeature {
+    #[serde(default = "default_feature_version")]
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<GenerateModelConfig>,
+}
+
+impl Default for GenerateFeature {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_FEATURE_VERSION,
+            models: Vec::new(),
+        }
+    }
+}
+
+impl GenerateFeature {
+    pub fn model(&self, name: &str) -> Option<&GenerateModelConfig> {
+        self.models.iter().find(|model| model.name == name)
+    }
+}
+
+/// One model a generation call may select by `name`. Generation settings
+/// belong to the entry because their valid values depend on the model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateModelConfig {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub model: ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+}
+
+pub const GENERATE_MAX_MODELS: usize = 32;
+pub const GENERATE_MODEL_NAME_MAX_BYTES: usize = 64;
+pub const GENERATE_MODEL_DESCRIPTION_MAX_BYTES: usize = 1024;
 
 /// Grants session environments. The attachment list is the allowed set:
 /// the session can only select, read, or run jobs on a listed machine, and
@@ -763,6 +810,74 @@ fn validate_features(
     if let Some(mcp) = &features.mcp {
         validate_feature_version("mcp", mcp.version)?;
         validate_mcp_feature(mcp)?;
+    }
+    if let Some(generate) = &features.generate {
+        validate_feature_version("generate", generate.version)?;
+        validate_generate_feature(generate)?;
+    }
+    Ok(())
+}
+
+fn validate_generate_feature(generate: &GenerateFeature) -> Result<(), DomainError> {
+    if generate.models.len() > GENERATE_MAX_MODELS {
+        return Err(DomainError::InvariantViolation(format!(
+            "generate feature lists more than {GENERATE_MAX_MODELS} models"
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in &generate.models {
+        let name = entry.name.as_str();
+        if name.is_empty()
+            || name.len() > GENERATE_MODEL_NAME_MAX_BYTES
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "generate model name {name:?} must be 1..={GENERATE_MODEL_NAME_MAX_BYTES} ASCII \
+                 letters, digits, '-', '_', or '.'"
+            )));
+        }
+        if !seen.insert(name) {
+            return Err(DomainError::InvariantViolation(format!(
+                "generate model name {name:?} is listed more than once"
+            )));
+        }
+        if entry
+            .description
+            .as_ref()
+            .is_some_and(|description| description.len() > GENERATE_MODEL_DESCRIPTION_MAX_BYTES)
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "generate model {name:?} description exceeds \
+                 {GENERATE_MODEL_DESCRIPTION_MAX_BYTES} bytes"
+            )));
+        }
+        for (field, value) in [
+            ("provider id", &entry.model.provider_id),
+            ("model", &entry.model.model),
+        ] {
+            if value.trim().is_empty() || value.trim() != value {
+                return Err(DomainError::InvariantViolation(format!(
+                    "generate model {name:?} {field} must be non-empty without surrounding \
+                     whitespace"
+                )));
+            }
+        }
+        if entry
+            .reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| effort.trim().is_empty())
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "generate model {name:?} reasoning effort must be non-empty when set"
+            )));
+        }
+        if entry.max_output_tokens == Some(0) {
+            return Err(DomainError::InvariantViolation(format!(
+                "generate model {name:?} max output tokens must be positive"
+            )));
+        }
     }
     Ok(())
 }
@@ -1468,6 +1583,108 @@ mod tests {
             .expect_err("empty web grant must fail validation");
 
         assert!(matches!(error, DomainError::InvariantViolation(_)));
+    }
+
+    fn generate_entry(name: &str) -> GenerateModelConfig {
+        GenerateModelConfig {
+            name: name.to_owned(),
+            description: Some("Cheap classifier".to_owned()),
+            model: ModelSelection {
+                api_kind: ProviderApiKind::AnthropicMessages,
+                provider_id: "anthropic".to_owned(),
+                model: "small".to_owned(),
+            },
+            reasoning_effort: Some("low".to_owned()),
+            max_output_tokens: Some(800),
+        }
+    }
+
+    #[test]
+    fn generate_feature_accepts_empty_and_named_model_lists() {
+        let mut config = config(ProviderApiKind::OpenAiResponses, None);
+        config.features.generate = Some(GenerateFeature::default());
+        config
+            .validate()
+            .expect("the turn model alone is a valid grant");
+
+        config.features.generate = Some(GenerateFeature {
+            models: vec![generate_entry("grader"), generate_entry("vision.v2")],
+            ..GenerateFeature::default()
+        });
+        config
+            .validate()
+            .expect("models on another provider are valid");
+    }
+
+    #[test]
+    fn generate_feature_rejects_invalid_model_entries() {
+        type Mutation = Box<dyn Fn(&mut Vec<GenerateModelConfig>)>;
+        let cases: Vec<(&str, Mutation)> = vec![
+            (
+                "duplicate name",
+                Box::new(|models| models.push(generate_entry("grader"))),
+            ),
+            (
+                "blank name",
+                Box::new(|models| models[0].name = String::new()),
+            ),
+            (
+                "name with space",
+                Box::new(|models| models[0].name = "big model".to_owned()),
+            ),
+            (
+                "blank model",
+                Box::new(|models| models[0].model.model = " ".to_owned()),
+            ),
+            (
+                "zero token cap",
+                Box::new(|models| models[0].max_output_tokens = Some(0)),
+            ),
+            (
+                "blank effort",
+                Box::new(|models| models[0].reasoning_effort = Some(" ".to_owned())),
+            ),
+            (
+                "oversized description",
+                Box::new(|models| {
+                    models[0].description =
+                        Some("x".repeat(GENERATE_MODEL_DESCRIPTION_MAX_BYTES + 1))
+                }),
+            ),
+            (
+                "too many models",
+                Box::new(|models| {
+                    *models = (0..=GENERATE_MAX_MODELS)
+                        .map(|index| generate_entry(&format!("m{index}")))
+                        .collect()
+                }),
+            ),
+        ];
+        for (case, mutate) in cases {
+            let mut models = vec![generate_entry("grader")];
+            mutate(&mut models);
+            let mut config = config(ProviderApiKind::OpenAiResponses, None);
+            config.features.generate = Some(GenerateFeature {
+                models,
+                ..GenerateFeature::default()
+            });
+            assert!(
+                matches!(config.validate(), Err(DomainError::InvariantViolation(_))),
+                "{case} must fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_feature_serializes_its_version_and_omits_empty_lists() {
+        let encoded = serde_json::to_value(GenerateFeature::default()).expect("encode");
+        assert_eq!(
+            encoded,
+            serde_json::json!({ "version": CURRENT_FEATURE_VERSION })
+        );
+        let decoded: FeaturesConfig =
+            serde_json::from_value(serde_json::json!({ "generate": {} })).expect("decode");
+        assert_eq!(decoded.generate, Some(GenerateFeature::default()));
     }
 
     #[test]

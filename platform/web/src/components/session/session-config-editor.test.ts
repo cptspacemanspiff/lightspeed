@@ -299,6 +299,7 @@ describe("environment feature config", () => {
           environments: {},
           mcp: { servers: [{ serverId: "demo" }] },
           subagents: {},
+          generate: {},
           vfs: {},
           web: { search: {} },
           timers: {},
@@ -313,6 +314,7 @@ describe("environment feature config", () => {
       "Virtual File System: Files, Instructions, Skills",
       "MCP Servers",
       "Sub-agents",
+      "Model generation",
       "Web",
       "Timers",
       "Session data",
@@ -329,6 +331,39 @@ describe("environment feature config", () => {
     expect(timersHtml).not.toContain("aria-expanded");
     expect(html).not.toContain("Metadata fields");
     expect(html).not.toContain("Retention fields");
+  });
+});
+
+describe("model generation feature config", () => {
+  const grader = {
+    name: "grader",
+    description: "Cheap classifier",
+    model: { providerId: "openai", apiKind: "openai:responses", model: "gpt-small" },
+    reasoningEffort: "low",
+    maxOutputTokens: 800,
+  };
+
+  it("keeps the model list sparse and stable across normalization", () => {
+    const config = { features: { generate: { models: [grader] } } };
+    expect(normalizeSessionConfig(normalizeSessionConfig(config))).toEqual(config);
+    expect(normalizeSessionConfig({ features: { generate: { models: [] } } })).toEqual({
+      features: { generate: {} },
+    });
+    expect(normalizeSessionConfig({
+      features: { generate: { models: [{ ...grader, description: "  ", reasoningEffort: "", maxOutputTokens: 0 }] } },
+    })).toEqual({
+      features: { generate: { models: [{ name: "grader", model: grader.model }] } },
+    });
+  });
+
+  it("rejects names, routes, and protocols the runtime would refuse", () => {
+    const error = (models: unknown[]) => configError({ features: { generate: { models } } });
+    expect(error([grader])).toBeNull();
+    expect(error([])).toBeNull();
+    expect(error([grader, grader])).toContain("used more than once");
+    expect(error([{ ...grader, name: "big model" }])).toContain("needs a name");
+    expect(error([{ ...grader, model: { ...grader.model, model: "" } }])).toContain("provider id, API kind, and model name");
+    expect(error([{ ...grader, model: { ...grader.model, apiKind: "openai:audio-transcriptions" } }])).toContain("agent generation API kind");
   });
 });
 

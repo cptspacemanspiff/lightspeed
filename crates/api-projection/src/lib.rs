@@ -2162,7 +2162,25 @@ fn features_config_to_api(
                     .collect(),
             }),
         mcp: features.mcp.as_ref().map(mcp_feature_to_api),
+        generate: features.generate.as_ref().map(generate_feature_to_api),
     })
+}
+
+fn generate_feature_to_api(generate: &engine::GenerateFeature) -> api::GenerateFeature {
+    api::GenerateFeature {
+        version: generate.version,
+        models: generate
+            .models
+            .iter()
+            .map(|entry| api::GenerateModelOption {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                model: model_to_api(&entry.model),
+                reasoning_effort: entry.reasoning_effort.clone(),
+                max_output_tokens: entry.max_output_tokens,
+            })
+            .collect(),
+    }
 }
 
 pub fn environment_access_to_api(access: engine::EnvironmentAccess) -> api::EnvironmentAccess {
@@ -2892,6 +2910,18 @@ fn tool_call_display(tool_name: &str, arguments: &str) -> Option<ToolCallDisplay
                     .or_else(|| first_string(json, &["input"]).map(|input| summary_line(&input)))
             }),
         },
+        "model_generate" => ToolCallDisplayView {
+            group: ToolCallDisplayGroup::Agent,
+            verb: "Generate".to_owned(),
+            target: json
+                .as_ref()
+                .and_then(|json| first_string(json, &["model"])),
+            detail: json.as_ref().and_then(|json| {
+                first_string(json, &["input"])
+                    .or_else(|| first_string(json, &["instructions"]))
+                    .map(|text| summary_line(&text))
+            }),
+        },
         "await" | "cancel" | "detach" => ToolCallDisplayView {
             group: ToolCallDisplayGroup::Agent,
             verb: match normalized.as_str() {
@@ -3260,6 +3290,27 @@ mod tests {
         assert_eq!(display.verb, "Await");
         assert_eq!(display.target.as_deref(), Some("promise_3, promise_4"));
         assert_eq!(display.detail.as_deref(), Some("2 promises · any"));
+    }
+
+    #[test]
+    fn model_generate_calls_display_the_model_and_the_input() {
+        let display = tool_call_display(
+            "model_generate",
+            r#"{"model":"grader","input":"Is this claim supported?\n\nClaim: ...","output_schema":{"type":"object"}}"#,
+        )
+        .expect("display");
+        assert_eq!(display.group, ToolCallDisplayGroup::Agent);
+        assert_eq!(display.verb, "Generate");
+        assert_eq!(display.target.as_deref(), Some("grader"));
+        assert_eq!(display.detail.as_deref(), Some("Is this claim supported?"));
+
+        let display = tool_call_display(
+            "model_generate",
+            r#"{"instructions":"Extract dates.","input":{"text":"due May 1"}}"#,
+        )
+        .expect("display");
+        assert_eq!(display.target, None);
+        assert_eq!(display.detail.as_deref(), Some("Extract dates."));
     }
 
     #[test]
@@ -4437,6 +4488,20 @@ mod tests {
                         tools: Some(vec!["search".to_owned()]),
                     }],
                 }),
+                generate: Some(engine::GenerateFeature {
+                    version: engine::CURRENT_FEATURE_VERSION,
+                    models: vec![engine::GenerateModelConfig {
+                        name: "grader".to_owned(),
+                        description: Some("Cheap classifier".to_owned()),
+                        model: ModelSelection {
+                            api_kind: ProviderApiKind::OpenAiResponses,
+                            provider_id: "openai".to_owned(),
+                            model: "gpt-small".to_owned(),
+                        },
+                        reasoning_effort: Some("low".to_owned()),
+                        max_output_tokens: Some(800),
+                    }],
+                }),
             },
         };
 
@@ -4526,6 +4591,20 @@ mod tests {
                         servers: vec![api::McpServerAttachment {
                             server_id: "linear".to_owned(),
                             tools: Some(vec!["search".to_owned()]),
+                        }],
+                    }),
+                    generate: Some(api::GenerateFeature {
+                        version: api::CURRENT_FEATURE_VERSION,
+                        models: vec![api::GenerateModelOption {
+                            name: "grader".to_owned(),
+                            description: Some("Cheap classifier".to_owned()),
+                            model: ModelConfig {
+                                provider_id: "openai".to_owned(),
+                                api_kind: "openai:responses".to_owned(),
+                                model: "gpt-small".to_owned(),
+                            },
+                            reasoning_effort: Some("low".to_owned()),
+                            max_output_tokens: Some(800),
                         }],
                     }),
                 }),

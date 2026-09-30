@@ -2194,6 +2194,7 @@ export interface ContextConfig {
  */
 export interface FeaturesConfig {
   environments?: EnvironmentsFeature | null;
+  generate?: GenerateFeature | null;
   mcp?: McpFeature | null;
   subagents?: SubagentsFeature | null;
   timers?: TimersFeature | null;
@@ -2295,6 +2296,63 @@ export interface EnvironmentSkillsConfig {
    * @minItems 1
    */
   roots?: [string, ...string[]] | null;
+}
+/**
+ * Grants `model_generate`: one standalone model call per tool call. The
+ * call supplies instructions and input, optionally validated against an
+ * input schema, and may require a JSON result matching an output schema.
+ * The generation has no conversation state and no tools. The model list is
+ * the authority: the model picks an entry by `name`, the first entry is the
+ * default, and any other name fails the call. An empty list lets the tool
+ * use only the calling turn's model.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "GenerateFeature".
+ */
+export interface GenerateFeature {
+  /**
+   * Models a call may select, at most 32, with unique names.
+   */
+  models?: GenerateModelOption[];
+  version?: number;
+}
+/**
+ * One model the generation tool may select.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "GenerateModelOption".
+ */
+export interface GenerateModelOption {
+  /**
+   * Shown to the model to help it choose, at most 1024 bytes.
+   */
+  description?: string | null;
+  /**
+   * Output-token cap for calls using this entry.
+   */
+  maxOutputTokens?: number | null;
+  /**
+   * Provider route, resolved and authenticated like a session model.
+   */
+  model: ModelConfig;
+  /**
+   * Name the model uses to select this entry: 1–64 ASCII letters, digits,
+   * `-`, `_`, or `.`.
+   */
+  name: string;
+  /**
+   * Provider-native reasoning effort for calls using this entry.
+   */
+  reasoningEffort?: string | null;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelConfig".
+ */
+export interface ModelConfig {
+  apiKind: string;
+  model: string;
+  providerId: string;
 }
 /**
  * Grants remote MCP tools by declaring attached servers from the universe MCP
@@ -2513,15 +2571,6 @@ export interface GenerationConfig {
 export interface LimitsConfig {
   maxToolRounds?: number | null;
   maxTurns?: number | null;
-}
-/**
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "ModelConfig".
- */
-export interface ModelConfig {
-  apiKind: string;
-  model: string;
-  providerId: string;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

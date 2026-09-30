@@ -13,6 +13,7 @@ pub mod environment_protocol;
 pub mod error;
 pub mod fs;
 pub mod limits;
+pub mod model_generate;
 pub mod prompts;
 pub mod runtime;
 pub mod skills;

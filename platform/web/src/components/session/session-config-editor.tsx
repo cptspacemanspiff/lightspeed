@@ -11,6 +11,7 @@ import {
   Network,
   Plus,
   Server,
+  Sparkles,
   Tags,
   Trash2,
   Wrench,
@@ -48,7 +49,7 @@ import { McpToolPicker } from "@/components/mcp/tool-picker";
 import type { McpToolDiscoverySource } from "@/lib/mcp/tool-discovery";
 
 export type SessionConfig = Record<string, unknown>;
-type FeatureName = "vfs" | "web" | "subagents" | "timers" | "environments" | "mcp";
+type FeatureName = "vfs" | "web" | "subagents" | "generate" | "timers" | "environments" | "mcp";
 
 export type McpServerOption = {
   serverId: string;
@@ -139,6 +140,11 @@ const featureInfo: Record<
     description: "Let the agent run listed profiles as sub-agents (agent_run / agent_spawn) within root-scoped limits.",
     icon: Network,
   },
+  generate: {
+    title: "Model generation",
+    description: "Let the agent make standalone model calls (model_generate) with optional JSON input and output schemas.",
+    icon: Sparkles,
+  },
   timers: {
     title: "Timers",
     description: "Allow delayed work and promise controls such as sleep and await.",
@@ -161,6 +167,7 @@ const featureDisplayOrder: FeatureName[] = [
   "vfs",
   "mcp",
   "subagents",
+  "generate",
   "web",
   "timers",
 ];
@@ -334,6 +341,25 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
         if (value !== undefined && value > 0) next[key] = value;
       }
     }
+    if (name === "generate") {
+      const models = Array.isArray(feature.models) ? feature.models.map((item) => {
+        const entry = record(item);
+        const model = record(entry.model);
+        const description = string(entry.description);
+        const reasoningEffort = string(entry.reasoningEffort).trim();
+        const maxOutputTokens = parseNumber(numberString(entry.maxOutputTokens));
+        return {
+          name: string(entry.name).trim(),
+          ...(description.trim() ? { description } : {}),
+          model: Object.fromEntries(
+            ["providerId", "apiKind", "model"].map((key) => [key, string(model[key]).trim()]),
+          ),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+          ...(maxOutputTokens ? { maxOutputTokens } : {}),
+        };
+      }) : [];
+      if (models.length) next.models = models;
+    }
     if (name === "environments") {
       if (feature.selection === true) next.selection = true;
       next.environments = Array.isArray(feature.environments) ? feature.environments.map((item) => {
@@ -416,6 +442,8 @@ export function configError(config: SessionConfig | undefined, pinnedApiKind?: s
   if ("subagents" in record(config.features) && !subagentProfileIds(subagents.agents).length) {
     return "Sub-agents require at least one agent profile.";
   }
+  const generateError = generateModelsError(record(record(config.features).generate).models);
+  if (generateError) return generateError;
   const attachmentError = workspaceAttachmentsError(workspaceAttachmentsFromConfig(config));
   if (attachmentError) return attachmentError;
   const features = record(config.features);
@@ -457,6 +485,32 @@ export function configError(config: SessionConfig | undefined, pinnedApiKind?: s
   for (const key of ["skills", "prompts"] as const) {
     const roots = record(environment[key]).roots;
     if (roots != null && !stringList(roots).length) return "Environment source root overrides must not be empty; clear the override to use defaults.";
+  }
+  return null;
+}
+
+/** Mirrors the engine's rules for the model generation grant's model list. */
+export function generateModelsError(value: unknown): string | null {
+  const entries = Array.isArray(value) ? value.map(record) : [];
+  if (entries.length > 32) return "Model generation lists at most 32 models.";
+  const names = new Set<string>();
+  for (const entry of entries) {
+    const name = string(entry.name);
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+      return "Each generation model needs a name of up to 64 letters, digits, '-', '_', or '.'.";
+    }
+    if (names.has(name)) return `Generation model name ${name} is used more than once.`;
+    names.add(name);
+    const model = record(entry.model);
+    if (!["providerId", "apiKind", "model"].every((key) => string(model[key]))) {
+      return `Generation model ${name} needs provider id, API kind, and model name.`;
+    }
+    if (!(AGENT_MODEL_API_KINDS as readonly string[]).includes(string(model.apiKind))) {
+      return `Generation model ${name} needs an agent generation API kind.`;
+    }
+    if (new TextEncoder().encode(string(entry.description)).length > 1024) {
+      return `Generation model ${name} description is longer than 1024 bytes.`;
+    }
   }
   return null;
 }
@@ -646,6 +700,7 @@ export function SessionConfigEditor({
                   />
                 )}
                 {name === "subagents" && <SubagentFields feature={record(features.subagents)} profiles={profiles} patch={(fn) => patchFeature("subagents", fn)} />}
+                {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} patch={(fn) => patchFeature("generate", fn)} />}
                 {name === "mcp" && <McpFields feature={record(features.mcp)} servers={mcpServers} discoverySource={mcpToolDiscovery} patch={(fn) => patchFeature("mcp", fn)} />}
               </FeaturePanel>
             ))}
@@ -1630,6 +1685,167 @@ function SubagentFields({
           </Field>
         ))}
       </SettingsDisclosure>
+    </div>
+  );
+}
+
+const CUSTOM_GENERATE_MODEL = "custom";
+
+function GenerateFields({
+  feature,
+  models,
+  patch,
+}: {
+  feature: RecordValue;
+  models: ModelOption[];
+  patch: (fn: (feature: RecordValue) => void) => void;
+}) {
+  const id = useId();
+  const entries = Array.isArray(feature.models) ? feature.models.map(record) : [];
+  const options = modelPickerOptions(models);
+  const updateEntry = (index: number, mutate: (entry: RecordValue) => void) =>
+    patch((next) => {
+      const list = (Array.isArray(next.models) ? next.models : []).map((item) => structuredClone(record(item)));
+      const entry = list[index];
+      if (!entry) return;
+      mutate(entry);
+      next.models = list;
+    });
+  const removeEntry = (index: number) =>
+    patch((next) => {
+      const list = (Array.isArray(next.models) ? next.models : []).filter((_, position) => position !== index);
+      if (list.length) next.models = list;
+      else delete next.models;
+    });
+  const addEntry = () =>
+    patch((next) => {
+      const list = Array.isArray(next.models) ? [...next.models] : [];
+      const taken = new Set(list.map((item) => string(record(item).name)));
+      let index = list.length + 1;
+      while (taken.has(`model-${index}`)) index += 1;
+      const first = options[0];
+      list.push({
+        name: `model-${index}`,
+        model: first
+          ? { providerId: first.providerId, apiKind: first.apiKind, model: first.model }
+          : { providerId: "", apiKind: "openai:responses", model: "" },
+      });
+      next.models = list;
+    });
+  return (
+    <div className="grid gap-4">
+      <p className="text-xs text-muted-foreground">
+        The agent picks a listed model by name; the first is the default and unlisted names fail the call.
+        With no models listed, calls use the session's own model.
+      </p>
+      {entries.map((entry, index) => {
+        const model = record(entry.model);
+        const current = options.find((option) =>
+          option.providerId === string(model.providerId)
+          && option.apiKind === string(model.apiKind)
+          && option.model === string(model.model));
+        const selected = current ? modelOptionKey(current) : CUSTOM_GENERATE_MODEL;
+        const updateRoute = (key: string, value: string) =>
+          updateEntry(index, (next) => {
+            next.model = { ...record(next.model), [key]: value };
+          });
+        const fieldId = `${id}-${index}`;
+        return (
+          <div key={index} className="grid gap-3 rounded-md border p-3 sm:grid-cols-2">
+            <Field>
+              <FieldLabel htmlFor={`${fieldId}-name`}>Name{index === 0 ? " (default)" : ""}</FieldLabel>
+              <Input
+                id={`${fieldId}-name`}
+                value={string(entry.name)}
+                placeholder="grader"
+                onChange={(e) => updateEntry(index, (next) => { next.name = e.target.value; })}
+              />
+            </Field>
+            <Field>
+              <FieldLabel>Model</FieldLabel>
+              <Select
+                value={selected}
+                onValueChange={(key) => updateEntry(index, (next) => {
+                  const option = options.find((item) => modelOptionKey(item) === key);
+                  if (option) next.model = { providerId: option.providerId, apiKind: option.apiKind, model: option.model };
+                  else next.model = { ...record(next.model) };
+                })}
+              >
+                <SelectTrigger aria-label={`Model for ${string(entry.name) || "generation model"}`} className="w-full">
+                  <SelectValue>
+                    {current ? `${current.displayName} (${current.providerId})` : "Custom route"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {options.map((option) => (
+                    <SelectItem key={modelOptionKey(option)} value={modelOptionKey(option)}>
+                      {option.displayName} ({option.providerId})
+                    </SelectItem>
+                  ))}
+                  <SelectItem value={CUSTOM_GENERATE_MODEL}>Custom route</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {selected === CUSTOM_GENERATE_MODEL && (
+              <div className="grid gap-3 sm:col-span-2 sm:grid-cols-3">
+                <Field><FieldLabel>Provider id</FieldLabel><Input value={string(model.providerId)} onChange={(e) => updateRoute("providerId", e.target.value)} placeholder="openai" /></Field>
+                <Field><FieldLabel>API kind</FieldLabel><Input value={string(model.apiKind)} onChange={(e) => updateRoute("apiKind", e.target.value)} placeholder="openai:responses" /></Field>
+                <Field><FieldLabel>Model</FieldLabel><Input value={string(model.model)} onChange={(e) => updateRoute("model", e.target.value)} placeholder="gpt-5.5" /></Field>
+              </div>
+            )}
+            <Field className="sm:col-span-2">
+              <FieldLabel htmlFor={`${fieldId}-description`}>Description</FieldLabel>
+              <Input
+                id={`${fieldId}-description`}
+                value={string(entry.description)}
+                placeholder="What this model is good for"
+                onChange={(e) => updateEntry(index, (next) => {
+                  if (e.target.value) next.description = e.target.value;
+                  else delete next.description;
+                })}
+              />
+              <FieldDescription className="text-xs">Shown to the agent to help it choose.</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor={`${fieldId}-effort`}>Reasoning effort</FieldLabel>
+              <Input
+                id={`${fieldId}-effort`}
+                value={string(entry.reasoningEffort)}
+                placeholder="Provider default"
+                onChange={(e) => updateEntry(index, (next) => {
+                  if (e.target.value) next.reasoningEffort = e.target.value;
+                  else delete next.reasoningEffort;
+                })}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor={`${fieldId}-tokens`}>Max output tokens</FieldLabel>
+              <Input
+                id={`${fieldId}-tokens`}
+                type="number"
+                min="1"
+                value={numberString(entry.maxOutputTokens)}
+                placeholder="Provider default"
+                onChange={(e) => updateEntry(index, (next) => {
+                  const value = parseNumber(e.target.value);
+                  if (value) next.maxOutputTokens = value;
+                  else delete next.maxOutputTokens;
+                })}
+              />
+            </Field>
+            <div className="flex justify-end sm:col-span-2">
+              <Button type="button" variant="ghost" size="sm" onClick={() => removeEntry(index)}>
+                <Trash2 /> Remove
+              </Button>
+            </div>
+          </div>
+        );
+      })}
+      <div>
+        <Button type="button" variant="outline" size="sm" onClick={addEntry}>
+          <Plus /> Add model
+        </Button>
+      </div>
     </div>
   );
 }

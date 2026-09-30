@@ -90,16 +90,19 @@ pub async fn validate_workflow_tool_arguments(
         ToolKind::Function(function) => {
             read_json(blobs, &function.input_schema_ref, "input schema").await?
         }
-        ToolKind::Builtin(spec) => {
+        ToolKind::Builtin(_) => {
             let runtime = call
                 .builtin
                 .as_ref()
                 .ok_or_else(|| ToolError::InvalidRequest {
                     message: "built-in workflow call is missing original turn inputs".to_owned(),
                 })?;
+            // Validate against the settings the turn advertised: preparation
+            // may publish per-session settings (such as the granted
+            // generation models) over the binding's immutable definition.
             crate::definitions::resolve(
                 &binding.definition.tool.name,
-                spec,
+                &runtime.spec,
                 &crate::runtime::ToolTarget::from(&runtime.model),
             )?
             .into_iter()

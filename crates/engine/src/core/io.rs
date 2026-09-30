@@ -112,6 +112,10 @@ pub struct ToolInvocationBatchRequest {
     /// session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents_policy: Option<crate::SubagentsFeature>,
+    /// Admitted model-generation grant for this tool batch, pinned with the
+    /// calling turn's model so executors never reconstruct session state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_policy: Option<GeneratePolicy>,
     /// First promise id the executors of this dispatch may mint (see
     /// `ActiveToolBatch::promise_id_base`). A batch-unit dispatch counts up
     /// from here across all its calls; a per-call dispatch gets its own
@@ -140,6 +144,15 @@ pub struct ToolInvocationRequest {
     /// way; absent for every other tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_mcp: Option<RemoteMcpCallRuntime>,
+}
+
+/// The `generate` grant a batch was dispatched under. `turn_model` is the
+/// calling turn's effective model: the only model a call may use when the
+/// grant lists none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratePolicy {
+    pub feature: crate::GenerateFeature,
+    pub turn_model: crate::ModelSelection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +331,8 @@ pub struct ToolInvocationCallRequest {
     pub environment_policy: Option<crate::EnvironmentsFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents_policy: Option<crate::SubagentsFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_policy: Option<GeneratePolicy>,
     /// The one promise id this call may mint: the batch base plus the
     /// call's index, so sibling per-call dispatches never collide.
     pub promise_id_base: u64,
@@ -352,6 +367,7 @@ impl ToolInvocationCallRequest {
             active_environment_id: self.active_environment_id,
             environment_policy: self.environment_policy,
             subagents_policy: self.subagents_policy,
+            generate_policy: self.generate_policy,
             promise_id_base: self.promise_id_base,
             calls: vec![self.call],
         }
@@ -389,6 +405,7 @@ impl ToolInvocationBatchRequest {
             active_environment_id: self.active_environment_id.clone(),
             environment_policy: self.environment_policy.clone(),
             subagents_policy: self.subagents_policy.clone(),
+            generate_policy: self.generate_policy.clone(),
             promise_id_base: self.promise_id_base + index as u64,
             call,
             sibling_calls,
@@ -628,6 +645,7 @@ mod tests {
             active_environment_id: Some(EnvironmentId::new("environment-a")),
             environment_policy: Some(crate::EnvironmentsFeature::default()),
             subagents_policy: None,
+            generate_policy: None,
             calls: call_ids
                 .iter()
                 .map(|call_id| ToolInvocationRequest {
@@ -753,6 +771,7 @@ mod promise_base_tests {
             active_environment_id: None,
             environment_policy: None,
             subagents_policy: None,
+            generate_policy: None,
             promise_id_base: 7,
             calls: vec![call("a"), call("b"), call("c")],
         };
