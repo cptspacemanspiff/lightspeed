@@ -1301,6 +1301,86 @@ fn generate_models_are_published_into_the_tool_schema_only() {
     );
 }
 
+fn code_config(tools: &[&str]) -> api::SessionConfig {
+    api::SessionConfig {
+        features: Some(api::FeaturesConfig {
+            code: Some(api::CodeFeature {
+                version: api::CURRENT_FEATURE_VERSION,
+                tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+                max_calls: Some(20),
+                max_concurrent_calls: None,
+                deadline_ms: None,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn code_feature_maps_scriptable_tools_and_rejects_the_rest() {
+    let config = engine_session_config_from_api(
+        code_config(&["web.fetch", "vfs.read_file"]),
+        openai_model(),
+    )
+    .expect("map code feature");
+    let code = config.features.code.expect("code grant");
+    assert_eq!(code.tools, ["web.fetch", "vfs.read_file"]);
+    assert_eq!(code.max_calls, Some(20));
+
+    let error = engine_session_config_from_api(code_config(&["vfs.write_file"]), openai_model())
+        .expect_err("writes carry session effects");
+    assert_eq!(error.kind, AgentApiErrorKind::InvalidRequest);
+    assert!(
+        error.message.contains("\"vfs.write_file\""),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn code_tools_are_published_into_the_code_run_description() {
+    let mut toolset = tools::toolset::RegisteredToolset::default();
+    let code_run = tools::definitions::register(
+        tools::code_run::CODE_RUN_LOGICAL_ID,
+        Default::default(),
+        engine::ToolParallelism::ParallelSafe,
+        Default::default(),
+    );
+    let fetch = tools::definitions::register(
+        "web.fetch",
+        Default::default(),
+        engine::ToolParallelism::ParallelSafe,
+        Default::default(),
+    );
+    toolset.tools.insert(code_run.name.clone(), code_run.clone());
+    toolset.tools.insert(fetch.name.clone(), fetch);
+    // vfs.read_file is granted but not in this toolset, so it is not declared.
+    let feature = engine::CodeFeature {
+        tools: vec!["web.fetch".to_owned(), "vfs.read_file".to_owned()],
+        ..Default::default()
+    };
+    session_preparation::publish_code_tools(&mut toolset, &feature, &openai_model())
+        .expect("publish code tools");
+
+    let engine::ToolKind::Builtin(spec) = &toolset.tools[&code_run.name].kind else {
+        panic!("code run is a built-in tool");
+    };
+    let resolved = tools::definitions::resolve(
+        &code_run.name,
+        spec,
+        &tools::runtime::ToolTarget::from(&openai_model()),
+    )
+    .expect("resolve published definition");
+    let tools::definitions::Definition::Function(function) = &resolved[0].definition else {
+        panic!("code run is a function tool");
+    };
+    let description = function.description.as_deref().expect("description");
+    assert!(description.contains("web: {"), "{description}");
+    assert!(description.contains("fetch(args: {"), "{description}");
+    assert!(!description.contains("read_file"), "{description}");
+}
+
 fn environments_feature(attachments: Vec<api::EnvironmentAttachment>) -> api::EnvironmentsFeature {
     api::EnvironmentsFeature {
         version: api::CURRENT_FEATURE_VERSION,

@@ -38,6 +38,8 @@ export interface SessionResources {
   agents?: { profiles: string[]; maxDepth?: number; maxConcurrent?: number };
   /// Models the agent may call standalone; empty means the session's own model.
   generate?: { models: Array<{ name: string; route: string }> };
+  /// Tools a code_run program may call.
+  code?: { tools: string[] };
   web?: { search: boolean; fetch: boolean };
   timers: boolean;
 }
@@ -176,6 +178,13 @@ export function sessionResources(
     };
   }
 
+  if ("code" in features) {
+    const tools = record(features.code).tools;
+    result.code = {
+      tools: Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === "string" && tool !== "") : [],
+    };
+  }
+
   if ("web" in features) {
     const feature = record(features.web);
     result.web = { search: "search" in feature, fetch: "fetch" in feature };
@@ -185,5 +194,5 @@ export function sessionResources(
 }
 
 export function hasResources(resources: SessionResources): boolean {
-  return Boolean(resources.environments || resources.files || resources.mcp || resources.agents || resources.generate || resources.web || resources.timers);
+  return Boolean(resources.environments || resources.files || resources.mcp || resources.agents || resources.generate || resources.code || resources.web || resources.timers);
 }

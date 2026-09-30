@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     builtin::{BuiltinTool, BuiltinToolOperation},
+    code_run::{CODE_RUN_LOGICAL_ID, CodeToolChoice, code_run_tool_definition},
     concurrency::{ConcurrencyToolsetConfig, concurrency_tool_definitions},
     environment::control::environment_control_tool_definitions,
     error::{ToolError, ToolResult},
@@ -45,6 +46,9 @@ pub struct BuiltinSettings {
     /// Granted `model_generate` models, enumerated in its advertised schema.
     #[serde(skip_serializing_if = "is_default")]
     pub generate_models: Vec<GenerateModelChoice>,
+    /// Tools a `code_run` script may call, declared in its description.
+    #[serde(skip_serializing_if = "is_default")]
+    pub code_tools: Vec<CodeToolChoice>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -157,6 +161,7 @@ pub fn resolve(
         "subagent.run" => subagent_tool_definition(SubagentToolKind::Run)?,
         "subagent.spawn" => subagent_tool_definition(SubagentToolKind::Spawn)?,
         MODEL_GENERATE_LOGICAL_ID => model_generate_tool_definition(&settings.generate_models),
+        CODE_RUN_LOGICAL_ID => code_run_tool_definition(&settings.code_tools),
         "mcp.find_tools" => FunctionDefinition::new(
             "mcp_find_tools",
             format!(

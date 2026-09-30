@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, type Environment } from "@/api";
 import type { McpServerOption, WorkspaceOption } from "@/components/session/session-config-editor";
-import { Clock3, FolderOpen, Globe2, Network, Server, Settings2, Sparkles, Wrench, type LucideIcon } from "lucide-react";
+import { Clock3, Code2, FolderOpen, Globe2, Network, Server, Settings2, Sparkles, Wrench, type LucideIcon } from "lucide-react";
 import { sessionResources, type ResourceTone, type SessionResources } from "@/lib/sessions/session-resources";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -72,7 +72,7 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
   /// Opens the session's settings; absent when the viewer cannot change them.
   onConfigure?: () => void;
 }) {
-  const { environments, files, mcp, agents, generate, web, timers } = resources;
+  const { environments, files, mcp, agents, generate, code, web, timers } = resources;
   const footer = (page?: { to: string; label: string }) => (
     <Footer onConfigure={onConfigure} page={page} />
   );
@@ -176,6 +176,15 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
               <Row key={model.name} primary={<span className="font-mono">{model.name}</span>}
                 secondary={model.route} badges={[index === 0 && "Default"]} />
             ))}
+          {footer()}
+        </Chip>
+      )}
+      {code && (
+        <Chip icon={Code2} label="Code mode" title="Code mode">
+          <Heading title="Code mode" detail="Programs the agent writes may call these tools." />
+          {code.tools.length === 0
+            ? <Empty>Programs may not call any tools.</Empty>
+            : code.tools.map((tool) => <Row key={tool} primary={<span className="font-mono">{tool}</span>} />)}
           {footer()}
         </Chip>
       )}

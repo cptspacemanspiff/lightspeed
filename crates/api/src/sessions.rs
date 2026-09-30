@@ -406,6 +406,8 @@ pub struct FeaturesConfig {
     pub mcp: Option<McpFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<GenerateFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<CodeFeature>,
 }
 
 /// Grants the session virtual filesystem. Workspace attachments declare the
@@ -605,6 +607,33 @@ pub struct GenerateModelOption {
     /// a resolved tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+}
+
+/// Grants `code_run`: the model writes a TypeScript program, and the code
+/// runtime executes it durably. The program calls tools itself, concurrently
+/// when useful, and returns a JSON result. `tools` lists which of the
+/// session's own tools a program may call, by logical id; a listed tool the
+/// session does not have is unavailable to programs. Only tools whose calls
+/// leave no session state behind can be listed: `web.fetch`,
+/// `vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodeFeature {
+    #[serde(default = "default_feature_version")]
+    pub version: u32,
+    /// Logical ids of the tools a program may call, at most 64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// Most tool calls one program may make, 1–1000. Defaults to 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calls: Option<u32>,
+    /// Most tool calls one program may have in flight, 1–64. Defaults to 16.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_calls: Option<u32>,
+    /// Longest one program may run, in milliseconds, at most one hour.
+    /// Defaults to ten minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
 }
 
 /// Grants session environments. The `environments` list is the allowed set:

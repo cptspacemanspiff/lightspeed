@@ -216,6 +216,8 @@ function createPlan(profile, sourceEnv) {
     (profile === "runtime" || profile === "full") &&
     !cli.noEnvd &&
     (sourceEnv.LIGHTSPEED_DEV_ENVD ?? "on") !== "off";
+  // The code runtime worker runs the programs code_run hands off.
+  const codeRuntimeEnabled = (sourceEnv.LIGHTSPEED_DEV_CODE_RUNTIME ?? "on") !== "off";
   const envdListen = sourceEnv.LIGHTSPEED_ENVD_LISTEN ?? "127.0.0.1:19091";
   const envdPort = addressPort(envdListen, 19_091);
   const envdWorkspace =
@@ -310,6 +312,16 @@ function createPlan(profile, sourceEnv) {
       cwd: repoRoot,
       env,
     });
+    if (codeRuntimeEnabled) {
+      // Each script executes in a workerd sandbox the worker starts.
+      processes.push({
+        name: "code-runtime",
+        command: tsx,
+        args: ["platform/code-runtime/src/main.ts"],
+        cwd: repoRoot,
+        env,
+      });
+    }
     if (envdEnabled) {
       mkdirSync(envdWorkspace, { recursive: true });
       ports.push({ name: "environment daemon", port: envdPort });
@@ -447,7 +459,15 @@ function createPlan(profile, sourceEnv) {
     envd: envdEnabled ? { endpoint: envdEndpoint, workspace: envdWorkspace } : null,
     infra: profile !== "demo" && profile !== "docs",
     tools:
-      profile === "platform" || profile === "full" ? [tsx, vite] : profile === "demo" ? [vite] : profile === "docs" ? [astro] : [],
+      profile === "platform" || profile === "full"
+        ? [tsx, vite]
+        : profile === "runtime" && codeRuntimeEnabled
+          ? [tsx]
+          : profile === "demo"
+            ? [vite]
+            : profile === "docs"
+              ? [astro]
+              : [],
   };
 }
 
@@ -823,6 +843,8 @@ function printHelp() {
   ./dev.sh [profile] --no-api-key-bootstrap  Use existing API keys; do not provision keys
   ./dev.sh [profile] --no-envd             Do not start the local environment daemon
                                            (same as LIGHTSPEED_DEV_ENVD=off)
+                                           LIGHTSPEED_DEV_CODE_RUNTIME=off likewise skips
+                                           the code runtime worker
   ./dev.sh [profile] --debug              Include launcher stack traces in errors
   ./dev.sh --plan <profile>                Print a profile without starting it
   ./dev.sh status                          Show host supervisor and infrastructure

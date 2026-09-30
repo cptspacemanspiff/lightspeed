@@ -11,7 +11,8 @@ pub mod workflow_contract;
 mod workflows;
 
 pub use activities::{
-    ACTIVITY_APPEND_EVENTS, ACTIVITY_AWAIT_ENVIRONMENT_READY,
+    ACTIVITY_APPEND_EVENTS, ACTIVITY_AWAIT_ENVIRONMENT_READY, ACTIVITY_CODE_RUN_FINISH,
+    ACTIVITY_CODE_RUN_PREPARE, ACTIVITY_CODE_TOOL_CALL,
     ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CHECK_WORKFLOW_TOOL_EXECUTION,
     ACTIVITY_CONTEXT_COMPACT, ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
@@ -47,7 +48,10 @@ pub use types::{
     AgentSessionContinuationState, AgentSessionStatus, AppendEventsRequest,
     AwaitEnvironmentReadyActivityRequest, AwaitEnvironmentReadyActivityResult,
     AwaitMaterializationRequest, AwaitMaterializationResult, AwaitOutcome, AwaitPromiseResult,
-    CancellingWatchdog, ContextCompactActivityRequest, CreateOrLoadSessionRequest,
+    CancellingWatchdog, CodeHostCallCompleted, CodeHostCallRequest, CodeRunExecutionOutcome,
+    CodeRunExecutionPhase, CodeRunExecutionSnapshot, CodeRunFinishActivityRequest,
+    CodeRunPrepareActivityRequest, CodeRunPrepared, CodeToolCallActivityRequest,
+    ContextCompactActivityRequest, CreateOrLoadSessionRequest,
     CreateOrLoadSessionResult, EnvironmentJobCancelActivityRequest, EnvironmentJobCancelSignal,
     EnvironmentJobPollActivityRequest, EnvironmentJobPollActivityResult,
     EnvironmentJobPrepareWorkflowToolRequest, EnvironmentJobStartActivityRequest,
@@ -77,7 +81,7 @@ pub use workflows::bots;
 pub use workflows::channels;
 pub use workflows::{
     AgentSessionWorkflow, BotControllerWorkflow, BotTriggerFireWorkflow,
-    ChannelConversationWorkflow, EnvironmentJobWorkflow, ModelGenerateWorkflow,
+    ChannelConversationWorkflow, CodeRunWorkflow, EnvironmentJobWorkflow, ModelGenerateWorkflow,
     SubagentExecutionWorkflow, TranscriptionActivityResult, TranscriptionSnapshot,
     TranscriptionWorkflow, TranscriptionWorkflowArgs, transcription_id, transcription_workflow_id,
 };

@@ -145,6 +145,8 @@ pub struct FeaturesConfig {
     pub mcp: Option<McpFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<GenerateFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<CodeFeature>,
 }
 
 impl FeaturesConfig {
@@ -447,6 +449,41 @@ pub struct GenerateModelConfig {
 pub const GENERATE_MAX_MODELS: usize = 32;
 pub const GENERATE_MODEL_NAME_MAX_BYTES: usize = 64;
 pub const GENERATE_MODEL_DESCRIPTION_MAX_BYTES: usize = 1024;
+
+/// Grants `code_run`: the model hands a script to the code runtime, and the
+/// script calls tools itself. `tools` lists the logical ids of the session's
+/// own tools a script may call; a script can never reach a tool the session
+/// does not have. The limits bound one script execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeFeature {
+    #[serde(default = "default_feature_version")]
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+}
+
+impl Default for CodeFeature {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_FEATURE_VERSION,
+            tools: Vec::new(),
+            max_calls: None,
+            max_concurrent_calls: None,
+            deadline_ms: None,
+        }
+    }
+}
+
+pub const CODE_MAX_TOOLS: usize = 64;
+pub const CODE_MAX_CALLS: u32 = 1_000;
+pub const CODE_MAX_CONCURRENT_CALLS: u32 = 64;
+pub const CODE_MAX_DEADLINE_MS: u64 = 60 * 60 * 1_000;
 
 /// Grants session environments. The attachment list is the allowed set:
 /// the session can only select, read, or run jobs on a listed machine, and
@@ -814,6 +851,54 @@ fn validate_features(
     if let Some(generate) = &features.generate {
         validate_feature_version("generate", generate.version)?;
         validate_generate_feature(generate)?;
+    }
+    if let Some(code) = &features.code {
+        validate_feature_version("code", code.version)?;
+        validate_code_feature(code)?;
+    }
+    Ok(())
+}
+
+fn validate_code_feature(code: &CodeFeature) -> Result<(), DomainError> {
+    if code.tools.len() > CODE_MAX_TOOLS {
+        return Err(DomainError::InvariantViolation(format!(
+            "code feature lists more than {CODE_MAX_TOOLS} tools"
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for tool in &code.tools {
+        if tool.is_empty() || tool.trim() != tool {
+            return Err(DomainError::InvariantViolation(
+                "code feature tool ids must be non-empty without surrounding whitespace".into(),
+            ));
+        }
+        if !seen.insert(tool.as_str()) {
+            return Err(DomainError::InvariantViolation(format!(
+                "code feature lists tool {tool:?} more than once"
+            )));
+        }
+    }
+    for (field, value, max) in [
+        ("max calls", code.max_calls, CODE_MAX_CALLS),
+        (
+            "max concurrent calls",
+            code.max_concurrent_calls,
+            CODE_MAX_CONCURRENT_CALLS,
+        ),
+    ] {
+        if value.is_some_and(|value| value == 0 || value > max) {
+            return Err(DomainError::InvariantViolation(format!(
+                "code feature {field} must be between 1 and {max}"
+            )));
+        }
+    }
+    if code
+        .deadline_ms
+        .is_some_and(|deadline| deadline == 0 || deadline > CODE_MAX_DEADLINE_MS)
+    {
+        return Err(DomainError::InvariantViolation(format!(
+            "code feature deadline must be between 1 and {CODE_MAX_DEADLINE_MS} ms"
+        )));
     }
     Ok(())
 }
@@ -1614,6 +1699,60 @@ mod tests {
         config
             .validate()
             .expect("models on another provider are valid");
+    }
+
+    #[test]
+    fn code_feature_accepts_bounded_grants() {
+        let mut config = config(ProviderApiKind::OpenAiResponses, None);
+        config.features.code = Some(CodeFeature::default());
+        config.validate().expect("an empty tool list is a valid grant");
+
+        config.features.code = Some(CodeFeature {
+            tools: vec!["web.fetch".to_owned(), "vfs.read_file".to_owned()],
+            max_calls: Some(CODE_MAX_CALLS),
+            max_concurrent_calls: Some(1),
+            deadline_ms: Some(CODE_MAX_DEADLINE_MS),
+            ..CodeFeature::default()
+        });
+        config.validate().expect("limits at their bounds are valid");
+    }
+
+    #[test]
+    fn code_feature_rejects_invalid_tools_and_limits() {
+        let mut config = config(ProviderApiKind::OpenAiResponses, None);
+        let invalid = [
+            CodeFeature {
+                tools: vec!["web.fetch".to_owned(), "web.fetch".to_owned()],
+                ..CodeFeature::default()
+            },
+            CodeFeature {
+                tools: vec![" web.fetch".to_owned()],
+                ..CodeFeature::default()
+            },
+            CodeFeature {
+                tools: (0..=CODE_MAX_TOOLS).map(|index| format!("tool.{index}")).collect(),
+                ..CodeFeature::default()
+            },
+            CodeFeature {
+                max_calls: Some(0),
+                ..CodeFeature::default()
+            },
+            CodeFeature {
+                max_concurrent_calls: Some(CODE_MAX_CONCURRENT_CALLS + 1),
+                ..CodeFeature::default()
+            },
+            CodeFeature {
+                deadline_ms: Some(CODE_MAX_DEADLINE_MS + 1),
+                ..CodeFeature::default()
+            },
+        ];
+        for feature in invalid {
+            config.features.code = Some(feature.clone());
+            assert!(
+                matches!(config.validate(), Err(DomainError::InvariantViolation(_))),
+                "{feature:?} must be rejected"
+            );
+        }
     }
 
     #[test]

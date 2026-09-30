@@ -130,6 +130,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "type": "object"
         },
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -352,6 +401,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {
@@ -1438,6 +1497,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       ],
       "type": "object",
       "definitions": {
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -1660,6 +1768,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {
@@ -3755,6 +3873,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       ],
       "type": "object",
       "definitions": {
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -3977,6 +4144,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {
@@ -6030,6 +6207,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       },
       "type": "object",
       "definitions": {
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -6252,6 +6478,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {
@@ -7288,6 +7524,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -7510,6 +7795,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {
@@ -8483,6 +8778,55 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "CodeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "properties": {
+            "deadlineMs": {
+              "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Most tool calls one program may make, 1–1000. Defaults to 200.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxConcurrentCalls": {
+              "description": "Most tool calls one program may have in flight, 1–64. Defaults to 16.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tools": {
+              "description": "Logical ids of the tools a program may call, at most 64.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "CompactionPolicy": {
           "oneOf": [
             {
@@ -8705,6 +9049,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
           "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "environments": {
               "anyOf": [
                 {

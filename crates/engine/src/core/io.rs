@@ -116,6 +116,10 @@ pub struct ToolInvocationBatchRequest {
     /// calling turn's model so executors never reconstruct session state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_policy: Option<GeneratePolicy>,
+    /// Admitted code grant for this tool batch, with the granted tools as
+    /// the session's toolset admitted them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_policy: Option<CodePolicy>,
     /// First promise id the executors of this dispatch may mint (see
     /// `ActiveToolBatch::promise_id_base`). A batch-unit dispatch counts up
     /// from here across all its calls; a per-call dispatch gets its own
@@ -153,6 +157,24 @@ pub struct ToolInvocationRequest {
 pub struct GeneratePolicy {
     pub feature: crate::GenerateFeature,
     pub turn_model: crate::ModelSelection,
+}
+
+/// The `code` grant a batch was dispatched under. `tools` holds only the
+/// granted ids that are built-in tools of this session's toolset, each with
+/// its admitted spec, so an executor can run them for a script without
+/// rebuilding the toolset. `turn_model` is the calling turn's model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodePolicy {
+    pub feature: crate::CodeFeature,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<CodeToolRuntime>,
+    pub turn_model: crate::ModelSelection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeToolRuntime {
+    pub tool_id: ToolName,
+    pub spec: crate::BuiltinToolSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +355,8 @@ pub struct ToolInvocationCallRequest {
     pub subagents_policy: Option<crate::SubagentsFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_policy: Option<GeneratePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_policy: Option<CodePolicy>,
     /// The one promise id this call may mint: the batch base plus the
     /// call's index, so sibling per-call dispatches never collide.
     pub promise_id_base: u64,
@@ -368,6 +392,7 @@ impl ToolInvocationCallRequest {
             environment_policy: self.environment_policy,
             subagents_policy: self.subagents_policy,
             generate_policy: self.generate_policy,
+            code_policy: self.code_policy,
             promise_id_base: self.promise_id_base,
             calls: vec![self.call],
         }
@@ -406,6 +431,7 @@ impl ToolInvocationBatchRequest {
             environment_policy: self.environment_policy.clone(),
             subagents_policy: self.subagents_policy.clone(),
             generate_policy: self.generate_policy.clone(),
+            code_policy: self.code_policy.clone(),
             promise_id_base: self.promise_id_base + index as u64,
             call,
             sibling_calls,
@@ -646,6 +672,7 @@ mod tests {
             environment_policy: Some(crate::EnvironmentsFeature::default()),
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             calls: call_ids
                 .iter()
                 .map(|call_id| ToolInvocationRequest {
@@ -772,6 +799,7 @@ mod promise_base_tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             promise_id_base: 7,
             calls: vec![call("a"), call("b"), call("c")],
         };

@@ -2230,6 +2230,7 @@ export interface ContextConfig {
  * via the `definition` "FeaturesConfig".
  */
 export interface FeaturesConfig {
+  code?: CodeFeature | null;
   environments?: EnvironmentsFeature | null;
   generate?: GenerateFeature | null;
   mcp?: McpFeature | null;
@@ -2237,6 +2238,38 @@ export interface FeaturesConfig {
   timers?: TimersFeature | null;
   vfs?: VfsFeature | null;
   web?: WebFeature | null;
+}
+/**
+ * Grants `code_run`: the model writes a TypeScript program, and the code
+ * runtime executes it durably. The program calls tools itself, concurrently
+ * when useful, and returns a JSON result. `tools` lists which of the
+ * session's own tools a program may call, by logical id; a listed tool the
+ * session does not have is unavailable to programs. Only tools whose calls
+ * leave no session state behind can be listed: `web.fetch`,
+ * `vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "CodeFeature".
+ */
+export interface CodeFeature {
+  /**
+   * Longest one program may run, in milliseconds, at most one hour.
+   * Defaults to ten minutes.
+   */
+  deadlineMs?: number | null;
+  /**
+   * Most tool calls one program may make, 1–1000. Defaults to 200.
+   */
+  maxCalls?: number | null;
+  /**
+   * Most tool calls one program may have in flight, 1–64. Defaults to 16.
+   */
+  maxConcurrentCalls?: number | null;
+  /**
+   * Logical ids of the tools a program may call, at most 64.
+   */
+  tools?: string[];
+  version?: number;
 }
 /**
  * Grants session environments. The `environments` list is the allowed set:

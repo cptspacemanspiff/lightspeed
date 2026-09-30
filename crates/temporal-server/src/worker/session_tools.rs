@@ -757,6 +757,56 @@ impl SessionTools {
                     .await
                     .map_err(map_blob_error)?,
             )
+        } else if tools::code_run::is_code_run_binding(
+            binding.definition.tool_id.as_str(),
+            binding.definition.semantic_type.as_str(),
+        ) {
+            // Code run admission: the grant on the batch request is the
+            // authority. Pin the tools a script may call, as this session's
+            // toolset admitted them, with the batch facts needed to execute
+            // them for this session.
+            let Some(policy) = request.code_policy.as_ref() else {
+                return failed_result(
+                    self.blobs.as_ref(),
+                    call.call_id.clone(),
+                    format!("{} requires the code grant", binding.definition.tool.name),
+                )
+                .await;
+            };
+            let args: tools::code_run::CodeRunArgs = match self.read_tool_args(call).await {
+                Ok(args) => args,
+                Err(error) => {
+                    return failed_result(
+                        self.blobs.as_ref(),
+                        call.call_id.clone(),
+                        error.to_string(),
+                    )
+                    .await;
+                }
+            };
+            if let Err(error) = args.validate() {
+                return failed_result(self.blobs.as_ref(), call.call_id.clone(), error.to_string())
+                    .await;
+            }
+            let context = tools::code_run::CodeRunExecutionContextV1 {
+                version: tools::code_run::CODE_RUN_EXECUTION_CONTEXT_VERSION,
+                session_id: request.session_id.as_str().to_owned(),
+                run_id: request.run_id.as_u64(),
+                turn_id: request.turn_id.as_u64(),
+                batch_id: request.batch_id.as_u64(),
+                workspace_attachments: request.workspace_attachments.clone(),
+                vfs_working_directory: request.vfs_working_directory.clone(),
+                active_environment_id: request.active_environment_id.clone(),
+                environment_policy: request.environment_policy.clone(),
+                tools: tools::code_run::script_tools(policy),
+                limits: tools::code_run::CodeRunLimits::from(&policy.feature),
+            };
+            Some(
+                self.blobs
+                    .put_bytes(serde_json::to_vec(&context).map_err(io_error)?)
+                    .await
+                    .map_err(map_blob_error)?,
+            )
         } else {
             None
         };
@@ -2341,6 +2391,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call_self"),
@@ -2655,6 +2706,7 @@ mod tests {
                     environment_policy: Some(test_environment_policy(&[])),
                     subagents_policy: None,
                     generate_policy: None,
+                    code_policy: None,
                     calls,
                 })
                 .await
@@ -2819,6 +2871,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             workspace_attachments: Vec::new(),
             calls,
         };
@@ -2988,6 +3041,7 @@ mod tests {
             environment_policy: Some(test_environment_policy(&["environment-original"])),
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![call.clone()],
         };
@@ -3044,6 +3098,7 @@ mod tests {
                 environment_policy: Some(test_environment_policy(&[])),
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![call.clone()],
             })
@@ -3139,6 +3194,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: policy,
             generate_policy: None,
+            code_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
@@ -3407,6 +3463,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: policy,
+            code_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![engine::ToolInvocationRequest {
                 builtin: Some(engine::BuiltinToolCallRuntime {
@@ -3557,6 +3614,187 @@ mod tests {
         let context = pinned_generation_context(&blobs, &outcome.results[0]).await;
         assert_eq!(context.selection.name, None);
         assert_eq!(context.selection.model, test_builtin_runtime().model);
+    }
+
+    /// The `code_run` system binding as the gateway admits it.
+    async fn code_run_binding(blobs: &InMemoryBlobStore) -> engine::WorkflowToolBinding {
+        let tool = tools::definitions::register(
+            tools::code_run::CODE_RUN_LOGICAL_ID,
+            Default::default(),
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        let recipe = b"test code run recipe".to_vec();
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe);
+        let recipe_ref = blobs.put_bytes(recipe).await.expect("put recipe");
+        engine::WorkflowToolBinding::admit(
+            uuid::Uuid::from_u128(1),
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(tools::code_run::CODE_RUN_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: tools::code_run::CODE_RUN_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool,
+            },
+            engine::WorkflowToolTarget::Start {
+                start: engine::WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            engine::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: tools::code_run::CODE_RUN_DEADLINE_AFTER_MS,
+            },
+        )
+        .expect("admit code_run binding")
+    }
+
+    fn code_policy(tools: &[&str]) -> engine::CodePolicy {
+        engine::CodePolicy {
+            feature: engine::CodeFeature {
+                tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+                max_calls: Some(25),
+                ..engine::CodeFeature::default()
+            },
+            tools: tools
+                .iter()
+                .map(|tool| engine::CodeToolRuntime {
+                    tool_id: ToolName::new(*tool),
+                    spec: engine::BuiltinToolSpec {
+                        settings: serde_json::Value::Null,
+                    },
+                })
+                .collect(),
+            turn_model: test_builtin_runtime().model,
+        }
+    }
+
+    async fn code_run_batch(
+        blobs: &InMemoryBlobStore,
+        binding: &engine::WorkflowToolBinding,
+        arguments: serde_json::Value,
+        policy: Option<engine::CodePolicy>,
+    ) -> ToolInvocationBatchRequest {
+        let arguments_ref = blobs
+            .put_bytes(serde_json::to_vec(&arguments).expect("encode arguments"))
+            .await
+            .expect("put code run arguments");
+        ToolInvocationBatchRequest {
+            vfs_working_directory: Some("/workspace".to_owned()),
+            session_id: SessionId::new("session-caller"),
+            run_id: RunId::new(4),
+            turn_id: TurnId::new(2),
+            batch_id: ToolBatchId::new(1),
+            promise_id_base: 1,
+            active_environment_id: None,
+            environment_policy: None,
+            subagents_policy: None,
+            generate_policy: None,
+            code_policy: policy,
+            workspace_attachments: Vec::new(),
+            calls: vec![engine::ToolInvocationRequest {
+                builtin: Some(test_builtin_runtime()),
+                call_id: ToolCallId::new("call-code"),
+                tool_id: Some(binding.definition.tool.name.clone()),
+                tool_name: ToolName::new(tools::code_run::CODE_RUN_TOOL_NAME),
+                arguments_ref,
+                workflow_tool: Some(engine::WorkflowToolCallRuntime::v1(binding.clone(), 0)),
+                promise_control: None,
+                remote_mcp: None,
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_run_requires_the_code_grant_and_valid_arguments() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = code_run_binding(&blobs).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let ungranted = tools
+            .invoke_batch(
+                code_run_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"source": "return 1;"}),
+                    None,
+                )
+                .await,
+            )
+            .await
+            .expect("invoke code_run")
+            .completed_result()
+            .expect("completed batch");
+        let error = failure_text(&blobs, &ungranted.results[0]).await;
+        assert!(error.contains("requires the code grant"), "{error}");
+
+        let empty = tools
+            .invoke_batch(
+                code_run_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"source": "   "}),
+                    Some(code_policy(&["web.fetch"])),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke code_run")
+            .completed_result()
+            .expect("completed batch");
+        let error = failure_text(&blobs, &empty.results[0]).await;
+        assert!(error.contains("source must not be empty"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_run_pins_the_scriptable_tools_and_batch_facts() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = code_run_binding(&blobs).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let outcome = tools
+            .invoke_batch(
+                code_run_batch(
+                    &blobs,
+                    &binding,
+                    serde_json::json!({"source": "return input;", "input": {"n": 1}}),
+                    Some(code_policy(&["web.fetch", "vfs.write_file"])),
+                )
+                .await,
+            )
+            .await
+            .expect("invoke code_run")
+            .completed_result()
+            .expect("completed batch");
+        let result = &outcome.results[0];
+        assert_eq!(result.status, ToolCallStatus::Succeeded);
+        let context_ref = BlobRef::parse(
+            result.effects[0]
+                .data
+                .get("execution_context_ref")
+                .expect("execution context ref")
+                .clone(),
+        )
+        .expect("valid execution context ref");
+        let context: tools::code_run::CodeRunExecutionContextV1 = serde_json::from_slice(
+            &blobs
+                .read_bytes(&context_ref)
+                .await
+                .expect("read execution context"),
+        )
+        .expect("decode execution context");
+        assert_eq!(context.session_id, "session-caller");
+        assert_eq!((context.run_id, context.turn_id, context.batch_id), (4, 2, 1));
+        assert_eq!(context.vfs_working_directory.as_deref(), Some("/workspace"));
+        // A granted tool that cannot run from a script is never pinned.
+        let names: Vec<_> = context.tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, ["web.fetch"]);
+        assert_eq!(context.tools[0].tool_name.as_str(), "web_fetch");
+        assert_eq!(context.limits.max_calls, Some(25));
+        assert_eq!(
+            context.limits.deadline_ms,
+            tools::code_run::DEFAULT_CODE_DEADLINE_MS
+        );
     }
 
     #[derive(Default)]
@@ -4180,6 +4418,7 @@ mod tests {
             ])),
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-environment-list"),
@@ -4253,6 +4492,7 @@ mod tests {
             environment_policy: Some(test_environment_policy(&["environment-pending"])),
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-read-file"),
@@ -4383,6 +4623,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             call: engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-await"),
@@ -4439,6 +4680,7 @@ mod tests {
             ])),
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             workspace_attachments: Vec::new(),
             calls: vec![engine::ToolInvocationRequest {
                 builtin: Some(test_builtin_runtime()),
@@ -4563,6 +4805,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments,
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4609,6 +4852,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments,
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(engine::BuiltinToolCallRuntime {
@@ -4668,6 +4912,7 @@ mod tests {
                 environment_policy: Some(test_environment_policy(&["test"])),
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments,
                 calls: vec![
                     engine::ToolInvocationRequest {
@@ -4805,6 +5050,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![
                     engine::ToolInvocationRequest {
@@ -4911,6 +5157,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -4963,6 +5210,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -5020,6 +5268,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -5095,6 +5344,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![sleep_call("call_sleep_a"), sleep_call("call_sleep_b")],
             })
@@ -5181,6 +5431,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),
@@ -5228,6 +5479,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![engine::ToolInvocationRequest {
                     builtin: Some(test_builtin_runtime()),

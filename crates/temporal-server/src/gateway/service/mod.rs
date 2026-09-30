@@ -1493,6 +1493,10 @@ fn is_core_model_generate_binding(binding: &engine::WorkflowToolBinding) -> bool
     binding.definition.tool_id.as_str() == tools::model_generate::MODEL_GENERATE_WORKFLOW_TOOL_ID
 }
 
+fn is_core_code_run_binding(binding: &engine::WorkflowToolBinding) -> bool {
+    binding.definition.tool_id.as_str() == tools::code_run::CODE_RUN_WORKFLOW_TOOL_ID
+}
+
 fn validate_subagent_deadline_for_existing_bindings(
     state: &engine::CoreAgentState,
     features: &engine::FeaturesConfig,

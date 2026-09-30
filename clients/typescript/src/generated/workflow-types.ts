@@ -463,6 +463,9 @@ export interface MaintainChannelTypingInput {
   route: ChannelRoute;
 }
 /**
+ * A concrete provider route: where a call goes and which wire protocol it
+ * speaks.
+ *
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "ModelConfig".
  */

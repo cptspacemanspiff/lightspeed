@@ -11,7 +11,8 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use crate::universe::{UniverseError, UniverseRuntime};
 use crate::worker::{
-    ACTIVITY_APPEND_EVENTS, ACTIVITY_AWAIT_ENVIRONMENT_READY,
+    ACTIVITY_APPEND_EVENTS, ACTIVITY_AWAIT_ENVIRONMENT_READY, ACTIVITY_CODE_RUN_FINISH,
+    ACTIVITY_CODE_RUN_PREPARE, ACTIVITY_CODE_TOOL_CALL,
     ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CHECK_WORKFLOW_TOOL_EXECUTION,
     ACTIVITY_CONTEXT_COMPACT, ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
@@ -33,6 +34,7 @@ use crate::worker::{
 };
 
 mod audio;
+mod code_run;
 mod common;
 mod compaction;
 mod context_refresh;
@@ -302,6 +304,18 @@ mod tests {
             WorkerActivities::model_generate.name(),
             temporal_workflow::WorkflowActivities::model_generate.name()
         );
+        assert_eq!(
+            WorkerActivities::code_run_prepare.name(),
+            temporal_workflow::WorkflowActivities::code_run_prepare.name()
+        );
+        assert_eq!(
+            WorkerActivities::code_tool_call.name(),
+            temporal_workflow::WorkflowActivities::code_tool_call.name()
+        );
+        assert_eq!(
+            WorkerActivities::code_run_finish.name(),
+            temporal_workflow::WorkflowActivities::code_run_finish.name()
+        );
     }
 
     #[test]
@@ -351,6 +365,7 @@ mod tests {
                     environment_policy: None,
                     subagents_policy: None,
                     generate_policy: None,
+                    code_policy: None,
                     workspace_attachments: Vec::new(),
                     calls: vec![ToolInvocationRequest {
                         builtin: None,
@@ -768,6 +783,38 @@ impl WorkerActivities {
     ) -> Result<(), ActivityError> {
         let state = self.state_for_universe(request.universe_id).await?;
         subagents::close(state.subagents(), request).await
+    }
+
+    /// Code runs execute under the calling session's universe; the
+    /// execution id carries no session, so routing uses the start args.
+    #[activity(name = ACTIVITY_CODE_RUN_PREPARE)]
+    pub async fn code_run_prepare(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        request: temporal_workflow::CodeRunPrepareActivityRequest,
+    ) -> Result<temporal_workflow::CodeRunPrepared, ActivityError> {
+        let state = self.state_for_universe(request.start.universe_id).await?;
+        code_run::prepare(state.tools(), request).await
+    }
+
+    #[activity(name = ACTIVITY_CODE_TOOL_CALL)]
+    pub async fn code_tool_call(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::CodeToolCallActivityRequest,
+    ) -> Result<serde_json::Value, ActivityError> {
+        let state = self.state_for_universe(request.universe_id).await?;
+        common::cancellable(&ctx, code_run::tool_call(state.tools(), request)).await
+    }
+
+    #[activity(name = ACTIVITY_CODE_RUN_FINISH)]
+    pub async fn code_run_finish(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        request: temporal_workflow::CodeRunFinishActivityRequest,
+    ) -> Result<engine::PromiseResolution, ActivityError> {
+        let state = self.state_for_universe(request.universe_id).await?;
+        code_run::finish(state.tools(), request).await
     }
 
     /// Standalone generations run under the calling session's universe; the

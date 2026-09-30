@@ -717,6 +717,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 promise_id_base: 7,
                 calls,
             },

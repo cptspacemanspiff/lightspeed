@@ -36,7 +36,8 @@ pub use reaper::{
 pub use secrets::{BrokerSecretResolver, StoredModelProviderResolver, StoredProviderKeyResolver};
 pub use session_tools::{SessionTools, ToolCallExecution};
 pub use temporal_workflow::{
-    ACTIVITY_APPEND_EVENTS, ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION,
+    ACTIVITY_APPEND_EVENTS, ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CODE_RUN_FINISH,
+    ACTIVITY_CODE_RUN_PREPARE, ACTIVITY_CODE_TOOL_CALL,
     ACTIVITY_CHECK_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CONTEXT_COMPACT,
     ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
@@ -51,7 +52,7 @@ pub use temporal_workflow::{
     DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, EnvironmentJobCancelActivityRequest,
     EnvironmentJobPollActivityRequest, EnvironmentJobPollActivityResult,
     EnvironmentJobStartActivityRequest, EnvironmentJobStartActivityResult, EnvironmentJobWorkflow,
-    EnvironmentJobWorkflowArgs, FAKE_TOOL_NAME, LlmGenerateActivityRequest, ModelGenerateWorkflow,
+    EnvironmentJobWorkflowArgs, FAKE_TOOL_NAME, LlmGenerateActivityRequest, ModelGenerateWorkflow, CodeRunWorkflow,
     PutBlobRequest, ReadBlobRequest, ReadBlobResult, RuntimeProjectionRefreshActivityRequest,
     RuntimeProjectionRefreshActivityResult, SubagentExecutionWorkflow,
     ToolInvokeBatchActivityRequest, ToolInvokeCallActivityRequest,
@@ -102,6 +103,7 @@ pub fn sessions_worker(
         .register_workflow::<EnvironmentJobWorkflow>()
         .register_workflow::<SubagentExecutionWorkflow>()
         .register_workflow::<ModelGenerateWorkflow>()
+        .register_workflow::<CodeRunWorkflow>()
         .register_activities(activities)
         .task_types(task_types)
         .build();

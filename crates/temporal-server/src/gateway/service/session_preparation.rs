@@ -269,6 +269,55 @@ impl SessionPreparationService {
         ))
     }
 
+    pub(crate) async fn core_code_run_workflow_tool_declaration(
+        &self,
+    ) -> Result<WorkflowToolDeclaration, AgentApiError> {
+        use tools::code_run::{
+            CODE_RUN_DEADLINE_AFTER_MS, CODE_RUN_LOGICAL_ID, CODE_RUN_WORKFLOW_SEMANTIC_TYPE,
+            CODE_RUN_WORKFLOW_TOOL_ID, CODE_RUN_WORKFLOW_TYPE,
+        };
+        let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
+            workflow_type: CODE_RUN_WORKFLOW_TYPE.to_owned(),
+            task_queue: self.task_queue.clone(),
+        })
+        .map_err(|error| AgentApiError::internal(format!("encode core code run recipe: {error}")))?;
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe_bytes);
+        let recipe_ref = self
+            .store
+            .put_bytes(recipe_bytes)
+            .await
+            .map_err(map_blob_store_error)?;
+        // As for model generation, the granted tools are published into the
+        // toolset at each preparation and pinned per call, so the immutable
+        // binding never changes with the grant.
+        let tool = tools::definitions::register(
+            CODE_RUN_LOGICAL_ID,
+            Default::default(),
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        Ok(WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(CODE_RUN_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: CODE_RUN_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool,
+            },
+            WorkflowToolTarget::Start {
+                start: WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: CODE_RUN_DEADLINE_AFTER_MS,
+            },
+        ))
+    }
+
     pub(crate) async fn prepare_toolset(
         &self,
         source: SessionToolsetSource,
@@ -282,6 +331,7 @@ impl SessionPreparationService {
             .is_some_and(|access| access.allows_jobs());
         let subagents = session_config.features.subagents.is_some();
         let generate = session_config.features.generate.as_ref();
+        let code = session_config.features.code.as_ref();
         let mut declarations = Vec::new();
         if jobs {
             declarations.extend(
@@ -294,6 +344,9 @@ impl SessionPreparationService {
         }
         if generate.is_some() {
             declarations.push(self.core_model_generate_workflow_tool_declaration().await?);
+        }
+        if code.is_some() {
+            declarations.push(self.core_code_run_workflow_tool_declaration().await?);
         }
         for declaration in &declarations {
             let id = &declaration.definition.tool_id;
@@ -336,6 +389,7 @@ impl SessionPreparationService {
                 (jobs || !is_core_environment_job_binding(binding))
                     && (subagents || !is_core_subagent_binding(binding))
                     && (generate.is_some() || !is_core_model_generate_binding(binding))
+                    && (code.is_some() || !is_core_code_run_binding(binding))
             })
             .collect::<Vec<_>>();
         let mut config = Self::session_toolset_config(
@@ -351,6 +405,9 @@ impl SessionPreparationService {
         })?;
         if let Some(generate) = generate {
             publish_generate_models(&mut toolset, generate)?;
+        }
+        if let Some(code) = code {
+            publish_code_tools(&mut toolset, code, &session_config.model)?;
         }
         let desired_mcp = self.desired_mcp_tools(&session_config.features).await?;
         if let Some(name) = toolset
@@ -510,6 +567,53 @@ impl GatewayAgentApi {
             task_queue: self.task_queue.clone(),
         }
     }
+}
+
+/// Declare the tools a script may call in `code_run`'s description: the
+/// granted ids that are scriptable built-ins of this toolset, in the form a
+/// script calls them. The runtime pins the same set per call.
+pub(super) fn publish_code_tools(
+    toolset: &mut tools::toolset::RegisteredToolset,
+    code: &engine::CodeFeature,
+    model: &engine::ModelSelection,
+) -> Result<(), AgentApiError> {
+    let choices = code
+        .tools
+        .iter()
+        .filter_map(|id| {
+            let tool_id = engine::ToolName::new(id.as_str());
+            let engine::ToolKind::Builtin(spec) = &toolset.tools.get(&tool_id)?.kind else {
+                return None;
+            };
+            let runtime = engine::CodeToolRuntime {
+                tool_id,
+                spec: spec.clone(),
+            };
+            tools::code_run::script_tool(&runtime, model)
+                .ok()
+                .map(|tool| tool.choice())
+        })
+        .collect();
+    let name = engine::ToolName::new(tools::code_run::CODE_RUN_LOGICAL_ID);
+    let Some(tool) = toolset.tools.get_mut(&name) else {
+        return Ok(());
+    };
+    let engine::ToolKind::Builtin(spec) = &mut tool.kind else {
+        return Err(AgentApiError::internal(
+            "code run tool is not a built-in definition",
+        ));
+    };
+    let mut settings: tools::definitions::BuiltinSettings = if spec.settings.is_null() {
+        Default::default()
+    } else {
+        serde_json::from_value(spec.settings.clone()).map_err(|error| {
+            AgentApiError::internal(format!("decode code run settings: {error}"))
+        })?
+    };
+    settings.code_tools = choices;
+    spec.settings = serde_json::to_value(settings)
+        .map_err(|error| AgentApiError::internal(format!("encode code run settings: {error}")))?;
+    Ok(())
 }
 
 /// Advertise the granted generation models in `model_generate`'s schema.

@@ -1736,6 +1736,7 @@ mod tests {
                 environment_policy: None,
                 subagents_policy: None,
                 generate_policy: None,
+                code_policy: None,
                 workspace_attachments: Vec::new(),
                 calls: vec![ToolInvocationRequest {
                     builtin: Some(engine::BuiltinToolCallRuntime {

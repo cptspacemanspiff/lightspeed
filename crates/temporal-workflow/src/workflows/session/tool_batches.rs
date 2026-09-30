@@ -548,6 +548,7 @@ mod tests {
             environment_policy: None,
             subagents_policy: None,
             generate_policy: None,
+            code_policy: None,
             calls,
         }
     }

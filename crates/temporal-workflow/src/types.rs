@@ -594,6 +594,93 @@ pub struct ModelGenerateExecutionSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeRunPrepareActivityRequest {
+    pub start: WorkflowToolStartArgs,
+}
+
+/// What the code-run workflow needs to start the code runtime, or the
+/// caller's resolution when the pinned call cannot run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CodeRunPrepared {
+    Ready {
+        /// The runtime's execution input, owned by its own contract.
+        execution_input: serde_json::Value,
+        task_queue: String,
+        deadline_ms: u64,
+    },
+    Rejected {
+        resolution: engine::PromiseResolution,
+    },
+}
+
+/// One call a script asks its host to execute, as the code runtime sends it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CodeHostCallRequest {
+    pub execution_id: String,
+    pub call_id: String,
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+/// The host's reply to one call: `{ "ok": true, "value": … }` or
+/// `{ "ok": false, "error": { "code", "message" } }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CodeHostCallCompleted {
+    pub call_id: String,
+    pub outcome: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CodeToolCallActivityRequest {
+    pub universe_id: uuid::Uuid,
+    pub execution_context_ref: engine::BlobRef,
+    pub call: CodeHostCallRequest,
+}
+
+/// How the code runtime's execution ended, as the code-run workflow saw it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CodeRunExecutionOutcome {
+    /// The runtime returned its result, which may itself report a failure.
+    Returned { result: serde_json::Value },
+    /// The runtime's execution could not start or did not return.
+    Lost { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CodeRunFinishActivityRequest {
+    pub universe_id: uuid::Uuid,
+    pub outcome: CodeRunExecutionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeRunExecutionPhase {
+    #[default]
+    Starting,
+    Running,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeRunExecutionSnapshot {
+    pub phase: CodeRunExecutionPhase,
+    /// Workflow id of the code runtime's execution, once started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_execution_id: Option<String>,
+    /// Script calls this host has executed.
+    #[serde(default)]
+    pub calls: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<engine::PromiseResolution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentJobPrepareWorkflowToolRequest {
     pub start: WorkflowToolStartArgs,
 }

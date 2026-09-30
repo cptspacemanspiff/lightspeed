@@ -2164,6 +2164,13 @@ fn features_config_to_api(
             }),
         mcp: features.mcp.as_ref().map(mcp_feature_to_api),
         generate: features.generate.as_ref().map(generate_feature_to_api),
+        code: features.code.as_ref().map(|code| api::CodeFeature {
+            version: code.version,
+            tools: code.tools.clone(),
+            max_calls: code.max_calls,
+            max_concurrent_calls: code.max_concurrent_calls,
+            deadline_ms: code.deadline_ms,
+        }),
     })
 }
 
@@ -2923,6 +2930,16 @@ fn tool_call_display(tool_name: &str, arguments: &str) -> Option<ToolCallDisplay
                     .map(|text| summary_line(&text))
             }),
         },
+        "code_run" => ToolCallDisplayView {
+            group: ToolCallDisplayGroup::Agent,
+            verb: "Run code".to_owned(),
+            target: None,
+            detail: json.as_ref().and_then(|json| {
+                first_string(json, &["label"])
+                    .or_else(|| first_string(json, &["source"]))
+                    .map(|text| summary_line(&text))
+            }),
+        },
         "await" | "cancel" | "detach" => ToolCallDisplayView {
             group: ToolCallDisplayGroup::Agent,
             verb: match normalized.as_str() {
@@ -3312,6 +3329,28 @@ mod tests {
         .expect("display");
         assert_eq!(display.target, None);
         assert_eq!(display.detail.as_deref(), Some("Extract dates."));
+    }
+
+    #[test]
+    fn code_run_calls_display_the_label_or_the_first_source_line() {
+        let display = tool_call_display(
+            "code_run",
+            r#"{"label":"Check every citation","source":"const pages = [];"}"#,
+        )
+        .expect("display");
+        assert_eq!(display.group, ToolCallDisplayGroup::Agent);
+        assert_eq!(display.verb, "Run code");
+        assert_eq!(display.detail.as_deref(), Some("Check every citation"));
+
+        let display = tool_call_display(
+            "code_run",
+            r#"{"source":"const page = await tools.web.fetch({ url: input.url });\nreturn page;"}"#,
+        )
+        .expect("display");
+        assert_eq!(
+            display.detail.as_deref(),
+            Some("const page = await tools.web.fetch({ url: input.url });")
+        );
     }
 
     #[test]
@@ -4507,6 +4546,13 @@ mod tests {
                         max_output_tokens: Some(800),
                     }],
                 }),
+                code: Some(engine::CodeFeature {
+                    version: engine::CURRENT_FEATURE_VERSION,
+                    tools: vec!["web.fetch".to_owned()],
+                    max_calls: Some(50),
+                    max_concurrent_calls: None,
+                    deadline_ms: Some(60_000),
+                }),
             },
         };
 
@@ -4616,6 +4662,13 @@ mod tests {
                             reasoning_effort: Some("low".to_owned()),
                             max_output_tokens: Some(800),
                         }],
+                    }),
+                    code: Some(api::CodeFeature {
+                        version: api::CURRENT_FEATURE_VERSION,
+                        tools: vec!["web.fetch".to_owned()],
+                        max_calls: Some(50),
+                        max_concurrent_calls: None,
+                        deadline_ms: Some(60_000),
                     }),
                 }),
             }

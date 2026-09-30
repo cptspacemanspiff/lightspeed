@@ -688,6 +688,8 @@
       "type": "object"
     },
     "ModelConfig": {
+      "additionalProperties": false,
+      "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
       "properties": {
         "apiKind": {
           "type": "string"

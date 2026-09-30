@@ -325,6 +325,7 @@ describe("environment feature config", () => {
           mcp: { servers: [{ serverId: "demo" }] },
           subagents: {},
           generate: {},
+          code: {},
           vfs: {},
           web: { search: {} },
           timers: {},
@@ -340,6 +341,7 @@ describe("environment feature config", () => {
       "MCP Servers",
       "Sub-agents",
       "Model generation",
+      "Code mode",
       "Web",
       "Timers",
       "Session data",
@@ -416,6 +418,25 @@ describe("model generation feature config", () => {
     expect(error([{ ...grader, name: "big model" }])).toContain("needs a name");
     expect(error([{ ...grader, model: { ...grader.model, model: "" } }])).toContain("provider id, API kind, and model name");
     expect(error([{ ...grader, model: { ...grader.model, apiKind: "openai:audio-transcriptions" } }])).toContain("agent generation API kind");
+  });
+});
+
+describe("code mode feature config", () => {
+  it("keeps granted tools in a stable order and drops ones programs cannot call", () => {
+    const config = { features: { code: { tools: ["web.fetch", "vfs.read_file"], maxCalls: 50 } } };
+    expect(normalizeSessionConfig(normalizeSessionConfig(config))).toEqual(config);
+    expect(normalizeSessionConfig({
+      features: { code: { tools: ["vfs.read_file", "vfs.write_file", "vfs.read_file"], maxCalls: 0 } },
+    })).toEqual({ features: { code: { tools: ["vfs.read_file"] } } });
+    expect(normalizeSessionConfig({ features: { code: {} } })).toEqual({ features: { code: {} } });
+  });
+
+  it("rejects tools and limits the runtime would refuse", () => {
+    const error = (code: Record<string, unknown>) => configError({ features: { code } });
+    expect(error({ tools: ["web.fetch"], maxConcurrentCalls: 64, deadlineMs: 3_600_000 })).toBeNull();
+    expect(error({ tools: ["vfs.write_file"] })).toContain("cannot grant vfs.write_file");
+    expect(error({ maxCalls: 1001 })).toContain("between 1 and 1000");
+    expect(error({ deadlineMs: 3_600_001 })).toContain("between 1 and 3600000");
   });
 });
 

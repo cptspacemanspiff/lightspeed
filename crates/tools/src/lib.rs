@@ -6,6 +6,7 @@
 
 pub mod builtin;
 pub mod catalog;
+pub mod code_run;
 pub mod concurrency;
 pub mod definitions;
 pub mod environment;
