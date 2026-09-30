@@ -1,0 +1,30 @@
+{
+  "name": "@lightspeed/code-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Durable code-mode runtime: runs sandboxed TypeScript programs whose tool calls, randomness, and time are recorded by a Temporal workflow.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@temporalio/activity": "1.21.1",
+    "@temporalio/client": "1.21.1",
+    "@temporalio/common": "1.21.1",
+    "@temporalio/worker": "1.21.1",
+    "@temporalio/workflow": "1.21.1",
+    "quickjs-emscripten": "^0.31.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3",
+    "workerd": "1.20260930.2"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "1.21.1",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
