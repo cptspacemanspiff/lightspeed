@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.stubGlobal("PointerEvent", MouseEvent);
   window.localStorage.clear();
   mocks.role = "contributor";
-  defaults = { revision: 1, agentRun: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-sol" }, speechToText: null };
+  defaults = { revision: 1, agentRun: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-sol" }, speechToText: null, tiers: {} };
   mocks.api.mockReset().mockImplementation(async (method: string, path: string) => {
     if (path.includes("/sessions?")) return { sessions };
     if (path.endsWith("/models/defaults")) return defaults;

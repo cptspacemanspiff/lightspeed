@@ -120,7 +120,7 @@ import {
   setupResourceFeatureError,
 } from "@/lib/sessions/resource-features";
 import { ProviderReadinessBanner } from "@/components/provider-readiness-banner";
-import { modelFromConfig, modelLabel, resolveCreationModel, useModelDefaults, useModelDiscovery } from "@/lib/model-defaults";
+import { modelFromConfig, modelLabel, modelRefFromConfig, modelTableFromConfig, resolveCreationModel, useModelDefaults, useModelDiscovery } from "@/lib/model-defaults";
 import { useActionPermissions } from "@/lib/permissions";
 import { useActiveUniverse, useFeature } from "@/lib/universes";
 import { cn } from "@/lib/utils";
@@ -951,16 +951,18 @@ function NewSessionDialog({
   const defaults = useModelDefaults(universeId, open);
   const creationProfile = profileForCreate(profileId, inlineProfile, selectedProfile.data);
   const effectiveModel = resolveCreationModel(
-    creationProfile.kind === "inline" ? modelFromConfig(creationProfile.profile.config) : null,
-    creationProfile.kind === "named" ? modelFromConfig(selectedProfile.data?.config) : null,
+    creationProfile.kind === "inline" ? modelRefFromConfig(creationProfile.profile.config) : null,
+    creationProfile.kind === "named" ? modelRefFromConfig(selectedProfile.data?.config) : null,
     defaults.data,
+    modelTableFromConfig(creationProfile.kind === "inline" ? creationProfile.profile.config : selectedProfile.data?.config),
   );
   const modelPending = Boolean(profileId && !inlineProfile && selectedProfile.isLoading)
     || (!effectiveModel.model && defaults.isLoading);
   const modelMissing = !modelPending && Boolean(defaults.data) && !effectiveModel.model;
   const modelSummary = (
     <div className="grid gap-2">
-      <p className="text-sm"><span className="text-muted-foreground">{effectiveModel.source}: </span>{modelPending ? "Loading…" : effectiveModel.model ? modelLabel(effectiveModel.model) : defaults.error ? "Could not load default" : "Not selected"}</p>
+      <p className="text-sm"><span className="text-muted-foreground">{effectiveModel.source}: </span>{modelPending ? "Loading…" : effectiveModel.model ? modelLabel(effectiveModel.model) : effectiveModel.error ? effectiveModel.error : defaults.error ? "Could not load default" : "Not selected"}</p>
+      {effectiveModel.chain && effectiveModel.chain.length > 1 && <p className="text-xs text-muted-foreground">{effectiveModel.chain.join(" → ")}</p>}
       <ProviderReadinessBanner universeId={universeId} slug={slug} model={effectiveModel.model ?? (defaults.data ? null : undefined)} enabled={open && !modelPending} className="rounded-lg border" />
     </div>
   );
@@ -1220,6 +1222,7 @@ function InlineSetupEditor({
           workspacesLoading={options.workspacesLoading}
           models={options.models}
           defaultModelLabel={options.defaultModelLabel}
+          modelTiers={options.modelTiers}
           profiles={options.profiles}
           environments={options.environments}
           mcpToolDiscovery={options.mcpToolDiscovery}

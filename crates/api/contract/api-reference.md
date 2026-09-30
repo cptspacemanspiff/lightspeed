@@ -692,7 +692,7 @@ Cancel unfinished transcription. Repeated cancellation is safe; completed result
 
 **Read universe model defaults**
 
-Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+Returns the revision, the independent agentRun and speechToText selections, and the universe model tier table. The agentRun selection is the `default` tier. Revision zero means no update has been made. Does not contact model providers.
 
 - Access: `{"kind":"universe","action":"read"}`
 - Group: `models`
@@ -713,6 +713,32 @@ Sets or explicitly clears one purpose slot using its current expected revision. 
 - Target: `none`
 - Params: `ModelDefaultsPutParams`
 - Result: `AgentApiOutcome<ModelDefaultsResponse>`
+
+### `models/tiers/put`
+
+**Replace the universe model tier table**
+
+Replaces every shared tier binding under the defaults revision. Each tier binds a route with its settings or aliases another universe tier; `default` stays the agentRun selection. Aliases must resolve without cycles. Existing sessions keep their resolved model; profiles referencing a tier resolve it again at their next application.
+
+- Access: `{"kind":"universe","action":"configure_resource"}`
+- Group: `models`
+- Role: `operator`
+- Target: `none`
+- Params: `ModelTiersPutParams`
+- Result: `AgentApiOutcome<ModelDefaultsResponse>`
+
+### `models/tiers/resolve`
+
+**Resolve the effective model tier table**
+
+Returns every tier a configuration can name, with its defining layer, alias chain, and concrete route, optionally under a profile's `config.models` table and an extra configuration table. Tiers that do not resolve carry an error instead of a route.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `models`
+- Role: `viewer`
+- Target: `none`
+- Params: `ModelTiersResolveParams`
+- Result: `AgentApiOutcome<ModelTiersResolveResponse>`
 
 ### `models/list`
 

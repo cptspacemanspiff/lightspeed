@@ -93,7 +93,7 @@ async fn run_audio_transcription_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -214,7 +214,7 @@ async fn run_transcodable_audio_transcription_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,

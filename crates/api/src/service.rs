@@ -48,6 +48,20 @@ pub trait AgentApiService: Send + Sync {
         Err(AgentApiError::internal("model defaults are unavailable"))
     }
 
+    async fn put_model_tiers(
+        &self,
+        _params: ModelTiersPutParams,
+    ) -> Result<AgentApiOutcome<ModelDefaultsResponse>, AgentApiError> {
+        Err(AgentApiError::internal("model tiers are unavailable"))
+    }
+
+    async fn resolve_model_tiers(
+        &self,
+        _params: ModelTiersResolveParams,
+    ) -> Result<AgentApiOutcome<ModelTiersResolveResponse>, AgentApiError> {
+        Err(AgentApiError::internal("model tiers are unavailable"))
+    }
+
     async fn list_models(
         &self,
         params: ModelListParams,

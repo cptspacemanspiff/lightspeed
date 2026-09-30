@@ -59,6 +59,8 @@ export const METHODS = [
   "transcriptions/cancel",
   "models/defaults/read",
   "models/defaults/put",
+  "models/tiers/put",
+  "models/tiers/resolve",
   "models/list",
   "profiles/create",
   "profiles/read",
@@ -461,13 +463,25 @@ export const METHOD_INFO = {
     scope: "universe",
     access: {"action":"read","kind":"universe"},
     summary: "Read universe model defaults",
-    description: "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.",
+    description: "Returns the revision, the independent agentRun and speechToText selections, and the universe model tier table. The agentRun selection is the `default` tier. Revision zero means no update has been made. Does not contact model providers.",
   },
   "models/defaults/put": {
     scope: "universe",
     access: {"action":"configure_resource","kind":"universe"},
     summary: "Set a universe model default",
     description: "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.",
+  },
+  "models/tiers/put": {
+    scope: "universe",
+    access: {"action":"configure_resource","kind":"universe"},
+    summary: "Replace the universe model tier table",
+    description: "Replaces every shared tier binding under the defaults revision. Each tier binds a route with its settings or aliases another universe tier; `default` stays the agentRun selection. Aliases must resolve without cycles. Existing sessions keep their resolved model; profiles referencing a tier resolve it again at their next application.",
+  },
+  "models/tiers/resolve": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "Resolve the effective model tier table",
+    description: "Returns every tier a configuration can name, with its defining layer, alias chain, and concrete route, optionally under a profile's `config.models` table and an extra configuration table. Tiers that do not resolve carry an error instead of a route.",
   },
   "models/list": {
     scope: "universe",
@@ -1453,7 +1467,7 @@ export interface MethodMap {
   /**
    * Read universe model defaults
    *
-   * Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+   * Returns the revision, the independent agentRun and speechToText selections, and the universe model tier table. The agentRun selection is the `default` tier. Revision zero means no update has been made. Does not contact model providers.
    */
   "models/defaults/read": {
     params: Api.ModelDefaultsReadParams;
@@ -1467,6 +1481,24 @@ export interface MethodMap {
   "models/defaults/put": {
     params: Api.ModelDefaultsPutParams;
     result: Api.AgentApiOutcomeOfModelDefaultsResponse;
+  };
+  /**
+   * Replace the universe model tier table
+   *
+   * Replaces every shared tier binding under the defaults revision. Each tier binds a route with its settings or aliases another universe tier; `default` stays the agentRun selection. Aliases must resolve without cycles. Existing sessions keep their resolved model; profiles referencing a tier resolve it again at their next application.
+   */
+  "models/tiers/put": {
+    params: Api.ModelTiersPutParams;
+    result: Api.AgentApiOutcomeOfModelDefaultsResponse;
+  };
+  /**
+   * Resolve the effective model tier table
+   *
+   * Returns every tier a configuration can name, with its defining layer, alias chain, and concrete route, optionally under a profile's `config.models` table and an extra configuration table. Tiers that do not resolve carry an error instead of a route.
+   */
+  "models/tiers/resolve": {
+    params: Api.ModelTiersResolveParams;
+    result: Api.AgentApiOutcomeOfModelTiersResolveResponse;
   };
   /**
    * Discover available models
@@ -2644,7 +2676,7 @@ export const rpc = {
   /**
    * Read universe model defaults
    *
-   * Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.
+   * Returns the revision, the independent agentRun and speechToText selections, and the universe model tier table. The agentRun selection is the `default` tier. Revision zero means no update has been made. Does not contact model providers.
    */
   modelsDefaultsRead(client: RpcCaller, params: Api.ModelDefaultsReadParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
     return client.call("models/defaults/read", params);
@@ -2656,6 +2688,22 @@ export const rpc = {
    */
   modelsDefaultsPut(client: RpcCaller, params: Api.ModelDefaultsPutParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
     return client.call("models/defaults/put", params);
+  },
+  /**
+   * Replace the universe model tier table
+   *
+   * Replaces every shared tier binding under the defaults revision. Each tier binds a route with its settings or aliases another universe tier; `default` stays the agentRun selection. Aliases must resolve without cycles. Existing sessions keep their resolved model; profiles referencing a tier resolve it again at their next application.
+   */
+  modelsTiersPut(client: RpcCaller, params: Api.ModelTiersPutParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
+    return client.call("models/tiers/put", params);
+  },
+  /**
+   * Resolve the effective model tier table
+   *
+   * Returns every tier a configuration can name, with its defining layer, alias chain, and concrete route, optionally under a profile's `config.models` table and an extra configuration table. Tiers that do not resolve carry an error instead of a route.
+   */
+  modelsTiersResolve(client: RpcCaller, params: Api.ModelTiersResolveParams): Promise<Api.AgentApiOutcomeOfModelTiersResolveResponse> {
+    return client.call("models/tiers/resolve", params);
   },
   /**
    * Discover available models

@@ -939,11 +939,14 @@ fn run_start_config_maps_model_and_generation_overrides() {
         &mut run_config,
         &session_config,
         Some(RunStartConfig {
-            model: Some(ModelConfig {
-                provider_id: "openai".to_owned(),
-                api_kind: "openai:responses".to_owned(),
-                model: "gpt-5.5-mini".to_owned(),
-            }),
+            model: Some(
+                ModelConfig {
+                    provider_id: "openai".to_owned(),
+                    api_kind: "openai:responses".to_owned(),
+                    model: "gpt-5.5-mini".to_owned(),
+                }
+                .into(),
+            ),
             generation: Some(api::GenerationConfig {
                 max_output_tokens: Some(1024),
                 reasoning_effort: Some("medium".to_owned()),
@@ -1202,7 +1205,8 @@ fn generate_option(name: &str, api_kind: &str) -> api::GenerateModelOption {
             provider_id: "anthropic".to_owned(),
             api_kind: api_kind.to_owned(),
             model: "small".to_owned(),
-        },
+        }
+        .into(),
         reasoning_effort: Some("low".to_owned()),
         max_output_tokens: Some(800),
     }

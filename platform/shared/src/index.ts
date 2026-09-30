@@ -137,6 +137,31 @@ export function mergeFeatureOverrides(stored: unknown, changes: FeatureOverrides
   return merged;
 }
 export { AGENT_MODEL_API_KINDS, modelDefaultsPutSchema } from "./model-defaults.js";
+export {
+  MODEL_TIER_DEFAULT,
+  MODEL_TIER_NAME_PATTERN,
+  MODEL_TIER_TABLE_MAX_ENTRIES,
+  isModelTierAlias,
+  mergeModelTierTables,
+  modelRouteSchema,
+  modelTierAliasSchema,
+  modelTierBindingSchema,
+  modelTierNames,
+  modelTierRef,
+  modelTierRouteSchema,
+  modelTierTableSchema,
+  modelTiersPutSchema,
+  modelTiersResolveSchema,
+  resolveModelTier,
+  type ModelRoute,
+  type ModelTierAlias,
+  type ModelTierBinding,
+  type ModelTierLayer,
+  type ModelTierResolution,
+  type ModelTierRoute,
+  type ModelTierTable,
+  type ModelTierUniverse,
+} from "./model-tiers.js";
 export { MAX_DICTATION_AUDIO_BYTES, MAX_DICTATION_SECONDS, transcriptionStartSchema, transcriptionUploadSchema } from "./transcriptions.js";
 export {
   ATTACHMENT_ACCEPT,

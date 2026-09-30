@@ -1,6 +1,7 @@
 import { useActionPermissions } from "@/lib/permissions";
 import { useMcpToolDiscoverySource } from "@/lib/mcp/tool-discovery";
 import { useQuery } from "@tanstack/react-query";
+import { modelTierNames } from "@lightspeed/platform-shared";
 import { modelLabel, useModelDefaults, useModelDiscovery } from "@/lib/model-defaults";
 import {
   api,
@@ -48,6 +49,7 @@ export function useSessionConfigEditorOptions(
     workspacesLoading: workspaces.isLoading,
     models: models.data?.models,
     defaultModelLabel: defaults.data?.agentRun ? `Universe default · ${modelLabel(defaults.data.agentRun)}` : "Universe default",
+    modelTiers: defaults.data ? modelTierNames(defaults.data).map(({ tier }) => tier) : undefined,
     profiles: profiles.data,
     environments: environments.data,
     mcpToolDiscovery: permissions.can("configure_resource") ? mcpToolDiscovery : undefined,

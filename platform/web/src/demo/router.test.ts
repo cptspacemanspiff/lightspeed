@@ -11,6 +11,7 @@ import type {
   SessionEventsPage,
   SessionListPage,
   SessionView,
+  ModelConfig,
   ModelDefaults,
 } from "@/api";
 import { SOFTWARE_FACTORY_UNIVERSE_ID } from "./fixtures/software-factory";
@@ -91,6 +92,43 @@ describe("demo router", () => {
     const explicit = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: { config: { model } } } });
     expect(explicit.status).toBe(200);
     expect(other.modelDefaults).toEqual(otherDefaults);
+  });
+
+  it("resolves model tiers at creation and edits the universe table under the defaults revision", async () => {
+    const { store, call } = await boot();
+    const base = `/api/v1/universes/${SOFTWARE_FACTORY_UNIVERSE_ID}`;
+    const universe = store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!;
+    const fast = universe.modelDefaults.tiers!.fast as { model: ModelConfig; reasoningEffort?: string | null };
+    const created = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: { config: {
+      model: { tier: "grader" },
+      models: { grader: { tier: "grader-fast" } },
+      features: { generate: { models: [{ name: "judge", model: { tier: "large" }, maxOutputTokens: 100 }] }, timers: {} },
+    } } } });
+    expect(created.status).toBe(200);
+    const session = created.json as SessionView;
+    expect(session.config).toMatchObject({ model: fast.model, generation: { reasoningEffort: fast.reasoningEffort } });
+    expect(session.config).not.toHaveProperty("models");
+    const judge = (session.config as { features: { generate: { models: Array<Record<string, unknown>> } } }).features.generate.models[0];
+    expect(judge).toMatchObject({ model: universe.modelDefaults.agentRun, maxOutputTokens: 100 });
+    const unknown = await call("POST", `${base}/sessions`, { profile: { kind: "inline", profile: { config: { model: { tier: "huge" } } } } });
+    expect(unknown.status).toBe(400);
+    expect(String((unknown.json as { error: string }).error)).toContain("unknown model tier");
+
+    const revision = universe.modelDefaults.revision;
+    const tiers = { fast: { ...fast }, grader: { tier: "fast" } };
+    const put = await call("PUT", `${base}/models/tiers`, { tiers, expectedRevision: revision });
+    expect(put.status).toBe(200);
+    expect(put.json).toMatchObject({ revision: revision + 1, tiers });
+    expect((await call("PUT", `${base}/models/tiers`, { tiers: {}, expectedRevision: revision })).status).toBe(409);
+    expect((await call("PUT", `${base}/models/tiers`, { tiers: { loop: { tier: "loop" } }, expectedRevision: revision + 1 })).status).toBe(400);
+    expect((await call("PUT", `${base}/models/tiers`, { tiers: { default: { tier: "fast" } }, expectedRevision: revision + 1 })).status).toBe(400);
+    const resolved = await call("POST", `${base}/models/tiers/resolve`, { models: { mine: { tier: "grader" } } });
+    expect(resolved.status).toBe(200);
+    const entries = (resolved.json as { tiers: Array<{ tier: string; layer: string; chain?: string[]; route?: { model: ModelConfig } }> }).tiers;
+    expect(entries[0]).toMatchObject({ tier: "mine", layer: "config", chain: ["mine", "grader", "fast"], route: { model: fast.model } });
+    expect(entries.map((entry) => entry.tier)).toEqual(["mine", "default", "fast", "grader"]);
+    // The session keeps the route it resolved to.
+    expect(store.universe(SOFTWARE_FACTORY_UNIVERSE_ID)!.sessions.get(session.id)!.view.config).toMatchObject({ model: fast.model });
   });
 
   it("lets demo members read defaults while reserving changes for operators", async () => {

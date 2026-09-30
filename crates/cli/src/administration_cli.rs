@@ -302,6 +302,8 @@ pub struct ModelsArgs {
 enum ModelsCommand {
     /// Inspect, set, or clear universe model defaults.
     Defaults(crate::model_defaults_cli::ModelDefaultsArgs),
+    /// Inspect and edit the universe model tier table, or resolve tiers.
+    Tiers(crate::model_tiers_cli::ModelTiersArgs),
     /// Configure provider endpoints and their API-key or OAuth credentials.
     #[command(visible_alias = "providers")]
     Provider(crate::auth_cli::AuthModelArgs),
@@ -315,6 +317,7 @@ enum ModelsCommand {
 pub async fn models(args: ModelsArgs) -> Result<()> {
     let (json, all) = match args.command {
         ModelsCommand::Defaults(args) => return crate::model_defaults_cli::run(args).await,
+        ModelsCommand::Tiers(args) => return crate::model_tiers_cli::run(args).await,
         ModelsCommand::Provider(args) => return crate::auth_cli::model(args).await,
         ModelsCommand::List { json, all } => (json, all),
     };

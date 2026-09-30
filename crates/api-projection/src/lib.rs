@@ -2082,7 +2082,8 @@ fn tool_choice_to_api(choice: &ToolChoice) -> api::ToolChoice {
 /// default projects to `None`; engine `Option` fields map 1:1.
 pub fn session_config_to_api(config: &SessionConfig) -> Result<api::SessionConfig, AgentApiError> {
     Ok(api::SessionConfig {
-        model: Some(model_to_api(&config.model)),
+        model: Some(model_to_api(&config.model).into()),
+        models: None,
         generation: (!config.generation.is_default())
             .then(|| generation_config_to_api(&config.generation)),
         limits: (!config.limits.is_default()).then_some(api::LimitsConfig {
@@ -2175,7 +2176,7 @@ fn generate_feature_to_api(generate: &engine::GenerateFeature) -> api::GenerateF
             .map(|entry| api::GenerateModelOption {
                 name: entry.name.clone(),
                 description: entry.description.clone(),
-                model: model_to_api(&entry.model),
+                model: model_to_api(&entry.model).into(),
                 reasoning_effort: entry.reasoning_effort.clone(),
                 max_output_tokens: entry.max_output_tokens,
             })
@@ -4393,11 +4394,15 @@ mod tests {
         assert_eq!(
             projected,
             api::SessionConfig {
-                model: Some(ModelConfig {
-                    provider_id: "openai".to_owned(),
-                    api_kind: "openai:responses".to_owned(),
-                    model: "gpt-5".to_owned(),
-                }),
+                model: Some(
+                    ModelConfig {
+                        provider_id: "openai".to_owned(),
+                        api_kind: "openai:responses".to_owned(),
+                        model: "gpt-5".to_owned(),
+                    }
+                    .into()
+                ),
+                models: None,
                 generation: None,
                 limits: None,
                 context: None,
@@ -4510,11 +4515,15 @@ mod tests {
         assert_eq!(
             projected,
             api::SessionConfig {
-                model: Some(ModelConfig {
-                    provider_id: "anthropic".to_owned(),
-                    api_kind: "anthropic:messages".to_owned(),
-                    model: "claude".to_owned(),
-                }),
+                model: Some(
+                    ModelConfig {
+                        provider_id: "anthropic".to_owned(),
+                        api_kind: "anthropic:messages".to_owned(),
+                        model: "claude".to_owned(),
+                    }
+                    .into()
+                ),
+                models: None,
                 generation: Some(api::GenerationConfig {
                     max_output_tokens: Some(2048),
                     reasoning_effort: Some("high".to_owned()),
@@ -4602,7 +4611,8 @@ mod tests {
                                 provider_id: "openai".to_owned(),
                                 api_kind: "openai:responses".to_owned(),
                                 model: "gpt-small".to_owned(),
-                            },
+                            }
+                            .into(),
                             reasoning_effort: Some("low".to_owned()),
                             max_output_tokens: Some(800),
                         }],

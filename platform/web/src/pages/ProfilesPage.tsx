@@ -582,6 +582,7 @@ function ConfigSection({
         workspacesLoading={options.workspacesLoading}
         models={options.models}
         defaultModelLabel={options.defaultModelLabel}
+        modelTiers={options.modelTiers}
         profiles={options.profiles}
         environments={options.environments}
         mcpToolDiscovery={options.mcpToolDiscovery}

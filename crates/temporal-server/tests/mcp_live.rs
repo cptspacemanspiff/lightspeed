@@ -485,7 +485,7 @@ async fn run_matrix_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             features: Some(FeaturesConfig {
                 mcp: Some(api::McpFeature {
                     version: api::CURRENT_FEATURE_VERSION,
@@ -1390,7 +1390,7 @@ async fn run_approval_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -1558,7 +1558,7 @@ async fn run_native_mcp_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             features: Some(FeaturesConfig {
                 mcp: Some(api::McpFeature {
                     version: api::CURRENT_FEATURE_VERSION,
@@ -1715,7 +1715,7 @@ async fn run_mcp_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -2225,7 +2225,7 @@ async fn run_mixed_batch_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             features: Some(FeaturesConfig {
                 timers: Some(TimersFeature {
                     version: api::CURRENT_FEATURE_VERSION,

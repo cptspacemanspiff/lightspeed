@@ -47,15 +47,15 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       "models": [{
         // Shown to the model to help it choose, at most 1024 bytes.
         "description": "string",
-        // Output-token cap for calls using this entry.
+        // Output-token cap for calls using this entry. Wins over the setting of a resolved tier.
         "maxOutputTokens": 0,
-        // Provider route, resolved and authenticated like a session model.
+        // Provider route, resolved and authenticated like a session model, or a model tier resolved when the configuration is admitted.
         // (required when this object is present)
         "model": "…",
         // Name the model uses to select this entry: 1–64 ASCII letters, digits, \`-\`, \`_\`, or \`.\`.
         // (required when this object is present)
         "name": "string",
-        // Provider-native reasoning effort for calls using this entry.
+        // Provider-native reasoning effort for calls using this entry. Wins over the setting of a resolved tier.
         "reasoningEffort": "string",
       }],
       "version": 0,
@@ -150,14 +150,39 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
     "maxToolRounds": 0,
     "maxTurns": 0,
   },
-  // At creation, omission uses the profile model or universe agentRun default. On configuration replacement or profile application to an existing session, omission preserves its current model. Documents read back from a session always carry the model. Provider identity and API kind are fixed for the session lifetime; the model name may change.
+  // A concrete route or a model tier such as \`{ "tier": "default" }\`. At creation, omission uses the profile model or the \`default\` tier. On configuration replacement or profile application to an existing session, omission preserves its current model. A tier is resolved once, when the document is admitted, through \`models\` and the universe tier table; its route's reasoning effort and output cap apply unless \`generation\` sets them. Documents read back from a session always carry the resolved route. Provider identity and API kind are fixed for the session lifetime; the model name may change.
   "model": {
+    // (required when this object is present)
+    "tier": "string",
+  } | {
     // (required when this object is present)
     "apiKind": "string",
     // (required when this object is present)
     "model": "string",
     // (required when this object is present)
     "providerId": "string",
+  },
+  // A partial model tier table that overrides the universe table by name for this document: \`model\` and generation entries may reference these tiers, and an entry may alias a universe tier. Consumed when the document is admitted; a session's stored configuration carries the resolved routes, not the table. At most 64 entries.
+  "models": {
+    "<key>": {
+      // (required when this object is present)
+      "tier": "string",
+    } | {
+      // Output-token cap for calls that resolve to this tier.
+      "maxOutputTokens": 0,
+      // A concrete provider route: where a call goes and which wire protocol it speaks.
+      // (required when this object is present)
+      "model": {
+        // (required when this object is present)
+        "apiKind": "string",
+        // (required when this object is present)
+        "model": "string",
+        // (required when this object is present)
+        "providerId": "string",
+      },
+      // Provider-native reasoning effort for calls that resolve to this tier. A session's or run's explicit setting still wins.
+      "reasoningEffort": "string",
+    },
   },
 }
 `;

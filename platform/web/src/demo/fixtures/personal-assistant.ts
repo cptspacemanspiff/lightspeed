@@ -1189,7 +1189,7 @@ function seedIntegrations(universe: UniverseState): void {
   const fetchedAtMs = ago(9 * MINUTE_MS);
   const efforts = ["none", "low", "medium", "high", "xhigh"];
   const speech = { providerId: "openai", apiKind: "openai:audio-transcriptions", model: "gpt-4o-mini-transcribe" };
-  universe.modelDefaults = { revision: 1, agentRun: { ...OPUS }, speechToText: speech };
+  universe.modelDefaults = { revision: 1, agentRun: { ...OPUS }, speechToText: speech, tiers: {} };
   universe.models = {
     models: [
       modelOption(speech, "GPT-4o Mini Transcribe", {}, fetchedAtMs),

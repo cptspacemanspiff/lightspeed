@@ -1101,6 +1101,7 @@ mod tests {
         api::ProfileDocument {
             config: Some(api::SessionConfig {
                 model: None,
+                models: None,
                 generation: None,
                 limits: None,
                 context: None,

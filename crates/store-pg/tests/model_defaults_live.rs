@@ -144,6 +144,68 @@ async fn exercise(pool: &sqlx::PgPool) {
         ModelDefaultsStoreError::Conflict { expected: 0 }
     ));
     assert_eq!(first.read_model_defaults().await.unwrap(), cleared);
+
+    // The tier table shares the revision: a stale write conflicts, a valid
+    // table lands beside the slots, and the other universe stays untouched.
+    let tiers = std::collections::BTreeMap::from([
+        (
+            "fast".to_owned(),
+            api::ModelTierBinding::Route(api::ModelTierRoute {
+                model: route("openai", "openai:responses"),
+                reasoning_effort: Some("low".into()),
+                max_output_tokens: Some(800),
+            }),
+        ),
+        ("grader".to_owned(), api::ModelTierBinding::alias("fast")),
+        ("large".to_owned(), api::ModelTierBinding::alias("default")),
+    ]);
+    let stale_tiers = first
+        .put_model_tiers(api::ModelTiersPutParams {
+            tiers: tiers.clone(),
+            expected_revision: 2,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale_tiers,
+        ModelDefaultsStoreError::Conflict { expected: 2 }
+    ));
+    let with_tiers = first
+        .put_model_tiers(api::ModelTiersPutParams {
+            tiers: tiers.clone(),
+            expected_revision: 3,
+        })
+        .await
+        .unwrap();
+    assert_eq!(with_tiers.revision, 4);
+    assert_eq!(with_tiers.tiers, tiers);
+    assert_eq!(with_tiers.speech_to_text, cleared.speech_to_text);
+    assert_eq!(first.read_model_defaults().await.unwrap(), with_tiers);
+    let mut reserved = tiers.clone();
+    reserved.insert("default".to_owned(), api::ModelTierBinding::alias("fast"));
+    let invalid_tiers = first
+        .put_model_tiers(api::ModelTiersPutParams {
+            tiers: reserved,
+            expected_revision: 4,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(invalid_tiers, ModelDefaultsStoreError::Invalid(error) if error.kind == api::AgentApiErrorKind::InvalidRequest)
+    );
+    assert_eq!(first.read_model_defaults().await.unwrap(), with_tiers);
+    assert!(second.read_model_defaults().await.unwrap().tiers.is_empty());
+    let seeded_tiers = second
+        .put_model_tiers(api::ModelTiersPutParams {
+            tiers: tiers.clone(),
+            expected_revision: 0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        seeded_tiers,
+        ModelDefaultsStoreError::Conflict { expected: 0 }
+    ));
     sqlx::query("DELETE FROM universes WHERE universe_id = $1")
         .bind(first.config().universe_id)
         .execute(pool)

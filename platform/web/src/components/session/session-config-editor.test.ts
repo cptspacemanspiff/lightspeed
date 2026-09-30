@@ -359,6 +359,33 @@ describe("environment feature config", () => {
   });
 });
 
+describe("model tier references", () => {
+  it("keeps tier references and the configuration table through normalization", () => {
+    const config = {
+      model: { tier: "fast" },
+      models: { fast: { tier: "fast" }, grader: { model: { providerId: "openai", apiKind: "openai:responses", model: "mini" }, reasoningEffort: "low" } },
+      features: { generate: { models: [{ name: "judge", model: { tier: "grader" } }] } },
+    };
+    expect(normalizeSessionConfig(config)).toEqual(config);
+    expect(normalizeSessionConfig({ model: { tier: " " }, models: {} })).toBeUndefined();
+    expect(configError(config)).toBeNull();
+    expect(configError({ model: { tier: "bad name" } })).toContain("tier name");
+    expect(configError({ features: { generate: { models: [{ name: "judge", model: { tier: "bad name" } }] } } })).toContain("invalid tier");
+    // A tier may resolve to any provider; the runtime checks the pin.
+    expect(configError({ model: { tier: "fast" } }, "openai:completions", false, "deepseek")).toBeNull();
+  });
+
+  it("offers universe tiers beside discovered models and marks the chosen one", () => {
+    const html = renderToString(createElement(SessionConfigEditor, {
+      value: { model: { tier: "grader" } },
+      onChange: () => {},
+      modelTiers: ["default", "fast", "grader"],
+    }));
+    expect(html).toContain("Resolved through the universe tier table");
+    expect(html).toContain("Tier · grader");
+  });
+});
+
 describe("model generation feature config", () => {
   const grader = {
     name: "grader",

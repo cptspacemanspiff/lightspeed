@@ -265,7 +265,7 @@ export class DemoStore {
       secrets: { providers: [], grants: [] },
       githubApps: [],
       models: { models: [], providers: [] },
-      modelDefaults: { revision: 0, agentRun: null, speechToText: null },
+      modelDefaults: { revision: 0, agentRun: null, speechToText: null, tiers: {} },
       setups: [],
       bots: new Map(),
       channelAccounts: new Map(),

@@ -1511,7 +1511,17 @@ function seedIntegrations(universe: UniverseState): void {
 
   const fetchedAtMs = ago(12 * MINUTE_MS);
   const efforts = ["none", "low", "medium", "high", "xhigh"];
-  universe.modelDefaults = { revision: 1, agentRun: { ...OPUS }, speechToText: null };
+  // Shared tiers: profiles name roles, operators decide what each costs.
+  universe.modelDefaults = {
+    revision: 1,
+    agentRun: { ...OPUS },
+    speechToText: null,
+    tiers: {
+      fast: { model: { ...SONNET }, reasoningEffort: "low", maxOutputTokens: 8_000 },
+      large: { tier: "default" },
+      "grader-fast": { tier: "fast" },
+    },
+  };
   universe.models = {
     models: [
       modelOption(OPUS, "Claude Opus 5", { maxInputTokens: 1_000_000, maxOutputTokens: 128_000, parallelToolUse: true, reasoningEfforts: [...efforts, "max"] }, fetchedAtMs),

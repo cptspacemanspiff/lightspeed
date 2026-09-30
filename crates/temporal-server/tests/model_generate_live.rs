@@ -119,14 +119,14 @@ async fn run_generation_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(model)),
+            model: Some(model_to_api(model).into()),
             features: Some(api::FeaturesConfig {
                 generate: Some(api::GenerateFeature {
                     version: api::CURRENT_FEATURE_VERSION,
                     models: vec![api::GenerateModelOption {
                         name: "grader".to_owned(),
                         description: Some("Grades claims".to_owned()),
-                        model: model_to_api(grader),
+                        model: model_to_api(grader).into(),
                         reasoning_effort: None,
                         max_output_tokens: Some(400),
                     }],

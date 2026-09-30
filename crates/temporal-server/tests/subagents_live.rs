@@ -650,7 +650,7 @@ async fn start_subagent_parent_with_features(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(model)),
+            model: Some(model_to_api(model).into()),
             features: Some(features),
             ..SessionConfig::default()
         }),
@@ -1239,7 +1239,7 @@ async fn run_agent_run_inherit_environment_live_client(
                 document: ProfileDocument {
                     metadata: Default::default(),
                     config: Some(SessionConfig {
-                        model: Some(model_to_api(&model)),
+                        model: Some(model_to_api(&model).into()),
                         features: Some(api::FeaturesConfig {
                             environments: Some(environments_feature(api::EnvironmentAttachment {
                                 environment_id: Some(

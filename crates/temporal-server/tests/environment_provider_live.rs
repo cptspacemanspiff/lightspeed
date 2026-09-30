@@ -534,7 +534,7 @@ async fn run_environment_power_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             features: Some(api::FeaturesConfig {
                 environments: Some(api::EnvironmentsFeature {
                     version: api::CURRENT_FEATURE_VERSION,

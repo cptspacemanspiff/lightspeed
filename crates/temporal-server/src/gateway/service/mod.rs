@@ -901,6 +901,20 @@ impl GatewayAgentApi {
         let session_config = loaded.state.lifecycle.config.as_ref().ok_or_else(|| {
             AgentApiError::invalid_request(format!("session is not open: {session_id}"))
         })?;
+        let config = match config {
+            Some(config)
+                if config
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.tier_name().is_some()) =>
+            {
+                let universe = self.universe_model_defaults().await?;
+                let (config, chain) = model_defaults::resolve_run_start_config(config, &universe)?;
+                tracing::info!(chain = ?chain, "resolved run model tier");
+                Some(config)
+            }
+            other => other,
+        };
         let run_config = api_config::run_config_for_start(session_config, config)?;
         let RunStartSource::Input { items } = source;
         let input = run_input_from_api(self.store.as_ref(), &items).await?;
@@ -2029,6 +2043,56 @@ impl AgentApiService for GatewayAgentApi {
         }))
     }
 
+    async fn put_model_tiers(
+        &self,
+        params: api::ModelTiersPutParams,
+    ) -> Result<AgentApiOutcome<api::ModelDefaultsResponse>, AgentApiError> {
+        self.authorize_method(api::METHOD_MODELS_TIERS_PUT, None)
+            .await?;
+        // Effort vocabularies are the runtime adapters' own; the store checks
+        // names, protocols, and alias resolution under the revision guard.
+        for (name, binding) in &params.tiers {
+            if let api::ModelTierBinding::Route(route) = binding
+                && let Some(effort) = route.reasoning_effort.as_deref()
+            {
+                let api_kind = api_kind_from_str(&route.model.api_kind)?;
+                api_config::validate_reasoning_effort(&api_kind, effort).map_err(|error| {
+                    AgentApiError::invalid_request(format!("tier {name:?}: {}", error.message))
+                })?;
+            }
+        }
+        let defaults = self
+            .store
+            .put_model_tiers(params)
+            .await
+            .map_err(model_defaults::map_store_error)?;
+        Ok(AgentApiOutcome::new(api::ModelDefaultsResponse {
+            defaults,
+        }))
+    }
+
+    async fn resolve_model_tiers(
+        &self,
+        params: api::ModelTiersResolveParams,
+    ) -> Result<AgentApiOutcome<api::ModelTiersResolveResponse>, AgentApiError> {
+        self.authorize_method(api::METHOD_MODELS_TIERS_RESOLVE, None)
+            .await?;
+        let profile_table = match params.profile {
+            Some(source) => self
+                .resolve_profile_source(source)
+                .await?
+                .config
+                .and_then(|config| config.models),
+            None => None,
+        };
+        let table = api::merge_model_tier_tables(profile_table, params.models);
+        let universe = self.universe_model_defaults().await?;
+        let resolver = api::ModelTierResolver::new(&universe, table.as_ref());
+        Ok(AgentApiOutcome::new(api::ModelTiersResolveResponse {
+            tiers: api::resolve_model_tier_table(&resolver),
+        }))
+    }
+
     async fn list_models(
         &self,
         params: ModelListParams,
@@ -2234,10 +2298,14 @@ impl AgentApiService for GatewayAgentApi {
                 )));
             }
         }
-        let config = engine_session_config_from_api(
-            params.config,
-            model_defaults::current_session_model(&loaded.state)?,
-        )?;
+        let current_model = model_defaults::current_session_model(&loaded.state)?;
+        let universe = self.universe_for_config(&params.config, false).await?;
+        let resolved =
+            model_defaults::resolve_session_config(params.config, &universe, Some(&current_model))?;
+        if !resolved.chains.is_empty() {
+            tracing::info!(chains = ?resolved.chains, "resolved session model tiers");
+        }
+        let config = engine_session_config_from_api(resolved.config, resolved.model)?;
         config
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;

@@ -31,7 +31,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("PointerEvent", MouseEvent);
-  defaults = { revision: 7, agentRun: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-sol" }, speechToText: null };
+  defaults = { revision: 7, agentRun: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-sol" }, speechToText: null, tiers: { fast: { model: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-mini" }, reasoningEffort: "low" }, grader: { tier: "fast" } } };
   actions = ["read", "configure_resource"];
   discoveryFails = false;
   mocks.role = "operator";
@@ -42,6 +42,12 @@ beforeEach(() => {
         if (body!.expectedRevision !== defaults.revision) throw new ApiError(409, { error: "defaults changed" });
         defaults = { ...defaults, revision: defaults.revision + 1, [body!.slot]: body!.model };
       }
+      return defaults;
+    }
+    if (path.endsWith("/models/tiers")) {
+      const put = body as unknown as { tiers: ModelDefaults["tiers"]; expectedRevision: number };
+      if (put.expectedRevision !== defaults.revision) throw new ApiError(409, { error: "defaults changed" });
+      defaults = { ...defaults, revision: defaults.revision + 1, tiers: put.tiers };
       return defaults;
     }
     if (path.endsWith("/secrets")) return { providers: [legacy], grants: [subscription] };
@@ -199,4 +205,44 @@ it("configures speech separately from the agent default and clears only speech",
   await act(async () => [...row().querySelectorAll("button")].find((button) => button.textContent === "Clear")!.click());
   expect(defaults).toMatchObject({ revision: 9, agentRun: { model: "gpt-6-sol" }, speechToText: null });
   expect(mocks.api.mock.calls.filter(([method]) => method === "PUT").map(([, , body]) => body.slot)).toEqual(["speechToText", "speechToText"]);
+});
+
+it("lists tiers with their resolution, adds a route tier, and removes an alias", async () => {
+  await show();
+  const tier = (name: string) => container.querySelector(`[role="group"][aria-label="Tier ${name}"]`)!;
+  expect(tier("fast").textContent).toContain("OpenAI · gpt-6-mini");
+  expect(tier("fast").textContent).toContain("reasoning low");
+  expect(tier("grader").textContent).toContain("Alias for fast");
+  expect(tier("grader").textContent).toContain("grader → fast");
+  await click("Add tier");
+  const name = document.body.querySelector<HTMLInputElement>('input[placeholder="fast"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "large");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const provider = document.body.querySelector<HTMLInputElement>('input[placeholder="Provider ID"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(provider, "openai");
+    provider.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await enterModel("gpt-6-max");
+  await click("Save tier");
+  expect(defaults.revision).toBe(8);
+  expect(defaults.tiers).toMatchObject({ large: { model: { providerId: "openai", apiKind: "openai:responses", model: "gpt-6-max" } }, fast: {}, grader: {} });
+  expect(tier("large").textContent).toContain("OpenAI · gpt-6-max");
+  await act(async () => [...tier("grader").querySelectorAll("button")].find((button) => button.textContent === "Remove")!.click());
+  for (let step = 0; step < 4; step++) await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+  expect(defaults.revision).toBe(9);
+  expect(Object.keys(defaults.tiers)).toEqual(["fast", "large"]);
+  const writes = mocks.api.mock.calls.filter(([method, path]) => method === "PUT" && String(path).endsWith("/models/tiers"));
+  expect(writes.map(([, , body]) => (body as { expectedRevision: number }).expectedRevision)).toEqual([7, 8]);
+});
+
+it("shows tiers without edit controls to a read-only member", async () => {
+  actions = ["read"];
+  mocks.role = "viewer";
+  await show();
+  expect(container.textContent).toContain("Alias for fast");
+  expect(button("Add tier")).toBeUndefined();
+  expect(button("Remove")).toBeUndefined();
 });

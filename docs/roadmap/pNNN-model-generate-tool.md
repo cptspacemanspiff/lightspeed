@@ -112,8 +112,10 @@ route), `output_mode` (`native` or `prompted`), `text` or the validated
 - `pNNN-structured-output.md` proposes an output specification for whole
   runs. This tool's lowering and validation live in
   `llm-runtime::standalone`, which that work can share.
-- `pNNN-model-tiers.md` sketches `model.generate` over tier allowlists. When
-  tiers land, a grant entry could name a tier instead of a concrete route.
+- `pNNN-model-tiers.md` adds model tiers. A grant entry's `model` may now
+  name a tier (`{ "tier": "grader-small" }`), resolved to a route when the
+  configuration is admitted; the tool still advertises entry names only.
+  Tier allowlists on the grant remain future work there.
 
 ## Implementation progress
 

@@ -182,9 +182,10 @@ Choose a discovered route explicitly when starting a new session:
 lightspeed chat --provider my-provider --api-kind openai:completions --model MODEL_ID
 ```
 
-Without those flags, a new session uses deployment defaults. Provider identity
-and API kind are fixed for each session; `/model` can choose another model
-within that route. The TUI footer shows the connection name and universe slug
+Without those flags, a new session uses the universe's default agent model,
+set with `lightspeed models defaults set agent-run` or on the Models page.
+Provider identity and API kind are fixed for each session; `/model` can
+choose another model within that route. The TUI footer shows the connection name and universe slug
 for saved or explicit runtime connections; generated local-development
 connections omit this label. The footer also shows the current session ID,
 shortening UUIDs while preserving readable IDs. If the universe slug is
@@ -308,6 +309,10 @@ lightspeed mcp login my-server
 lightspeed credential list
 lightspeed credential import --provider-id my-service --token-env SERVICE_TOKEN
 lightspeed model provider list
+lightspeed model defaults read
+lightspeed model tiers set fast --provider openai --api-kind openai:responses --model gpt-5.5-mini --reasoning-effort low
+lightspeed model tiers alias grader --to fast
+lightspeed model tiers resolve --profile reviewer
 lightspeed environment list
 lightspeed profile list
 
@@ -329,6 +334,14 @@ inferring them from materialized tools. Detaching does not delete the resource.
 Environment lists mark the active attachment. Skill selection submits ordinary
 agent input (or steers an existing run); there is no separate skill execution
 or installation registry.
+
+`model defaults` reads, sets, and clears the universe's agent-run and
+speech-to-text selections. `model tiers` edits the universe tier table that
+profiles reference by name (`set` binds a route and its settings, `alias`
+points one tier at another, `remove` drops one) and `resolve` shows the
+effective table with each tier's layer, alias chain, and route. Edits read
+the current revision immediately before writing unless `--expected-revision`
+is given.
 
 `credential` manages external credentials, not authentication to Lightspeed.
 Its `oauth-client` and `github` subcommands configure reusable OAuth clients and

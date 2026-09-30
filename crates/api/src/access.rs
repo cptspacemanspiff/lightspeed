@@ -8,7 +8,7 @@
 //! evaluates them.
 
 use super::*;
-use std::collections::BTreeSet;
+
 use uuid::Uuid;
 
 /// What a key reaches or a request addresses: one universe, or the

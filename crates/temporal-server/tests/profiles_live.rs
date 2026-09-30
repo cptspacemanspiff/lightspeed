@@ -117,7 +117,7 @@ async fn run_profile_environment_selection_live_client(
             description: None,
             document: ProfileDocument {
                 config: Some(SessionConfig {
-                    model: Some(model_to_api(&model)),
+                    model: Some(model_to_api(&model).into()),
                     features: Some(api::FeaturesConfig {
                         environments: Some(api::EnvironmentsFeature {
                             version: api::CURRENT_FEATURE_VERSION,
@@ -347,7 +347,7 @@ async fn run_profiles_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         delete_after_close_ms: None,

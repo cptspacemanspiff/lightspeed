@@ -23,6 +23,8 @@ impl GatewayAgentApi {
         &self,
         params: ProfileCreateParams,
     ) -> Result<ProfileCreateResponse, AgentApiError> {
+        self.validate_profile_model_tiers(&params.profile.document)
+            .await?;
         let created_at_ms = now_ms()?;
         let profile = self
             .store
@@ -60,6 +62,8 @@ impl GatewayAgentApi {
         &self,
         params: ProfilePutParams,
     ) -> Result<ProfilePutResponse, AgentApiError> {
+        self.validate_profile_model_tiers(&params.profile.document)
+            .await?;
         let profile = self
             .store
             .put_agent_profile(params.profile, params.expected_revision, now_ms()?)
@@ -100,10 +104,12 @@ impl GatewayAgentApi {
                 "expected config revision {expected}, got {revision}"
             )));
         }
-        let profile = Self::profile_intent(
-            &resolved,
-            Some(model_defaults::current_session_model(&loaded.state)?),
-        )?;
+        let current_model = model_defaults::current_session_model(&loaded.state)?;
+        let universe = match resolved.config.as_ref() {
+            Some(config) => self.universe_for_config(config, false).await?,
+            None => api::ModelDefaults::default(),
+        };
+        let profile = Self::profile_intent(&resolved, current_model, &universe)?;
         let applied = self
             .prepare_session_operation(
                 &session_id,
@@ -148,6 +154,7 @@ impl GatewayAgentApi {
         };
         Some(api::SessionConfig {
             model: explicit_config.model.or(profile_config.model),
+            models: api::merge_model_tier_tables(profile_config.models, explicit_config.models),
             generation: explicit_config.generation.or(profile_config.generation),
             limits: explicit_config.limits.or(profile_config.limits),
             context: explicit_config.context.or(profile_config.context),
@@ -155,22 +162,39 @@ impl GatewayAgentApi {
         })
     }
 
-    /// With a current model, apply the profile configuration and preserve an
-    /// omitted model. On creation the caller has already merged configuration
-    /// and sets the environment candidate itself.
+    /// The intent a new session runs its profile setup with. Creation has
+    /// already merged the profile configuration and sets the environment
+    /// candidate itself, so only instructions ride along.
+    pub(super) fn profile_setup_intent(
+        profile: &ProfileDocument,
+    ) -> temporal_workflow::SessionProfileIntent {
+        temporal_workflow::SessionProfileIntent {
+            config: None,
+            instructions: profile.instructions.clone(),
+            environment: None,
+        }
+    }
+
+    /// Apply the profile configuration to an existing session, preserving
+    /// an omitted model and resolving tier references through the profile's
+    /// own table and the universe.
     pub(super) fn profile_intent(
         profile: &ProfileDocument,
-        current_model: Option<ModelSelection>,
+        current_model: ModelSelection,
+        universe: &api::ModelDefaults,
     ) -> Result<temporal_workflow::SessionProfileIntent, AgentApiError> {
-        let config = if let Some(current_model) = current_model {
-            profile
-                .config
-                .clone()
-                .map(|config| engine_session_config_from_api(config, current_model))
-                .transpose()?
-        } else {
-            None
-        };
+        let config = profile
+            .config
+            .clone()
+            .map(|config| {
+                let resolved =
+                    model_defaults::resolve_session_config(config, universe, Some(&current_model))?;
+                if !resolved.chains.is_empty() {
+                    tracing::info!(chains = ?resolved.chains, "resolved profile model tiers");
+                }
+                engine_session_config_from_api(resolved.config, resolved.model)
+            })
+            .transpose()?;
         let environment = config
             .as_ref()
             .map(|config| default_environment_id(&config.features))

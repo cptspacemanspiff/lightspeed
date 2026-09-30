@@ -6,14 +6,12 @@ impl GatewayAgentApi {
         api_config: Option<api::SessionConfig>,
     ) -> Result<SessionConfig, AgentApiError> {
         let api_config = api_config.unwrap_or_default();
-        let model = model_defaults::creation_model(api_config.model.clone(), async {
-            self.store
-                .read_model_defaults()
-                .await
-                .map_err(model_defaults::map_store_error)
-        })
-        .await?;
-        let config = engine_session_config_from_api(api_config, model)?;
+        let universe = self.universe_for_config(&api_config, true).await?;
+        let resolved = model_defaults::resolve_session_config(api_config, &universe, None)?;
+        if !resolved.chains.is_empty() {
+            tracing::info!(chains = ?resolved.chains, "resolved session model tiers");
+        }
+        let config = engine_session_config_from_api(resolved.config, resolved.model)?;
         config
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
@@ -73,13 +71,19 @@ pub(super) fn run_config_for_start(
 
 /// Translate the wire config document into the engine document. An absent
 /// `model` uses the caller's resolved creation model or current session model;
-/// everything else maps 1:1.
+/// everything else maps 1:1. Tier references must already be resolved (see
+/// `model_defaults::resolve_session_config`): the engine only sees routes.
 pub(super) fn engine_session_config_from_api(
     api_config: api::SessionConfig,
     resolved_model: ModelSelection,
 ) -> Result<SessionConfig, AgentApiError> {
+    if api_config.models.is_some() {
+        return Err(AgentApiError::internal(
+            "session configuration tier table was not consumed before engine translation",
+        ));
+    }
     let model = match api_config.model {
-        Some(model) => model_selection_from_api(model)?,
+        Some(model) => model_selection_from_api(require_route(model)?)?,
         None => resolved_model,
     };
     let generation = generation_from_api(api_config.generation, &model)?;
@@ -262,8 +266,9 @@ fn features_from_api(
 fn generate_model_from_api(
     option: api::GenerateModelOption,
 ) -> Result<engine::GenerateModelConfig, AgentApiError> {
+    let route = require_route(option.model)?;
     api::ModelDefaultSlot::AgentRun
-        .validate_model(&option.model)
+        .validate_model(&route)
         .map_err(|error| {
             AgentApiError::invalid_request(format!(
                 "generate model {:?}: {}",
@@ -273,7 +278,7 @@ fn generate_model_from_api(
     Ok(engine::GenerateModelConfig {
         name: option.name,
         description: option.description,
-        model: model_selection_from_api(option.model)?,
+        model: model_selection_from_api(route)?,
         reasoning_effort: option.reasoning_effort,
         max_output_tokens: option.max_output_tokens,
     })
@@ -354,7 +359,7 @@ pub(super) fn apply_run_start_config(
         limits,
     } = api_config;
     let effective_model = if let Some(model) = model {
-        let model = model_selection_from_api(model)?;
+        let model = model_selection_from_api(require_route(model)?)?;
         run_config.model_override = Some(model.clone());
         model
     } else {
@@ -452,6 +457,18 @@ pub(super) fn compaction_policy_from_api(policy: api::CompactionPolicy) -> Compa
     }
 }
 
+/// Tier references are resolved at admission; reaching translation with one
+/// is a gateway bug, not a caller error.
+pub(super) fn require_route(model: api::ModelRef) -> Result<ModelConfig, AgentApiError> {
+    match model {
+        api::ModelRef::Route(route) => Ok(route),
+        api::ModelRef::Tier(tier) => Err(AgentApiError::internal(format!(
+            "model tier {:?} was not resolved before admission",
+            tier.tier
+        ))),
+    }
+}
+
 pub(super) fn model_selection_from_api(
     model: ModelConfig,
 ) -> Result<ModelSelection, AgentApiError> {
@@ -483,11 +500,14 @@ mod tests {
                 &mut RunConfig::default(),
                 &session,
                 Some(api::RunStartConfig {
-                    model: Some(api::ModelConfig {
-                        provider_id: provider.into(),
-                        api_kind: kind.into(),
-                        model: "another-model".into(),
-                    }),
+                    model: Some(
+                        api::ModelConfig {
+                            provider_id: provider.into(),
+                            api_kind: kind.into(),
+                            model: "another-model".into(),
+                        }
+                        .into(),
+                    ),
                     ..Default::default()
                 }),
             );

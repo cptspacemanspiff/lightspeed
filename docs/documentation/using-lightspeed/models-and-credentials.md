@@ -101,6 +101,58 @@ Leave optional reasoning and generation settings unset until you need them
 and have verified the chosen model supports them. A provider can accept a
 model name while refusing an incompatible parameter.
 
+## Name models by tier
+
+A profile does not have to name a concrete route. It can name a **tier**, a
+role such as `default`, `fast`, or `grader`, and let the universe decide
+which model plays that role. The same profile then works in every universe
+that defines the tier, and moving every "fast" job to a new model is one
+change on the **Models** page instead of an edit to each profile.
+
+The universe defines its tiers under **Models → Tiers**. Each tier either
+binds a route with the settings it should run with, or aliases another tier:
+
+| Tier | Binding | Effect |
+| --- | --- | --- |
+| `default` | The agent-run default under **Defaults** | Used when a profile and session leave the model unset; the target of aliases. |
+| `fast` | `openai / openai:responses / gpt-5.5-mini`, reasoning effort `low` | A cheap route with its own settings. |
+| `grader` | Alias for `fast` | Moves with `fast` when an operator rebinds it. |
+
+Reference a tier where the editor offers a model: choose **Tier · fast**
+under **Model configuration → Model**, or write `{ "tier": "fast" }` in the
+JSON view. Generation models under **Model generation** accept tiers the
+same way. A tier is resolved when the session is created or its configuration
+is replaced, and the session then keeps the route it resolved to; changing
+the tier later affects new sessions and the next profile application, never a
+running session's provider.
+
+A tier's reasoning effort and output cap apply where the profile leaves those
+settings unset, so a profile can still raise or lower them for itself. A
+profile can also carry its own small table under `models` to override a tier
+by name, or to define a name only its sessions use:
+
+```json
+{
+  "model": { "tier": "reviewer" },
+  "models": {
+    "reviewer": { "tier": "grader" },
+    "default": { "model": { "providerId": "anthropic", "apiKind": "anthropic:messages", "model": "claude-sonnet-5" } }
+  }
+}
+```
+
+A profile entry overrides the universe only for that profile's sessions. It
+cannot change what a universe alias means: if the universe defines
+`grader` as an alias for `default`, a profile that rebinds `default` still
+gets the universe's default through `grader`. Aliases resolve toward the
+universe, never toward the profile.
+
+Saving a profile checks that every tier it names resolves, so a typo fails
+at save time. Removing a universe tier that profiles still reference makes
+their next session start fail with a message naming the field and the alias
+chain. `lightspeed models tiers resolve --profile ID` shows the effective
+table for one profile, with each tier's layer, chain, and route.
+
 ## Understand deployment defaults
 
 An operator can supply deployment-level OpenAI or Anthropic credentials.
@@ -113,12 +165,11 @@ using the deployment's credential. Removing the built-in provider record
 allows fallback again. Consider that difference when rotating or disabling
 keys.
 
-The runtime defaults to provider `openai` and API kind `openai:responses`.
-`LIGHTSPEED_CHAT_PROVIDER` and `LIGHTSPEED_CHAT_MODEL` change the default
-provider ID and model name. The runtime's default API kind remains Responses,
-so setting an Anthropic provider ID alone does not create an Anthropic route.
-Select the full route in a profile when using Anthropic or a compatible
-service. Exact deployment settings are in the
+The default agent model is a universe choice, made under **Models →
+Defaults** or with `lightspeed models defaults set agent-run`. There is no
+deployment-wide model fallback: a session that names no model and has no
+universe default fails with a `model_default_unset` error until one is
+chosen. Exact deployment settings are in the
 [environment-variable reference](../reference/environment-variables.md).
 
 The API also supports model OAuth records that refer to a suitable stored

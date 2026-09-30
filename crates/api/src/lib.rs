@@ -5,7 +5,7 @@
 //! workflow gateway, or another substrate while clients keep speaking the same
 //! session/run/item protocol.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -28,6 +28,7 @@ mod ids;
 mod mcp;
 mod model;
 mod model_defaults;
+mod model_tiers;
 mod models;
 mod notifications;
 mod profiles;
@@ -53,6 +54,7 @@ pub use ids::*;
 pub use mcp::*;
 pub use model::*;
 pub use model_defaults::*;
+pub use model_tiers::*;
 pub use models::*;
 pub use notifications::*;
 pub use profiles::*;

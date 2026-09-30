@@ -302,6 +302,9 @@ fn resolve_bot_profile(profile: &AgentProfile, instructions: String) -> InlineAg
     }
 }
 
+/// The route a bot profile names outright. A tier reference resolves at
+/// admission, so its provider is unknown here and the comparison stays
+/// with the runtime's pinning check.
 fn proposed_provider_route(profile: &InlineAgentProfile) -> Option<(&str, &str)> {
     profile
         .document
@@ -309,6 +312,7 @@ fn proposed_provider_route(profile: &InlineAgentProfile) -> Option<(&str, &str)>
         .as_ref()?
         .model
         .as_ref()
+        .and_then(|model| model.route())
         .map(|model| (model.provider_id.as_str(), model.api_kind.as_str()))
 }
 
@@ -318,6 +322,7 @@ fn pinned_provider_route(session: &SessionView) -> Option<(&str, &str)> {
         .as_ref()?
         .model
         .as_ref()
+        .and_then(|model| model.route())
         .map(|model| (model.provider_id.as_str(), model.api_kind.as_str()))
 }
 
@@ -1163,11 +1168,14 @@ mod tests {
         let mut session = session_view(SessionStatus::Idle, Vec::new());
         assert_eq!(pinned_provider_route(&session), None);
         session.config = Some(api::SessionConfig {
-            model: Some(api::ModelConfig {
-                provider_id: "anthropic".to_owned(),
-                api_kind: "anthropic_messages".to_owned(),
-                model: "claude-opus-5".to_owned(),
-            }),
+            model: Some(
+                api::ModelConfig {
+                    provider_id: "anthropic".to_owned(),
+                    api_kind: "anthropic_messages".to_owned(),
+                    model: "claude-opus-5".to_owned(),
+                }
+                .into(),
+            ),
             ..Default::default()
         });
         assert_eq!(

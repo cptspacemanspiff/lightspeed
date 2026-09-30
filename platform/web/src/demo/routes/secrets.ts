@@ -3,7 +3,15 @@
 /// installation. Secret values are accepted and dropped; only the non-secret
 /// views the real gateway returns are kept.
 import { Hono } from "hono";
-import { modelDefaultsPutSchema } from "@lightspeed/platform-shared";
+import {
+  mergeModelTierTables,
+  modelDefaultsPutSchema,
+  modelTierNames,
+  modelTiersPutSchema,
+  modelTiersResolveSchema,
+  resolveModelTier,
+  type ModelTierTable,
+} from "@lightspeed/platform-shared";
 import type {
   GitHubApp,
   GitHubInstallation,
@@ -756,6 +764,53 @@ export function secretRoutes(store: DemoStore): Hono {
     if (body.data.expectedRevision !== universe.modelDefaults.revision) return conflict(c, "Model defaults changed elsewhere.");
     universe.modelDefaults = { ...universe.modelDefaults, [body.data.slot]: body.data.model, revision: universe.modelDefaults.revision + 1 };
     return c.json(universe.modelDefaults);
+  });
+
+  /// The tier table shares the defaults revision. Every alias must resolve
+  /// within the universe layer, as the runtime checks before writing.
+  app.put("/:id/models/tiers", async (c) => {
+    const universe = universeFor(store, c);
+    if (!universe) return notFound(c);
+    if (store.currentUser.role !== "admin" && !["operator", "admin"].includes(universe.universe.role ?? "")) return c.json({ error: "operator role required" }, 403);
+    const body = modelTiersPutSchema.safeParse(await readBody(c));
+    if (!body.success) return badRequest(c, body.error.issues[0]?.message ?? "Invalid tier table");
+    if (body.data.expectedRevision !== universe.modelDefaults.revision) return conflict(c, "Model defaults changed elsewhere.");
+    const candidate = { ...universe.modelDefaults, tiers: body.data.tiers as ModelTierTable };
+    for (const tier of Object.keys(body.data.tiers)) {
+      try {
+        resolveModelTier(candidate, undefined, tier);
+      } catch (error) {
+        if ((error as { kind?: string }).kind !== "model_default_unset") return badRequest(c, error instanceof Error ? error.message : "tier does not resolve");
+      }
+    }
+    universe.modelDefaults = { ...candidate, revision: universe.modelDefaults.revision + 1 };
+    return c.json(universe.modelDefaults);
+  });
+
+  app.post("/:id/models/tiers/resolve", async (c) => {
+    const universe = universeFor(store, c);
+    if (!universe) return notFound(c);
+    const body = modelTiersResolveSchema.safeParse(await readBody(c));
+    if (!body.success) return badRequest(c, body.error.issues[0]?.message ?? "Invalid resolve request");
+    let profileTable: ModelTierTable | undefined;
+    if (body.data.profile?.kind === "named") {
+      const document = universe.profiles.get(body.data.profile.profileId);
+      if (!document) return notFound(c, "not found in engine");
+      profileTable = (document.config as { models?: ModelTierTable } | undefined)?.models;
+    } else if (body.data.profile?.kind === "inline") {
+      profileTable = (body.data.profile.profile.config as { models?: ModelTierTable } | undefined)?.models;
+    }
+    const table = mergeModelTierTables(profileTable, body.data.models as ModelTierTable | undefined);
+    const tiers = modelTierNames(universe.modelDefaults, table).map(({ tier, layer }) => {
+      const binding = layer === "config" ? table?.[tier] : tier === "default" ? (universe.modelDefaults.agentRun ? { model: universe.modelDefaults.agentRun } : undefined) : universe.modelDefaults.tiers?.[tier];
+      try {
+        const resolved = resolveModelTier(universe.modelDefaults, table, tier);
+        return { tier, layer, ...(binding ? { binding } : {}), chain: resolved.chain, route: resolved.route };
+      } catch (error) {
+        return { tier, layer, ...(binding ? { binding } : {}), error: error instanceof Error ? error.message : "tier does not resolve" };
+      }
+    });
+    return c.json({ tiers });
   });
 
   /// Operators see the templates; installing stays with Admins.

@@ -15,7 +15,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 function fixture() {
   const requests: { method: string; params: Record<string, unknown> }[] = [];
-  let defaults: ModelDefaults = { revision: 2, agentRun: null, speechToText: null };
+  let defaults: ModelDefaults = { revision: 2, agentRun: null, speechToText: null, tiers: {} };
   const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
     expect(new Headers(init.headers).get("x-lightspeed-universe")).toBe("universe");
     expect(new Headers(init.headers).get("x-lightspeed-actor")).toBe("member");
@@ -72,4 +72,60 @@ it("preserves the typed missing-default error for web clients", async () => {
   const response = await app.request("/");
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({ kind: "model_default_unset", modelDefaultSlot: "agentRun" });
+});
+
+function tiersFixture() {
+  const requests: { method: string; params: Record<string, unknown> }[] = [];
+  let defaults: ModelDefaults = { revision: 2, agentRun: { providerId: "openai", apiKind: "openai:responses", model: "gpt" }, speechToText: null, tiers: {} };
+  const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
+    const rpc = JSON.parse(String(init.body));
+    requests.push(rpc);
+    if (rpc.method === "models/tiers/put") {
+      if (rpc.params.expectedRevision !== defaults.revision) return Response.json({ id: rpc.id,
+        error: { code: -32009, message: "defaults changed", data: { kind: "conflict", message: "defaults changed" } } });
+      defaults = { ...defaults, tiers: rpc.params.tiers, revision: defaults.revision + 1 };
+    }
+    if (rpc.method === "models/tiers/resolve") {
+      return Response.json({ id: rpc.id, result: { result: { tiers: [{ tier: "default", layer: "universe", chain: ["default"], route: { model: defaults.agentRun } }] }, notifications: [] } });
+    }
+    return Response.json({ id: rpc.id, result: { result: { defaults }, notifications: [] } });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const app = new Hono<{ Variables: ApiVariables }>();
+  app.use("*", async (c, next) => { c.set("session", { user: { id: "member" } } as ApiVariables["session"]); await next(); });
+  app.route("/", gatewayRoutes({ env: { lightspeedApiUrl: "https://engine.example/rpc", lightspeedApiKey: "lsk_fixture" } } as AppContext));
+  const call = (path: string, method: string, body?: unknown) => app.request(`/universe/models/${path}`, {
+    method, headers: { "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { call, requests, fetch };
+}
+
+it("replaces the tier table under the defaults revision and resolves the effective table", async () => {
+  const f = tiersFixture();
+  const tiers = { fast: { model: { providerId: "openai", apiKind: "openai:responses", model: "mini" }, reasoningEffort: "low" }, grader: { tier: "fast" } };
+  expect(await (await f.call("tiers", "PUT", { tiers, expectedRevision: 2 })).json()).toMatchObject({ revision: 3, tiers });
+  expect((await f.call("tiers", "PUT", { tiers: {}, expectedRevision: 2 })).status).toBe(409);
+  expect(await (await f.call("tiers/resolve", "POST", { profile: { kind: "named", profileId: "reviewer" } })).json()).toMatchObject({ tiers: [{ tier: "default", layer: "universe" }] });
+  expect(f.requests.map((request) => request.method)).toEqual(["models/tiers/put", "models/tiers/put", "models/tiers/resolve"]);
+  expect(f.requests[2]?.params).toEqual({ profile: { kind: "named", profileId: "reviewer" } });
+});
+
+it.each([
+  { tiers: { default: { tier: "fast" } }, expectedRevision: 2 },
+  { tiers: { "bad name": { tier: "fast" } }, expectedRevision: 2 },
+  { tiers: { fast: { tier: "x", reasoningEffort: "low" } }, expectedRevision: 2 },
+  { tiers: { fast: { model: { providerId: "openai", apiKind: "openai:audio-transcriptions", model: "speech" } } }, expectedRevision: 2 },
+  { tiers: {} },
+])("rejects malformed tier tables before sending them upstream", async (body) => {
+  const f = tiersFixture();
+  expect((await f.call("tiers", "PUT", body)).status).toBe(400);
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it.each(["viewer", "contributor"])("lets %s resolve tiers but not replace them", async (role) => {
+  auth.role = role;
+  const f = tiersFixture();
+  expect((await f.call("tiers/resolve", "POST", {})).status).toBe(200);
+  expect((await f.call("tiers", "PUT", { tiers: {}, expectedRevision: 2 })).status).toBe(403);
+  expect(f.fetch).toHaveBeenCalledTimes(1);
 });

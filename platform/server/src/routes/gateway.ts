@@ -33,6 +33,8 @@ import {
   messageInputItems,
   messageRunConfig,
   modelDefaultsPutSchema,
+  modelTiersPutSchema,
+  modelTiersResolveSchema,
   roleAtLeast,
   sessionMessageSchema,
   sessionSteerSchema,
@@ -1015,6 +1017,32 @@ export function gatewayRoutes(ctx: AppContext) {
     return withGateway(c, async () => {
       const response = await engineClientFor(ctx, access).call("models/defaults/put", body.data);
       return c.json(response.result.defaults);
+    });
+  });
+
+  /// The universe tier table shares the defaults revision; the runtime
+  /// validates names, protocols, and alias resolution.
+  app.put("/:id/models/tiers", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) return c.json({ error: "not found" }, 404);
+    const body = await parseBody(c, modelTiersPutSchema);
+    if (!body.ok) return body.response;
+    return withGateway(c, async () => {
+      const response = await engineClientFor(ctx, access).call("models/tiers/put", body.data);
+      return c.json(response.result.defaults);
+    });
+  });
+
+  /// The effective tier table for a profile, with each tier's layer, chain,
+  /// and route: the "why did this use that model" view.
+  app.post("/:id/models/tiers/resolve", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) return c.json({ error: "not found" }, 404);
+    const body = await parseBody(c, modelTiersResolveSchema);
+    if (!body.ok) return body.response;
+    return withGateway(c, async () => {
+      const response = await engineClientFor(ctx, access).call("models/tiers/resolve", body.data);
+      return c.json(response.result);
     });
   });
 

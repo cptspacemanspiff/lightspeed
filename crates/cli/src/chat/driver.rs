@@ -1555,10 +1555,13 @@ impl ChatSessionDriver {
     }
 
     fn sync_session_model(&mut self, session: &SessionView) -> Result<()> {
+        // Stored documents carry the resolved route; a tier never reaches a
+        // session view.
         self.session_model = session
             .config
             .as_ref()
-            .and_then(|config| config.model.clone());
+            .and_then(|config| config.model.as_ref())
+            .and_then(|model| model.route().cloned());
         if self.settings.route_requested {
             self.validate_route(&self.settings.provider, &self.settings.api_kind)?;
         } else if let Some(model) = &self.session_model {
@@ -1905,11 +1908,13 @@ fn summary_from_session(session: &SessionView) -> ChatSessionSummary {
             .config
             .as_ref()
             .and_then(|config| config.model.as_ref())
+            .and_then(|model| model.route())
             .map(|model| model.provider_id.clone()),
         model: session
             .config
             .as_ref()
             .and_then(|config| config.model.as_ref())
+            .and_then(|model| model.route())
             .map(|model| model.model.clone()),
         active_run: session
             .runs
@@ -2032,7 +2037,8 @@ fn model_config(settings: &ChatDraftSettings) -> Option<ModelConfig> {
 
 fn session_start_config(settings: &ChatDraftSettings) -> api::SessionConfig {
     api::SessionConfig {
-        model: model_config(settings),
+        model: model_config(settings).map(Into::into),
+        models: None,
         generation: Some(generation_config(settings)),
         limits: None,
         context: None,
@@ -2075,7 +2081,7 @@ fn dev_features(settings: &ChatDraftSettings) -> FeaturesConfig {
 
 fn run_start_config(settings: &ChatDraftSettings) -> RunStartConfig {
     RunStartConfig {
-        model: model_config(settings),
+        model: model_config(settings).map(Into::into),
         generation: Some(generation_config(settings)),
         limits: None,
     }
@@ -2866,7 +2872,10 @@ mod tests {
 
         let config = run_start_config(&settings);
 
-        assert_eq!(config.model.expect("model").model, "gpt-5.5");
+        assert_eq!(
+            config.model.expect("model").route().expect("route").model,
+            "gpt-5.5"
+        );
         let generation = config.generation.expect("generation");
         assert_eq!(generation.max_output_tokens, Some(2048));
         assert_eq!(generation.reasoning_effort, Some("none".to_owned()));
@@ -2947,7 +2956,12 @@ mod tests {
         settings.api_kind = "openai:completions".to_owned();
 
         let session = session_start_config(&settings);
-        let model = session.model.expect("model");
+        let model = session
+            .model
+            .expect("model")
+            .route()
+            .expect("route")
+            .clone();
         let generation = session.generation.expect("generation");
         let features = session.features.expect("features");
 

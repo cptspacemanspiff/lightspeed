@@ -47,7 +47,10 @@ and explain the discrepancy. Do not edit files. If the source is ambiguous,
 report the uncertainty instead of filling in the gap.
 ```
 
-Select a **Model** and enable the capabilities this job requires.
+Select a **Model**, or a **Tier** such as `fast` that the universe binds to a
+model on its Models page (see
+[Name models by tier](models-and-credentials.md#name-models-by-tier)), and
+enable the capabilities this job requires.
 For the reviewer, enable **Virtual File System: Files, Instructions, Skills**
 and choose **Add workspace**. Select `release-notes`, set **Session path** to
 `/workspace`, and choose **Read only** access. Save the profile.

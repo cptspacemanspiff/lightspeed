@@ -98,6 +98,9 @@ type Props = {
   workspacesLoading?: boolean;
   models?: ModelOption[];
   defaultModelLabel?: string;
+  /// Tier names a document may reference in place of a route, `default`
+  /// first; from the universe tier table.
+  modelTiers?: string[];
   profiles?: ProfileOption[];
   environments?: EnvironmentOption[];
   allowInherit?: boolean;
@@ -234,12 +237,21 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
   const result: RecordValue = {};
 
   const model = record(source.model);
-  const modelResult = Object.fromEntries(
-    ["providerId", "apiKind", "model"]
-      .map((key) => [key, string(model[key]).trim()] as const)
-      .filter(([, item]) => item),
-  );
-  if (Object.keys(modelResult).length) result.model = modelResult;
+  const modelTier = string(model.tier).trim();
+  const modelResult = modelTier && !string(model.providerId)
+    ? {}
+    : Object.fromEntries(
+      ["providerId", "apiKind", "model"]
+        .map((key) => [key, string(model[key]).trim()] as const)
+        .filter(([, item]) => item),
+    );
+  if (modelTier && !string(model.providerId)) result.model = { tier: modelTier };
+  else if (Object.keys(modelResult).length) result.model = modelResult;
+  // The configuration tier table is opaque to the editor: kept as written.
+  const models = source.models;
+  if (models && typeof models === "object" && !Array.isArray(models) && Object.keys(models).length) {
+    result.models = structuredClone(models);
+  }
 
   const generation = record(source.generation);
   const generationResult: RecordValue = {};
@@ -351,9 +363,11 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
         return {
           name: string(entry.name).trim(),
           ...(description.trim() ? { description } : {}),
-          model: Object.fromEntries(
-            ["providerId", "apiKind", "model"].map((key) => [key, string(model[key]).trim()]),
-          ),
+          model: string(model.tier).trim() && !string(model.providerId)
+            ? { tier: string(model.tier).trim() }
+            : Object.fromEntries(
+              ["providerId", "apiKind", "model"].map((key) => [key, string(model[key]).trim()]),
+            ),
           ...(reasoningEffort ? { reasoningEffort } : {}),
           ...(maxOutputTokens ? { maxOutputTokens } : {}),
         };
@@ -402,12 +416,16 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
 export function configError(config: SessionConfig | undefined, pinnedApiKind?: string, allowInherit = false, pinnedProviderId?: string): string | null {
   if (!config && !pinnedApiKind && !pinnedProviderId) return null;
   const model = record(config?.model);
-  if ((pinnedApiKind && string(model.apiKind) !== pinnedApiKind)
-    || (pinnedProviderId && string(model.providerId) !== pinnedProviderId)) {
+  const modelIsTier = Boolean(string(model.tier)) && !string(model.providerId);
+  if (!modelIsTier && ((pinnedApiKind && string(model.apiKind) !== pinnedApiKind)
+    || (pinnedProviderId && string(model.providerId) !== pinnedProviderId))) {
     return "Provider identity and API kind are fixed for this session. Create a new session to change them.";
   }
   if (!config) return null;
-  if (Object.keys(model).length && !["providerId", "apiKind", "model"].every((key) => string(model[key]))) {
+  if (modelIsTier && !/^[A-Za-z0-9._-]{1,64}$/.test(string(model.tier))) {
+    return "A model tier name uses up to 64 letters, digits, '-', '_', or '.'.";
+  }
+  if (!modelIsTier && Object.keys(model).length && !["providerId", "apiKind", "model"].every((key) => string(model[key]))) {
     return "A model override needs provider id, API kind, and model name.";
   }
   const toolChoice = record(record(config.generation).toolChoice);
@@ -502,6 +520,12 @@ export function generateModelsError(value: unknown): string | null {
     if (names.has(name)) return `Generation model name ${name} is used more than once.`;
     names.add(name);
     const model = record(entry.model);
+    if (string(model.tier) && !string(model.providerId)) {
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(string(model.tier))) {
+        return `Generation model ${name} names an invalid tier.`;
+      }
+      continue;
+    }
     if (!["providerId", "apiKind", "model"].every((key) => string(model[key]))) {
       return `Generation model ${name} needs provider id, API kind, and model name.`;
     }
@@ -583,6 +607,7 @@ export function SessionConfigEditor({
   workspacesLoading = false,
   models = [],
   defaultModelLabel = "Universe default",
+  modelTiers = [],
   profiles = [],
   environments = [],
   allowInherit = false,
@@ -644,6 +669,7 @@ export function SessionConfigEditor({
           config={config}
           models={models}
           defaultModelLabel={defaultModelLabel}
+          modelTiers={modelTiers}
           manualModel={manualModel}
           onManualModelChange={setManualModel}
           pinnedApiKind={pinnedApiKind}
@@ -700,7 +726,7 @@ export function SessionConfigEditor({
                   />
                 )}
                 {name === "subagents" && <SubagentFields feature={record(features.subagents)} profiles={profiles} patch={(fn) => patchFeature("subagents", fn)} />}
-                {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} patch={(fn) => patchFeature("generate", fn)} />}
+                {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} modelTiers={modelTiers} patch={(fn) => patchFeature("generate", fn)} />}
                 {name === "mcp" && <McpFields feature={record(features.mcp)} servers={mcpServers} discoverySource={mcpToolDiscovery} patch={(fn) => patchFeature("mcp", fn)} />}
               </FeaturePanel>
             ))}
@@ -833,10 +859,11 @@ function EnvironmentFeatureEditor({
   );
 }
 
-function ModelFields({ config, models, defaultModelLabel, manualModel, onManualModelChange, pinnedApiKind, pinnedProviderId, change }: {
+function ModelFields({ config, models, defaultModelLabel, modelTiers, manualModel, onManualModelChange, pinnedApiKind, pinnedProviderId, change }: {
   config: RecordValue;
   models: ModelOption[];
   defaultModelLabel: string;
+  modelTiers: string[];
   manualModel: boolean;
   onManualModelChange: (enabled: boolean) => void;
   pinnedApiKind?: string;
@@ -851,17 +878,28 @@ function ModelFields({ config, models, defaultModelLabel, manualModel, onManualM
       option.model === string(model.model),
   );
   const hasModel = Object.keys(model).length > 0;
-  const selected = currentModel
-    ? modelOptionKey(currentModel)
-    : manualModel || hasModel
-      ? "manual"
-      : "default";
+  const selectedTier = string(model.tier) && !string(model.providerId) ? string(model.tier) : "";
+  const selected = selectedTier
+    ? `tier:${selectedTier}`
+    : currentModel
+      ? modelOptionKey(currentModel)
+      : manualModel || hasModel
+        ? "manual"
+        : "default";
+  // A tier resolves when the document is admitted and may land on any
+  // provider, so an existing session's pinned route offers no tiers.
+  const tierChoices = pinnedApiKind ? [] : [...new Set([...modelTiers.filter((tier) => tier !== "default"), ...(selectedTier && selectedTier !== "default" ? [selectedTier] : [])])];
   const choices: ModelChoice[] = [
     ...(!pinnedApiKind ? [{
       key: "default",
       label: defaultModelLabel,
       search: `universe default ${defaultModelLabel}`,
     }] : []),
+    ...tierChoices.map((tier) => ({
+      key: `tier:${tier}`,
+      label: `Tier · ${tier}`,
+      search: `tier ${tier}`,
+    })),
     ...modelPickerOptions(models, currentModel, pinnedApiKind, pinnedProviderId)
       .map((option) => ({
         key: modelOptionKey(option),
@@ -945,6 +983,13 @@ function ModelFields({ config, models, defaultModelLabel, manualModel, onManualM
               });
               return;
             }
+            if (choice.key.startsWith("tier:")) {
+              onManualModelChange(false);
+              change((next) => {
+                next.model = { tier: choice.key.slice("tier:".length) };
+              });
+              return;
+            }
             if (choice.key === "manual") {
               onManualModelChange(true);
               return;
@@ -1001,7 +1046,9 @@ function ModelFields({ config, models, defaultModelLabel, manualModel, onManualM
           </ComboboxContent>
         </Combobox>
         <FieldDescription className="text-xs">
-          {currentModel
+          {selectedTier
+            ? `Resolved through the universe tier table when the document is admitted.`
+            : currentModel
             ? `${currentModel.providerId} · ${currentModel.apiKind}`
             : models.length
               ? "Choose a provider-discovered model, or enter a route manually."
@@ -1701,10 +1748,12 @@ const CUSTOM_GENERATE_MODEL = "custom";
 function GenerateFields({
   feature,
   models,
+  modelTiers,
   patch,
 }: {
   feature: RecordValue;
   models: ModelOption[];
+  modelTiers: string[];
   patch: (fn: (feature: RecordValue) => void) => void;
 }) {
   const id = useId();
@@ -1747,11 +1796,13 @@ function GenerateFields({
       </p>
       {entries.map((entry, index) => {
         const model = record(entry.model);
+        const entryTier = string(model.tier) && !string(model.providerId) ? string(model.tier) : "";
         const current = options.find((option) =>
           option.providerId === string(model.providerId)
           && option.apiKind === string(model.apiKind)
           && option.model === string(model.model));
-        const selected = current ? modelOptionKey(current) : CUSTOM_GENERATE_MODEL;
+        const selected = entryTier ? `tier:${entryTier}` : current ? modelOptionKey(current) : CUSTOM_GENERATE_MODEL;
+        const tierOptions = [...new Set([...modelTiers, ...(entryTier ? [entryTier] : [])])];
         const updateRoute = (key: string, value: string) =>
           updateEntry(index, (next) => {
             next.model = { ...record(next.model), [key]: value };
@@ -1773,17 +1824,24 @@ function GenerateFields({
               <Select
                 value={selected}
                 onValueChange={(key) => updateEntry(index, (next) => {
+                  if (key?.startsWith("tier:")) {
+                    next.model = { tier: key.slice("tier:".length) };
+                    return;
+                  }
                   const option = options.find((item) => modelOptionKey(item) === key);
                   if (option) next.model = { providerId: option.providerId, apiKind: option.apiKind, model: option.model };
-                  else next.model = { ...record(next.model) };
+                  else next.model = entryTier ? {} : { ...record(next.model) };
                 })}
               >
                 <SelectTrigger aria-label={`Model for ${string(entry.name) || "generation model"}`} className="w-full">
                   <SelectValue>
-                    {current ? `${current.displayName} (${current.providerId})` : "Custom route"}
+                    {entryTier ? `Tier · ${entryTier}` : current ? `${current.displayName} (${current.providerId})` : "Custom route"}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
+                  {tierOptions.map((tier) => (
+                    <SelectItem key={`tier:${tier}`} value={`tier:${tier}`}>Tier · {tier}</SelectItem>
+                  ))}
                   {options.map((option) => (
                     <SelectItem key={modelOptionKey(option)} value={modelOptionKey(option)}>
                       {option.displayName} ({option.providerId})

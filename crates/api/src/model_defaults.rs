@@ -49,8 +49,16 @@ impl ModelDefaultSlot {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelDefaults {
     pub revision: u64,
+    /// The universe `default` model tier: used when a new session and its
+    /// profile leave the model unset, and the target of tier aliases.
     pub agent_run: Option<ModelConfig>,
     pub speech_to_text: Option<ModelConfig>,
+    /// The universe tier table: shared tier names bound to routes or to
+    /// other tiers. `default` is not an entry; it is the agentRun default.
+    /// Replaced whole with models/tiers/put under the same revision.
+    #[serde(default)]
+    #[schemars(required)]
+    pub tiers: ModelTierTable,
 }
 
 impl ModelDefaults {
@@ -70,6 +78,7 @@ pub struct ModelDefaultsReadParams {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelDefaultsPutParams {
     pub slot: ModelDefaultSlot,
+
     /// Complete selection, or explicit null to clear this slot. Required.
     #[serde(deserialize_with = "Option::deserialize")]
     #[schemars(required, schema_with = "required_nullable_model_schema")]

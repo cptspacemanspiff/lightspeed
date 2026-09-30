@@ -335,6 +335,15 @@ export type CompactionPolicy =
  */
 export type EnvironmentAccess = "read" | "edit" | "exec" | "jobs";
 /**
+ * A model in configuration input: either a concrete route or a tier name.
+ * Tier names resolve to a concrete route when the configuration is admitted,
+ * so documents read back from a session always carry a route.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelRef".
+ */
+export type ModelRef = ModelTierRef | ModelConfig;
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileId".
  */
@@ -371,6 +380,13 @@ export type ToolChoice =
       toolId: string;
       type: "specific";
     };
+/**
+ * What a tier resolves to: a concrete route or an alias for another tier.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTierBinding".
+ */
+export type ModelTierBinding = ModelTierAlias | ModelTierRoute;
 /**
  * Completion contract for one workflow-tool invocation. Joined tools park
  * the original call on one runtime-owned reply; Promises exposes handles for
@@ -1564,6 +1580,13 @@ export type ModelProviderCredentialStatus = "configured" | "missing" | "invalid"
  */
 export type ModelProviderCredentialSource = "none" | "universe" | "deployment";
 /**
+ * The layer that defines a tier.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTierLayer".
+ */
+export type ModelTierLayer = "universe" | "config";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileInstructions".
  */
@@ -2170,13 +2193,27 @@ export interface SessionConfig {
   generation?: GenerationConfig | null;
   limits?: LimitsConfig | null;
   /**
-   * At creation, omission uses the profile model or universe agentRun
-   * default. On configuration replacement or profile application to an
-   * existing session, omission preserves its current model. Documents read
-   * back from a session always carry the model. Provider identity and API
-   * kind are fixed for the session lifetime; the model name may change.
+   * A concrete route or a model tier such as `{ "tier": "default" }`. At
+   * creation, omission uses the profile model or the `default` tier. On
+   * configuration replacement or profile application to an existing
+   * session, omission preserves its current model. A tier is resolved
+   * once, when the document is admitted, through `models` and the
+   * universe tier table; its route's reasoning effort and output cap apply
+   * unless `generation` sets them. Documents read back from a session
+   * always carry the resolved route. Provider identity and API kind are
+   * fixed for the session lifetime; the model name may change.
    */
-  model?: ModelConfig | null;
+  model?: ModelRef | null;
+  /**
+   * A partial model tier table that overrides the universe table by name
+   * for this document: `model` and generation entries may reference these
+   * tiers, and an entry may alias a universe tier. Consumed when the
+   * document is admitted; a session's stored configuration carries the
+   * resolved routes, not the table. At most 64 entries.
+   */
+  models?: {
+    [k: string]: ModelTierBinding;
+  } | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -2328,24 +2365,40 @@ export interface GenerateModelOption {
    */
   description?: string | null;
   /**
-   * Output-token cap for calls using this entry.
+   * Output-token cap for calls using this entry. Wins over the setting of
+   * a resolved tier.
    */
   maxOutputTokens?: number | null;
   /**
-   * Provider route, resolved and authenticated like a session model.
+   * Provider route, resolved and authenticated like a session model, or a
+   * model tier resolved when the configuration is admitted.
    */
-  model: ModelConfig;
+  model: ModelRef;
   /**
    * Name the model uses to select this entry: 1–64 ASCII letters, digits,
    * `-`, `_`, or `.`.
    */
   name: string;
   /**
-   * Provider-native reasoning effort for calls using this entry.
+   * Provider-native reasoning effort for calls using this entry. Wins over
+   * the setting of a resolved tier.
    */
   reasoningEffort?: string | null;
 }
 /**
+ * A model tier reference: the name is resolved through the universe and
+ * configuration tier tables when the document is admitted.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTierRef".
+ */
+export interface ModelTierRef {
+  tier: string;
+}
+/**
+ * A concrete provider route: where a call goes and which wire protocol it
+ * speaks.
+ *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ModelConfig".
  */
@@ -2571,6 +2624,36 @@ export interface GenerationConfig {
 export interface LimitsConfig {
   maxToolRounds?: number | null;
   maxTurns?: number | null;
+}
+/**
+ * A tier that names another tier. An alias carries only the name; the
+ * route at the end of the chain supplies every setting.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTierAlias".
+ */
+export interface ModelTierAlias {
+  tier: string;
+}
+/**
+ * A tier bound to a concrete route and the settings that route is used
+ * with. Settings live with the route because their valid values depend on
+ * the model.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTierRoute".
+ */
+export interface ModelTierRoute {
+  /**
+   * Output-token cap for calls that resolve to this tier.
+   */
+  maxOutputTokens?: number | null;
+  model: ModelConfig;
+  /**
+   * Provider-native reasoning effort for calls that resolve to this tier.
+   * A session's or run's explicit setting still wins.
+   */
+  reasoningEffort?: string | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -5590,9 +5673,21 @@ export interface ModelDefaultsResponse {
  * via the `definition` "ModelDefaults".
  */
 export interface ModelDefaults {
+  /**
+   * The universe `default` model tier: used when a new session and its
+   * profile leave the model unset, and the target of tier aliases.
+   */
   agentRun?: ModelConfig | null;
   revision: number;
   speechToText?: ModelConfig | null;
+  /**
+   * The universe tier table: shared tier names bound to routes or to
+   * other tiers. `default` is not an entry; it is the agentRun default.
+   * Replaced whole with models/tiers/put under the same revision.
+   */
+  tiers?: {
+    [k: string]: ModelTierBinding;
+  };
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -5679,6 +5774,50 @@ export interface ModelProviderDiscoveryView {
   error?: string | null;
   fetchedAtMs?: number | null;
   providerId: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfModelTiersResolveResponse".
+ */
+export interface AgentApiOutcomeOfModelTiersResolveResponse {
+  notifications?: AgentNotification[];
+  result: ModelTiersResolveResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTiersResolveResponse".
+ */
+export interface ModelTiersResolveResponse {
+  /**
+   * Every visible tier, configuration entries first, then the universe.
+   */
+  tiers: ResolvedModelTier[];
+}
+/**
+ * One tier of an effective table with its resolution.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ResolvedModelTier".
+ */
+export interface ResolvedModelTier {
+  /**
+   * The binding at the defining layer; absent when `default` is unset.
+   */
+  binding?: ModelTierBinding | null;
+  /**
+   * Tier names from this tier to the one bound to the route.
+   */
+  chain?: string[];
+  /**
+   * Why the tier does not resolve, when it does not.
+   */
+  error?: string | null;
+  layer: ModelTierLayer;
+  /**
+   * The concrete route and settings this tier uses.
+   */
+  route?: ModelTierRoute | null;
+  tier: string;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -7754,6 +7893,41 @@ export interface ModelListParams {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTiersPutParams".
+ */
+export interface ModelTiersPutParams {
+  /**
+   * Revision returned by models/defaults/read; zero for a universe with no
+   * updates. Tiers and default slots share one revision.
+   */
+  expectedRevision: number;
+  /**
+   * The complete universe tier table; omitted names are removed. The
+   * `default` tier is not part of it.
+   */
+  tiers: {
+    [k: string]: ModelTierBinding;
+  };
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ModelTiersResolveParams".
+ */
+export interface ModelTiersResolveParams {
+  /**
+   * A configuration table merged over the profile's, entry by entry, the
+   * way an explicit session configuration merges over its profile.
+   */
+  models?: {
+    [k: string]: ModelTierBinding;
+  } | null;
+  /**
+   * A profile whose `config.models` table forms the configuration layer.
+   */
+  profile?: ProfileSource | null;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProfileApplyParams".
  */
 export interface ProfileApplyParams {
@@ -7855,8 +8029,11 @@ export interface RunStartConfig {
   /**
    * Optional model override within the session's provider identity and API
    * kind. Changing either requires a new session, even before the first run.
+   * A model tier resolves through the universe tier table and must land on
+   * the session's provider; its reasoning effort and output cap apply to
+   * the run unless `generation` sets them.
    */
-  model?: ModelConfig | null;
+  model?: ModelRef | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

@@ -2106,7 +2106,10 @@ impl AgentApiService for TestService {
         let generation = config.generation.expect("generation");
         assert_eq!(generation.max_output_tokens, Some(1024));
         assert_eq!(generation.reasoning_effort, Some("high".to_owned()));
-        assert_eq!(config.model.expect("model").model, "gpt-5.5");
+        assert_eq!(
+            config.model.expect("model").route().expect("route").model,
+            "gpt-5.5"
+        );
         Ok(AgentApiOutcome::new(RunStartResponse {
             run: test_run("run_1".to_owned(), RunStatus::Running),
         }))

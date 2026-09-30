@@ -461,7 +461,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxOutputTokens": {
-              "description": "Output-token cap for calls using this entry.",
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -472,17 +472,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 }
               ],
-              "description": "Provider route, resolved and authenticated like a session model."
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
             },
             "name": {
               "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
               "type": "string"
             },
             "reasoningEffort": {
-              "description": "Provider-native reasoning effort for calls using this entry.",
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
               "type": [
                 "string",
                 "null"
@@ -675,6 +675,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "object"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -701,6 +705,89 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
         },
         "ProfileId": {
           "type": "string"
@@ -846,13 +933,23 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -1672,7 +1769,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxOutputTokens": {
-              "description": "Output-token cap for calls using this entry.",
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1683,17 +1780,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 }
               ],
-              "description": "Provider route, resolved and authenticated like a session model."
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
             },
             "name": {
               "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
               "type": "string"
             },
             "reasoningEffort": {
-              "description": "Provider-native reasoning effort for calls using this entry.",
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
               "type": [
                 "string",
                 "null"
@@ -1831,6 +1928,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "object"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -1857,6 +1958,89 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
         },
         "ProfileId": {
           "type": "string"
@@ -1910,13 +2094,23 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -2974,6 +3168,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "string"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -3000,6 +3198,32 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
         },
         "RunLimitsConfig": {
           "properties": {
@@ -3047,13 +3271,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Optional model override within the session's provider identity and API\nkind. Changing either requires a new session, even before the first run."
+              "description": "Optional model override within the session's provider identity and API\nkind. Changing either requires a new session, even before the first run.\nA model tier resolves through the universe tier table and must land on\nthe session's provider; its reasoning effort and output cap apply to\nthe run unless `generation` sets them."
             }
           },
           "type": "object"
@@ -3862,7 +4086,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxOutputTokens": {
-              "description": "Output-token cap for calls using this entry.",
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -3873,17 +4097,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 }
               ],
-              "description": "Provider route, resolved and authenticated like a session model."
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
             },
             "name": {
               "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
               "type": "string"
             },
             "reasoningEffort": {
-              "description": "Provider-native reasoning effort for calls using this entry.",
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
               "type": [
                 "string",
                 "null"
@@ -4076,6 +4300,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "object"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -4102,6 +4330,89 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
         },
         "ProfileId": {
           "type": "string"
@@ -4247,13 +4558,23 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -5366,6 +5687,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       "type": "object",
       "definitions": {
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -5463,7 +5788,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     "method": "models/defaults/read",
     "group": "models",
     "summary": "Read universe model defaults",
-    "description": "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers.",
+    "description": "Returns the revision, the independent agentRun and speechToText selections, and the universe model tier table. The agentRun selection is the `default` tier. Revision zero means no update has been made. Does not contact model providers.",
     "paramsType": "ModelDefaultsReadParams",
     "resultType": "AgentApiOutcome<ModelDefaultsResponse>",
     "inputSchema": {
@@ -5517,6 +5842,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
       "type": "object",
       "definitions": {
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -5542,6 +5871,1318 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "speechToText"
           ],
           "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "lightspeed_models_tiers_put",
+    "method": "models/tiers/put",
+    "group": "models",
+    "summary": "Replace the universe model tier table",
+    "description": "Replaces every shared tier binding under the defaults revision. Each tier binds a route with its settings or aliases another universe tier; `default` stays the agentRun selection. Aliases must resolve without cycles. Existing sessions keep their resolved model; profiles referencing a tier resolve it again at their next application.",
+    "paramsType": "ModelTiersPutParams",
+    "resultType": "AgentApiOutcome<ModelDefaultsResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "expectedRevision": {
+          "description": "Revision returned by models/defaults/read; zero for a universe with no\nupdates. Tiers and default slots share one revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tiers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "description": "The complete universe tier table; omitted names are removed. The\n`default` tier is not part of it.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "tiers",
+        "expectedRevision"
+      ],
+      "type": "object",
+      "definitions": {
+        "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  {
+    "name": "lightspeed_models_tiers_resolve",
+    "method": "models/tiers/resolve",
+    "group": "models",
+    "summary": "Resolve the effective model tier table",
+    "description": "Returns every tier a configuration can name, with its defining layer, alias chain, and concrete route, optionally under a profile's `config.models` table and an extra configuration table. Tiers that do not resolve carry an error instead of a route.",
+    "paramsType": "ModelTiersResolveParams",
+    "resultType": "AgentApiOutcome<ModelTiersResolveResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "models": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "description": "A configuration table merged over the profile's, entry by entry, the\nway an explicit session configuration merges over its profile.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProfileSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A profile whose `config.models` table forms the configuration layer."
+        }
+      },
+      "type": "object",
+      "definitions": {
+        "CompactionPolicy": {
+          "oneOf": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "disabled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerTriggered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerStandalone",
+                  "type": "string"
+                },
+                "targetTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ContextConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "compaction": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CompactionPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentAccess": {
+          "description": "Per-attachment environment access, an ordered ladder: `edit` adds file\nediting to `read`, `exec` adds processes, `jobs` adds durable jobs.\nProcesses can write files regardless of the file-tool level, so\nread-only files with commands is deliberately not expressible.",
+          "enum": [
+            "read",
+            "edit",
+            "exec",
+            "jobs"
+          ],
+          "type": "string"
+        },
+        "EnvironmentAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One environment the session may use. Exactly one of `environmentId` and\n`inherit` identifies the machine. `inherit` is valid only in a profile\ndocument applied to a sub-agent: it resolves to the delegating parent's\nactive environment at spawn and is stored on the child as a concrete id.\nIf the parent's environment is also listed explicitly, the explicit\nattachment wins; if the parent has none, the inherit attachment is dropped.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/EnvironmentAccess"
+            },
+            "default": {
+              "description": "Activated when a profile is applied while the session has no active\nenvironment; creation is the trivial case. Never overrides a live\nselection and never applies on a plain `session/config/put`.",
+              "type": "boolean"
+            },
+            "environmentId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inherit": {
+              "type": "boolean"
+            },
+            "workingDirectory": {
+              "description": "Absolute machine working directory for file tools, commands, jobs,\nand sources; absent uses the machine's advertised default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "access"
+          ],
+          "type": "object"
+        },
+        "EnvironmentPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Prompt loading scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/prompts and\n.lightspeed/prompts under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Skill discovery scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/skills and\n.lightspeed/skills under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants session environments. The `environments` list is the allowed set:\nthe session can select, read, and run work only on a listed machine, each\nwith its own access grant and working directory. The installed tool\nsurface is the union of every attachment's grant; a call the active\nmachine's grant does not cover fails at execution, so switching machines\nnever changes the toolset. `{}` grants the feature with no reachable\nmachine.",
+          "properties": {
+            "environments": {
+              "description": "The environments this session may use; unique ids, at most one\ndefault, at most one `inherit` (profiles only).",
+              "items": {
+                "$ref": "#/definitions/EnvironmentAttachment"
+              },
+              "type": "array"
+            },
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment prompt loading; absent disables sourced instructions."
+            },
+            "selection": {
+              "default": false,
+              "description": "Exposes `environment_list`, `environment_activate`, and\n`environment_deactivate` over the attached environments.\n`environment_read` is available whenever environments are enabled, and\nexternal API/profile activation remains available when this is false.",
+              "type": "boolean"
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment skill discovery. Absent disables discovery."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "FeaturesConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
+          "properties": {
+            "environments": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "generate": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GenerateFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mcp": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/McpFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subagents": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SubagentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "timers": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TimersFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vfs": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "web": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "GenerateFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants `model_generate`: one standalone model call per tool call. The\ncall supplies instructions and input, optionally validated against an\ninput schema, and may require a JSON result matching an output schema.\nThe generation has no conversation state and no tools. The model list is\nthe authority: the model picks an entry by `name`, the first entry is the\ndefault, and any other name fails the call. An empty list lets the tool\nuse only the calling turn's model.",
+          "properties": {
+            "models": {
+              "description": "Models a call may select, at most 32, with unique names.",
+              "items": {
+                "$ref": "#/definitions/GenerateModelOption"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "GenerateModelOption": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One model the generation tool may select.",
+          "properties": {
+            "description": {
+              "description": "Shown to the model to help it choose, at most 1024 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ModelRef"
+                }
+              ],
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
+            },
+            "name": {
+              "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "model"
+          ],
+          "type": "object"
+        },
+        "GenerationConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Turn-shaping defaults applied to every LLM generation. Per-run overrides\nride `session/runs/start`.",
+          "properties": {
+            "maxOutputTokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "parallelToolUse": {
+              "description": "Whether the model may call several tools in one turn; absent leaves\nthe provider default.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "processingTier": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelProcessingTier"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider processing class. In session/profile config this becomes the\ndefault for every run; in run config it overrides that run. Currently\nsupported only by the built-in OpenAI provider."
+            },
+            "reasoningEffort": {
+              "description": "Reasoning effort tier as a provider-native string (e.g. \"none\",\n\"high\", \"xhigh\", \"max\"); validated against the session's provider.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toolChoice": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ToolChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "InlineAgentProfile": {
+          "properties": {
+            "config": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SessionConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "displayName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "instructions": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProfileInstructions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "metadata": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Descriptive metadata defaults copied to a session when it is created\nfrom this profile. Explicit `session/start` metadata wins key by key.\nApplying the profile to an existing session does not change metadata.",
+              "type": "object"
+            },
+            "retention": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProfileSessionRetention"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Creation-time session retention default. Absence keeps the tree until\nmanual deletion. Applying a profile to an existing session does not\nchange retention."
+            }
+          },
+          "type": "object"
+        },
+        "LimitsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Run budget defaults enforced by the engine drive loop.",
+          "properties": {
+            "maxToolRounds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxTurns": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "McpFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants remote MCP tools by declaring attached servers from the universe MCP\ncatalog. Server ids must be unique; an empty list grants no MCP tools.",
+          "properties": {
+            "servers": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/McpServerAttachment"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "McpServerAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A selected universe MCP server. Its catalog record owns connection,\nexecution, exposure, approval, and auth; the attachment may only narrow the\nrecord's tool allowlist for this session.",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "tools": {
+              "description": "Non-empty subset of the record's allowed tools exposed to this\nsession, under both injection and search; absent exposes the record's\nfull allowlist.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "serverId"
+          ],
+          "type": "object"
+        },
+        "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ModelProcessingTier": {
+          "description": "Provider processing class used by session defaults and per-run overrides.",
+          "enum": [
+            "standard",
+            "fast",
+            "flex"
+          ],
+          "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        },
+        "ProfileId": {
+          "type": "string"
+        },
+        "ProfileInstructions": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob. Use\ninline text, or keep this ref retained by another durable resource.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProfileSessionRetention": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Root-session retention policy supplied by a profile at session creation.",
+          "properties": {
+            "deleteAfterCloseMs": {
+              "description": "Positive close-relative automatic-deletion duration.",
+              "format": "uint64",
+              "maximum": 3153600000000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deleteAfterCloseMs"
+          ],
+          "type": "object"
+        },
+        "ProfileSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "named",
+                  "type": "string"
+                },
+                "profileId": {
+                  "$ref": "#/definitions/ProfileId"
+                }
+              },
+              "required": [
+                "kind",
+                "profileId"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "inline",
+                  "type": "string"
+                },
+                "profile": {
+                  "$ref": "#/definitions/InlineAgentProfile"
+                }
+              },
+              "required": [
+                "kind",
+                "profile"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "SessionConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Declared session configuration document.\n\nSparse and capability-oriented: an omitted section means defaults, an\nabsent feature is not granted (no tools, no access). The document is\nreplaced whole via `session/config/put`; reads return exactly the stored\ndocument, so read-modify-write round-trips.",
+          "properties": {
+            "context": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ContextConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "features": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/FeaturesConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "generation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GenerationConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LimitsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "SubagentAgentRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
+        "SubagentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "properties": {
+            "agents": {
+              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "items": {
+                "$ref": "#/definitions/SubagentAgentRef"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "default": 3600000,
+              "description": "Per-child run deadline in milliseconds; at most the execution\nceiling of 24 hours.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxConcurrent": {
+              "default": 4,
+              "description": "Open sessions under the root at any time, excluding the root.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDepth": {
+              "default": 2,
+              "description": "A child at depth `d` may spawn only while `d + 1 <= maxDepth`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDescendants": {
+              "default": 16,
+              "description": "Lifetime total of sessions ever created under the root.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "agents"
+          ],
+          "type": "object"
+        },
+        "TimersFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants timer promises through the sleep tool plus the base concurrency\ntools (await/cancel/detach).",
+          "properties": {
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "ToolChoice": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "auto",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "none",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "requiredAny",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "toolId": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "specific",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "toolId"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "VfsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants the session virtual filesystem. Workspace attachments declare the\nsession-visible namespace and the VFS catalog is surfaced. The file tool\nsurface is derived from the attachments: any attachment installs the read\ntools, any `edit` attachment adds the write tools, and with the\nenvironments feature granted the matching transfer tools appear. `{}`\ngrants a VFS with no attachments, no tools, and no sourcing.",
+          "properties": {
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt-instruction sourcing from the VFS. Absent disables loading;\nan empty block discovers conventional attached roots."
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent VFS skill discovery. Absent disables discovery and removes\nits runtime catalog; an empty block discovers conventional attached roots."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "description": "Absolute VFS tool working directory; absent uses /.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaces": {
+              "description": "Catalog resources exposed in the session's workspace namespace at\ndisjoint absolute paths.",
+              "items": {
+                "$ref": "#/definitions/WorkspaceAttachment"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "VfsPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/prompts and .lightspeed/prompts beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "VfsSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/skills and .lightspeed/skills beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "WebFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants network access through the web toolset; `fetch` and `search` are\nindependently granted, and a web block granting neither is rejected.",
+          "properties": {
+            "fetch": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFetchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "WebFetchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "type": "object"
+        },
+        "WebSearchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "allowedDomains": {
+              "description": "Absent means all domains; an explicit list must be non-empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "blockedDomains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "WorkspaceAccess": {
+          "description": "Per-attachment VFS access; `edit` implies `read`.",
+          "enum": [
+            "read",
+            "edit"
+          ],
+          "type": "string"
+        },
+        "WorkspaceAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One catalog resource mounted into the session namespace. Exactly one of\n`workspaceId` and `snapshotRef` names the resource; snapshots are\nimmutable and must be attached with `read` access.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/WorkspaceAccess"
+            },
+            "path": {
+              "type": "string"
+            },
+            "snapshotRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaceId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "access"
+          ],
+          "type": "object"
         }
       }
     }
@@ -5978,7 +7619,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxOutputTokens": {
-              "description": "Output-token cap for calls using this entry.",
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -5989,17 +7630,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 }
               ],
-              "description": "Provider route, resolved and authenticated like a session model."
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
             },
             "name": {
               "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
               "type": "string"
             },
             "reasoningEffort": {
-              "description": "Provider-native reasoning effort for calls using this entry.",
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
               "type": [
                 "string",
                 "null"
@@ -6137,6 +7778,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "object"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -6163,6 +7808,89 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
         },
         "ProfileId": {
           "type": "string"
@@ -6272,13 +8000,23 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -7076,7 +8814,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxOutputTokens": {
-              "description": "Output-token cap for calls using this entry.",
+              "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -7087,17 +8825,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 }
               ],
-              "description": "Provider route, resolved and authenticated like a session model."
+              "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
             },
             "name": {
               "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
               "type": "string"
             },
             "reasoningEffort": {
-              "description": "Provider-native reasoning effort for calls using this entry.",
+              "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
               "type": [
                 "string",
                 "null"
@@ -7235,6 +8973,10 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "type": "object"
         },
         "ModelConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
           "properties": {
             "apiKind": {
               "type": "string"
@@ -7261,6 +9003,89 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "flex"
           ],
           "type": "string"
+        },
+        "ModelRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRef"
+            },
+            {
+              "$ref": "#/definitions/ModelConfig"
+            }
+          ],
+          "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+        },
+        "ModelTierAlias": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierAlias"
+            },
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            }
+          ],
+          "description": "What a tier resolves to: a concrete route or an alias for another tier."
+        },
+        "ModelTierRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+          "properties": {
+            "tier": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tier"
+          ],
+          "type": "object"
+        },
+        "ModelTierRoute": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+          "properties": {
+            "maxOutputTokens": {
+              "description": "Output-token cap for calls that resolve to this tier.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfig"
+            },
+            "reasoningEffort": {
+              "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
         },
         "ProfileId": {
           "type": "string"
@@ -7370,13 +9195,23 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "model": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ModelConfig"
+                  "$ref": "#/definitions/ModelRef"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+              "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/definitions/ModelTierBinding"
+              },
+              "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": "object"

@@ -62,6 +62,8 @@ pub const METHOD_ENVIRONMENTS_CREDENTIALS_UNBIND: &str = "environments/credentia
 
 pub const METHOD_MODELS_DEFAULTS_READ: &str = "models/defaults/read";
 pub const METHOD_MODELS_DEFAULTS_PUT: &str = "models/defaults/put";
+pub const METHOD_MODELS_TIERS_PUT: &str = "models/tiers/put";
+pub const METHOD_MODELS_TIERS_RESOLVE: &str = "models/tiers/resolve";
 pub const METHOD_MODELS_LIST: &str = "models/list";
 
 pub const METHOD_PROFILES_CREATE: &str = "profiles/create";

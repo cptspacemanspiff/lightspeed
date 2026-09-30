@@ -108,9 +108,14 @@ pub const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "model_defaults",
         sql: include_str!("../migrations/010_model_defaults.sql"),
     },
+    EmbeddedMigration {
+        version: 11,
+        name: "model_tiers",
+        sql: include_str!("../migrations/011_model_tiers.sql"),
+    },
 ];
 
-pub const REQUIRED_SCHEMA_REVISION: i64 = 10;
+pub const REQUIRED_SCHEMA_REVISION: i64 = 11;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaStatus {

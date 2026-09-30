@@ -1,4 +1,4 @@
-use api::{ModelDefaultSlot, ModelDefaults, ModelDefaultsPutParams};
+use api::{ModelDefaultSlot, ModelDefaults, ModelDefaultsPutParams, ModelTiersPutParams};
 use sqlx::Row;
 use thiserror::Error;
 
@@ -18,7 +18,7 @@ pub enum ModelDefaultsStoreError {
 
 impl PgStore {
     pub async fn read_model_defaults(&self) -> Result<ModelDefaults, ModelDefaultsStoreError> {
-        let row = sqlx::query("SELECT revision, agent_run, speech_to_text FROM universe_model_defaults WHERE universe_id = $1")
+        let row = sqlx::query("SELECT revision, agent_run, speech_to_text, tiers FROM universe_model_defaults WHERE universe_id = $1")
             .bind(self.config.universe_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -53,18 +53,65 @@ impl PgStore {
              SELECT $1, 1, CASE WHEN $2 THEN $3::jsonb END, CASE WHEN NOT $2 THEN $3::jsonb END
              WHERE $4::bigint = 0
              ON CONFLICT (universe_id) DO NOTHING
-             RETURNING revision, agent_run, speech_to_text"
+             RETURNING revision, agent_run, speech_to_text, tiers"
         } else {
             "UPDATE universe_model_defaults SET revision = revision + 1,
              agent_run = CASE WHEN $2 THEN $3::jsonb ELSE agent_run END,
              speech_to_text = CASE WHEN NOT $2 THEN $3::jsonb ELSE speech_to_text END
              WHERE universe_id = $1 AND revision = $4
-             RETURNING revision, agent_run, speech_to_text"
+             RETURNING revision, agent_run, speech_to_text, tiers"
         };
         let row = sqlx::query(statement)
             .bind(self.config.universe_id)
             .bind(params.slot == ModelDefaultSlot::AgentRun)
             .bind(model)
+            .bind(expected)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(ModelDefaultsStoreError::Conflict {
+                expected: params.expected_revision,
+            })?;
+        decode(&row)
+    }
+}
+
+impl PgStore {
+    /// Replaces the universe tier table under the shared defaults revision.
+    /// Validation covers names, routes, and alias resolution against the
+    /// current default slots; the revision guard makes that check and the
+    /// write one step.
+    pub async fn put_model_tiers(
+        &self,
+        params: ModelTiersPutParams,
+    ) -> Result<ModelDefaults, ModelDefaultsStoreError> {
+        let current = self.read_model_defaults().await?;
+        if current.revision != params.expected_revision {
+            return Err(ModelDefaultsStoreError::Conflict {
+                expected: params.expected_revision,
+            });
+        }
+        current.validate_tier_table(&params.tiers)?;
+        let expected = i64::try_from(params.expected_revision)
+            .ok()
+            .filter(|value| *value < i64::MAX)
+            .ok_or_else(|| {
+                api::AgentApiError::invalid_request("expectedRevision is out of range")
+            })?;
+        let tiers = serde_json::to_value(&params.tiers)?;
+        let statement = if expected == 0 {
+            "INSERT INTO universe_model_defaults (universe_id, revision, tiers)
+             SELECT $1, 1, $2::jsonb
+             WHERE $3::bigint = 0
+             ON CONFLICT (universe_id) DO NOTHING
+             RETURNING revision, agent_run, speech_to_text, tiers"
+        } else {
+            "UPDATE universe_model_defaults SET revision = revision + 1, tiers = $2::jsonb
+             WHERE universe_id = $1 AND revision = $3
+             RETURNING revision, agent_run, speech_to_text, tiers"
+        };
+        let row = sqlx::query(statement)
+            .bind(self.config.universe_id)
+            .bind(tiers)
             .bind(expected)
             .fetch_optional(&self.pool)
             .await?
@@ -86,5 +133,6 @@ fn decode(row: &sqlx::postgres::PgRow) -> Result<ModelDefaults, ModelDefaultsSto
             .try_get::<Option<serde_json::Value>, _>("speech_to_text")?
             .map(serde_json::from_value)
             .transpose()?,
+        tiers: serde_json::from_value(row.try_get::<serde_json::Value, _>("tiers")?)?,
     })
 }

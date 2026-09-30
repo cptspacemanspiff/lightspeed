@@ -715,3 +715,81 @@ fn model_defaults_conflict_is_not_retried_with_a_new_revision() {
         1
     );
 }
+
+#[test]
+fn model_tiers_commands_edit_the_table_under_the_read_revision_and_resolve() {
+    let mut defaults = json!({
+        "revision": 3,
+        "agentRun": {"providerId":"openai","apiKind":"openai:responses","model":"gpt-5.5"},
+        "speechToText": null,
+        "tiers": {}
+    });
+    let runtime = Runtime::start(move |method, params| match method {
+        "models/defaults/read" => json!({"defaults": defaults}),
+        "models/tiers/put" => {
+            assert_eq!(params["expectedRevision"], defaults["revision"]);
+            defaults["tiers"] = params["tiers"].clone();
+            defaults["revision"] = json!(defaults["revision"].as_u64().unwrap() + 1);
+            json!({"defaults": defaults})
+        }
+        "models/tiers/resolve" => {
+            assert_eq!(params["profile"]["kind"], "named");
+            assert_eq!(params["profile"]["profileId"], "reviewer");
+            json!({"tiers": [
+                {"tier":"grader","layer":"config","chain":["grader","fast"],
+                 "route":{"model":{"providerId":"openai","apiKind":"openai:responses","model":"mini"},"reasoningEffort":"low"}},
+                {"tier":"broken","layer":"universe","error":"unknown tier"}
+            ]})
+        }
+        other => panic!("unexpected method {other}"),
+    });
+    let set = runtime.json(&[
+        "model",
+        "tiers",
+        "set",
+        "fast",
+        "--provider",
+        "openai",
+        "--api-kind",
+        "openai:responses",
+        "--model",
+        "mini",
+        "--reasoning-effort",
+        "low",
+        "--max-output-tokens",
+        "800",
+        "--json",
+    ]);
+    assert_eq!(set["revision"], 4);
+    assert_eq!(set["tiers"]["fast"]["model"]["model"], "mini");
+    assert_eq!(set["tiers"]["fast"]["reasoningEffort"], "low");
+    assert_eq!(set["tiers"]["fast"]["maxOutputTokens"], 800);
+    let alias = runtime.json(&[
+        "models", "tiers", "alias", "grader", "--to", "fast", "--json",
+    ]);
+    assert_eq!(alias["tiers"]["grader"], json!({"tier":"fast"}));
+    assert_eq!(alias["tiers"]["fast"]["model"]["model"], "mini");
+    let removed = runtime.json(&["model", "tiers", "remove", "fast", "--json"]);
+    assert_eq!(removed["tiers"], json!({"grader": {"tier":"fast"}}));
+    let listed = runtime.success(&["model", "tiers", "list"]);
+    assert!(listed.contains("default: openai / openai:responses / gpt-5.5"));
+    assert!(listed.contains("grader: -> fast"));
+    let resolved = runtime.success(&["model", "tiers", "resolve", "--profile", "reviewer"]);
+    assert!(resolved.contains(
+        "grader [config] grader -> fast = openai / openai:responses / mini (reasoning low)"
+    ));
+    assert!(resolved.contains("broken [universe] unresolved: unknown tier"));
+    assert!(
+        !runtime
+            .run(&["model", "tiers", "remove", "missing"])
+            .status
+            .success()
+    );
+    let requests = runtime.requests.lock().unwrap();
+    let puts: Vec<u64> = requests
+        .iter()
+        .filter(|r| r["method"] == "models/tiers/put")
+        .map(|r| r["params"]["expectedRevision"].as_u64().unwrap())
+        .collect();
+    assert_eq!(puts, vec![3, 4, 5]);
+}

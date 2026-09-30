@@ -189,7 +189,7 @@ fn run_control_session_config(model: &ModelSelection, workspace_id: &str) -> Ses
     // fake model a function tool to call, so runs have a tool-call turn
     // followed by a final turn.
     SessionConfig {
-        model: Some(model_to_api(model)),
+        model: Some(model_to_api(model).into()),
         features: Some(api::FeaturesConfig {
             vfs: Some(api::VfsFeature {
                 working_directory: None,
@@ -234,7 +234,7 @@ async fn run_control_api(
         run_control_session_config(&model, &workspace.workspace_id)
     } else {
         SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }
     };
@@ -1062,7 +1062,7 @@ async fn run_unbounded_hosted_run_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             features: Some(api::FeaturesConfig {
                 vfs: Some(api::VfsFeature {
                     working_directory: None,

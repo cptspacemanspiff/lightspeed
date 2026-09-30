@@ -82,8 +82,11 @@ pub enum RunStartSource {
 pub struct RunStartConfig {
     /// Optional model override within the session's provider identity and API
     /// kind. Changing either requires a new session, even before the first run.
+    /// A model tier resolves through the universe tier table and must land on
+    /// the session's provider; its reasoning effort and output cap apply to
+    /// the run unless `generation` sets them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelConfig>,
+    pub model: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

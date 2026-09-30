@@ -264,13 +264,24 @@ fn default_feature_version() -> u32 {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionConfig {
-    /// At creation, omission uses the profile model or universe agentRun
-    /// default. On configuration replacement or profile application to an
-    /// existing session, omission preserves its current model. Documents read
-    /// back from a session always carry the model. Provider identity and API
-    /// kind are fixed for the session lifetime; the model name may change.
+    /// A concrete route or a model tier such as `{ "tier": "default" }`. At
+    /// creation, omission uses the profile model or the `default` tier. On
+    /// configuration replacement or profile application to an existing
+    /// session, omission preserves its current model. A tier is resolved
+    /// once, when the document is admitted, through `models` and the
+    /// universe tier table; its route's reasoning effort and output cap apply
+    /// unless `generation` sets them. Documents read back from a session
+    /// always carry the resolved route. Provider identity and API kind are
+    /// fixed for the session lifetime; the model name may change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelConfig>,
+    pub model: Option<ModelRef>,
+    /// A partial model tier table that overrides the universe table by name
+    /// for this document: `model` and generation entries may reference these
+    /// tiers, and an entry may alias a universe tier. Consumed when the
+    /// document is admitted; a session's stored configuration carries the
+    /// resolved routes, not the table. At most 64 entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<ModelTierTable>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -583,12 +594,15 @@ pub struct GenerateModelOption {
     /// Shown to the model to help it choose, at most 1024 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Provider route, resolved and authenticated like a session model.
-    pub model: ModelConfig,
-    /// Provider-native reasoning effort for calls using this entry.
+    /// Provider route, resolved and authenticated like a session model, or a
+    /// model tier resolved when the configuration is admitted.
+    pub model: ModelRef,
+    /// Provider-native reasoning effort for calls using this entry. Wins over
+    /// the setting of a resolved tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Output-token cap for calls using this entry.
+    /// Output-token cap for calls using this entry. Wins over the setting of
+    /// a resolved tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 }

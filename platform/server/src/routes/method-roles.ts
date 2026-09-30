@@ -81,6 +81,8 @@ export const METHOD_ROLES: Readonly<Record<string, UniverseRole>> = {
   "models/defaults/put": "operator",
   "models/defaults/read": "viewer",
   "models/list": "viewer",
+  "models/tiers/put": "operator",
+  "models/tiers/resolve": "viewer",
   "profiles/create": "operator",
   "profiles/delete": "operator",
   "profiles/list": "viewer",

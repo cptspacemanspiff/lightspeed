@@ -358,7 +358,7 @@ impl GatewayAgentApi {
         );
         args.setup = match resolved_profile.as_ref() {
             Some(profile) => {
-                let mut intent = Self::profile_intent(profile, None)?;
+                let mut intent = Self::profile_setup_intent(profile);
                 intent.environment = setup_environment;
                 Some(intent)
             }

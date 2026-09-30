@@ -189,7 +189,7 @@ async fn run_checkpoint_and_bounded_reads_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: Some("Checkpoint and bounded reads live test".to_owned()),
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -388,7 +388,7 @@ async fn run_fake_live_client(
             session_id: Some(session_id.as_str().to_owned()),
             display_name: None,
             config: Some(SessionConfig {
-                model: Some(model_to_api(&model)),
+                model: Some(model_to_api(&model).into()),
                 ..SessionConfig::default()
             }),
             profile: None,
@@ -766,7 +766,7 @@ async fn run_continue_as_new_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -899,7 +899,7 @@ async fn run_context_append_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -1125,7 +1125,7 @@ async fn run_admission_failure_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             ..SessionConfig::default()
         }),
         profile: None,
@@ -1264,7 +1264,7 @@ async fn run_openai_live_client(
             .config
             .as_ref()
             .and_then(|config| config.model.as_ref()),
-        Some(&model_to_api(&model)),
+        Some(&model_to_api(&model).into()),
         "creation must persist the universe default"
     );
 
@@ -1381,7 +1381,7 @@ async fn run_builtin_tool_live_client(
         session_id: Some(session_id.as_str().to_owned()),
         display_name: None,
         config: Some(SessionConfig {
-            model: Some(model_to_api(&model)),
+            model: Some(model_to_api(&model).into()),
             generation,
             features: Some(FeaturesConfig {
                 timers: Some(TimersFeature {

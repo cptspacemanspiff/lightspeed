@@ -1764,6 +1764,23 @@
       ],
       "type": "object"
     },
+    "AgentApiOutcomeOfModelTiersResolveResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/ModelTiersResolveResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
     "AgentApiOutcomeOfProfileApplyResponse": {
       "properties": {
         "notifications": {
@@ -10515,7 +10532,7 @@
           ]
         },
         "maxOutputTokens": {
-          "description": "Output-token cap for calls using this entry.",
+          "description": "Output-token cap for calls using this entry. Wins over the setting of\na resolved tier.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -10526,17 +10543,17 @@
         "model": {
           "allOf": [
             {
-              "$ref": "#/definitions/ModelConfig"
+              "$ref": "#/definitions/ModelRef"
             }
           ],
-          "description": "Provider route, resolved and authenticated like a session model."
+          "description": "Provider route, resolved and authenticated like a session model, or a\nmodel tier resolved when the configuration is admitted."
         },
         "name": {
           "description": "Name the model uses to select this entry: 1–64 ASCII letters, digits,\n`-`, `_`, or `.`.",
           "type": "string"
         },
         "reasoningEffort": {
-          "description": "Provider-native reasoning effort for calls using this entry.",
+          "description": "Provider-native reasoning effort for calls using this entry. Wins over\nthe setting of a resolved tier.",
           "type": [
             "string",
             "null"
@@ -11954,6 +11971,8 @@
       "type": "object"
     },
     "ModelConfig": {
+      "additionalProperties": false,
+      "description": "A concrete provider route: where a call goes and which wire protocol it\nspeaks.",
       "properties": {
         "apiKind": {
           "type": "string"
@@ -11992,7 +12011,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The universe `default` model tier: used when a new session and its\nprofile leave the model unset, and the target of tier aliases."
         },
         "revision": {
           "format": "uint64",
@@ -12008,6 +12028,14 @@
               "type": "null"
             }
           ]
+        },
+        "tiers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "default": {},
+          "description": "The universe tier table: shared tier names bound to routes or to\nother tiers. `default` is not an entry; it is the agentRun default.\nReplaced whole with models/tiers/put under the same revision.",
+          "type": "object"
         }
       },
       "required": [
@@ -12218,11 +12246,168 @@
       ],
       "type": "object"
     },
+    "ModelRef": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelTierRef"
+        },
+        {
+          "$ref": "#/definitions/ModelConfig"
+        }
+      ],
+      "description": "A model in configuration input: either a concrete route or a tier name.\nTier names resolve to a concrete route when the configuration is admitted,\nso documents read back from a session always carry a route."
+    },
     "ModelSource": {
       "enum": [
         "provider"
       ],
       "type": "string"
+    },
+    "ModelTierAlias": {
+      "additionalProperties": false,
+      "description": "A tier that names another tier. An alias carries only the name; the\nroute at the end of the chain supplies every setting.",
+      "properties": {
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
+    "ModelTierBinding": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelTierAlias"
+        },
+        {
+          "$ref": "#/definitions/ModelTierRoute"
+        }
+      ],
+      "description": "What a tier resolves to: a concrete route or an alias for another tier."
+    },
+    "ModelTierLayer": {
+      "description": "The layer that defines a tier.",
+      "oneOf": [
+        {
+          "const": "universe",
+          "description": "The universe table, including the `default` tier from the `agentRun`\ndefault.",
+          "type": "string"
+        },
+        {
+          "const": "config",
+          "description": "The `models` table of a profile or session configuration.",
+          "type": "string"
+        }
+      ]
+    },
+    "ModelTierRef": {
+      "additionalProperties": false,
+      "description": "A model tier reference: the name is resolved through the universe and\nconfiguration tier tables when the document is admitted.",
+      "properties": {
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
+    "ModelTierRoute": {
+      "additionalProperties": false,
+      "description": "A tier bound to a concrete route and the settings that route is used\nwith. Settings live with the route because their valid values depend on\nthe model.",
+      "properties": {
+        "maxOutputTokens": {
+          "description": "Output-token cap for calls that resolve to this tier.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        },
+        "reasoningEffort": {
+          "description": "Provider-native reasoning effort for calls that resolve to this tier.\nA session's or run's explicit setting still wins.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ModelTiersPutParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedRevision": {
+          "description": "Revision returned by models/defaults/read; zero for a universe with no\nupdates. Tiers and default slots share one revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tiers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "description": "The complete universe tier table; omitted names are removed. The\n`default` tier is not part of it.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "tiers",
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "ModelTiersResolveParams": {
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "description": "A configuration table merged over the profile's, entry by entry, the\nway an explicit session configuration merges over its profile.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProfileSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A profile whose `config.models` table forms the configuration layer."
+        }
+      },
+      "type": "object"
+    },
+    "ModelTiersResolveResponse": {
+      "properties": {
+        "tiers": {
+          "description": "Every visible tier, configuration entries first, then the universe.",
+          "items": {
+            "$ref": "#/definitions/ResolvedModelTier"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tiers"
+      ],
+      "type": "object"
     },
     "ModelView": {
       "description": "A model route returned directly by a provider API.",
@@ -12940,6 +13125,58 @@
       ],
       "type": "string"
     },
+    "ResolvedModelTier": {
+      "description": "One tier of an effective table with its resolution.",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The binding at the defining layer; absent when `default` is unset."
+        },
+        "chain": {
+          "description": "Tier names from this tier to the one bound to the route.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "description": "Why the tier does not resolve, when it does not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "$ref": "#/definitions/ModelTierLayer"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelTierRoute"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The concrete route and settings this tier uses."
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier",
+        "layer"
+      ],
+      "type": "object"
+    },
     "ResourceAccessSummary": {
       "description": "The audience of a session's or bot's root as views show it: whether it is\nshared with the universe, and who created it. A bot's session and a\ndelegated child show their root's.",
       "properties": {
@@ -13187,13 +13424,13 @@
         "model": {
           "anyOf": [
             {
-              "$ref": "#/definitions/ModelConfig"
+              "$ref": "#/definitions/ModelRef"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Optional model override within the session's provider identity and API\nkind. Changing either requires a new session, even before the first run."
+          "description": "Optional model override within the session's provider identity and API\nkind. Changing either requires a new session, even before the first run.\nA model tier resolves through the universe tier table and must land on\nthe session's provider; its reasoning effort and output cap apply to\nthe run unless `generation` sets them."
         }
       },
       "type": "object"
@@ -13684,13 +13921,23 @@
         "model": {
           "anyOf": [
             {
-              "$ref": "#/definitions/ModelConfig"
+              "$ref": "#/definitions/ModelRef"
             },
             {
               "type": "null"
             }
           ],
-          "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+          "description": "A concrete route or a model tier such as `{ \"tier\": \"default\" }`. At\ncreation, omission uses the profile model or the `default` tier. On\nconfiguration replacement or profile application to an existing\nsession, omission preserves its current model. A tier is resolved\nonce, when the document is admitted, through `models` and the\nuniverse tier table; its route's reasoning effort and output cap apply\nunless `generation` sets them. Documents read back from a session\nalways carry the resolved route. Provider identity and API kind are\nfixed for the session lifetime; the model name may change."
+        },
+        "models": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelTierBinding"
+          },
+          "description": "A partial model tier table that overrides the universe table by name\nfor this document: `model` and generation entries may reference these\ntiers, and an entry may alias a universe tier. Consumed when the\ndocument is admitted; a session's stored configuration carries the\nresolved routes, not the table. At most 64 entries.",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "type": "object"

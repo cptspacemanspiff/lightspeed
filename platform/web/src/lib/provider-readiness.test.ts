@@ -31,11 +31,27 @@ describe("selected model readiness", () => {
   });
   it("resolves explicit, profile, and universe choices without requiring a default", () => {
     const profile = { ...route, providerId: "profile" };
-    const defaults = { revision: 1, agentRun: { ...route, providerId: "default" }, speechToText: null };
+    const defaults = { revision: 1, agentRun: { ...route, providerId: "default" }, speechToText: null, tiers: {} };
     expect(resolveCreationModel(route, profile, defaults)).toEqual({ model: route, source: "Session model" });
     expect(resolveCreationModel(null, profile, undefined)).toEqual({ model: profile, source: "Profile model" });
     expect(resolveCreationModel(null, null, defaults)).toEqual({ model: defaults.agentRun, source: "Universe default" });
     expect(resolveCreationModel(null, null, { ...defaults, agentRun: null }).model).toBeNull();
+  });
+  it("resolves tier references through the profile table and the universe", () => {
+    const fast = { ...route, model: "fast-model" };
+    const defaults = {
+      revision: 1, agentRun: route, speechToText: null,
+      tiers: { fast: { model: fast, reasoningEffort: "low" }, large: { tier: "default" } },
+    };
+    expect(resolveCreationModel({ tier: "fast" }, null, defaults)).toEqual({ model: fast, source: "Tier fast", chain: ["fast"] });
+    expect(resolveCreationModel(null, { tier: "grader" }, defaults, { grader: { tier: "fast" } }))
+      .toEqual({ model: fast, source: "Tier grader", chain: ["grader", "fast"] });
+    // A profile rebinding `default` changes an omitted model but not the universe alias.
+    const rebound = { default: { model: { ...route, providerId: "profile" } } };
+    expect(resolveCreationModel(null, null, defaults, rebound)).toMatchObject({ model: rebound.default.model, source: "Universe default" });
+    expect(resolveCreationModel(null, { tier: "large" }, defaults, rebound)).toMatchObject({ model: route, chain: ["large", "default"] });
+    expect(resolveCreationModel({ tier: "huge" }, null, defaults)).toMatchObject({ model: null, source: "Tier huge", error: expect.stringContaining("unknown model tier") });
+    expect(resolveCreationModel({ tier: "fast" }, null, undefined)).toEqual({ model: null, source: "Tier fast" });
   });
   it("encodes add-provider deep links", () => {
     expect(addModelProviderHref("acme", "custom provider/alpha?x=1&y=2#fragment"))

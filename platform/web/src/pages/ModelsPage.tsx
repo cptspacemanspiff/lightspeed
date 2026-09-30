@@ -14,6 +14,7 @@ import {
 } from "@/components/models/use-model-providers";
 import { MODEL_PROVIDER_CATALOG, type ModelProviderKind } from "@/components/models/catalog";
 import { DefaultModelDialog, ModelDefaultsSection, type DefaultSlot } from "@/components/models/model-defaults";
+import { ModelTierDialog, ModelTiersSection } from "@/components/models/model-tiers";
 import { useModelDefaults } from "@/lib/model-defaults";
 import type { ModelDefaults } from "@/api";
 import { useActiveUniverse } from "@/lib/universes";
@@ -29,6 +30,7 @@ export function ModelsPage({ admin: _admin }: { admin: boolean }) {
 function Models({ universeId }: { universeId: string }) {
   const defaults = useModelDefaults(universeId);
   const [editingDefaults, setEditingDefaults] = useState<{ defaults: ModelDefaults; slot: DefaultSlot } | null>(null);
+  const [editingTier, setEditingTier] = useState<{ defaults: ModelDefaults; tier: string | null } | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const writable = useActionPermissions(universeId).can("configure_resource");
   const requestedKind = parseModelProviderKind(searchParams.get("add"));
@@ -76,6 +78,7 @@ function Models({ universeId }: { universeId: string }) {
       {error && <p className="text-sm text-destructive">{error.message}</p>}
       {!isLoading && <ModelProviderList providers={connected} onSelect={setSelected} />}
       <ModelDefaultsSection universeId={universeId} writable={writable} onEdit={(defaults, slot) => setEditingDefaults({ defaults, slot })} />
+      <ModelTiersSection universeId={universeId} writable={writable} onEdit={(defaults, tier) => setEditingTier({ defaults, tier })} />
       {writable && (
         <AddModelProviderDialog
           universeId={universeId}
@@ -91,6 +94,7 @@ function Models({ universeId }: { universeId: string }) {
         />
       )}
       {writable && editingDefaults && <DefaultModelDialog universeId={universeId} initial={editingDefaults.defaults} slot={editingDefaults.slot} onClose={() => setEditingDefaults(null)} />}
+      {writable && editingTier && <ModelTierDialog universeId={universeId} initial={editingTier.defaults} tier={editingTier.tier} onClose={() => setEditingTier(null)} />}
       <ModelProviderDetailsDialog
         universeId={universeId}
         provider={current}

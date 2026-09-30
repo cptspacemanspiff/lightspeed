@@ -1,5 +1,6 @@
 import { defaultEnvironmentAttachment, environmentAttachments, isEnvironmentAttached } from "@/lib/sessions/resource-features";
 import { modelFromConfig } from "@/lib/model-defaults";
+import { modelTierRef, resolveModelTier, type ModelTierTable } from "@lightspeed/platform-shared";
 /// Session routes over the engine simulation: the sessions browser, the
 /// transcript's long-poll tail, run control, and the settings sheet. Shapes
 /// and status codes follow the platform server's gateway so the UI cannot
@@ -118,8 +119,11 @@ export function sessionRoutes(store: DemoStore): Hono {
     if (!body.profile) return badRequest(c, "profile is required");
     const profile = resolveProfile(universe, body.profile);
     if (!profile) return notFound(c, "not found in engine");
-    const config = sessionConfig(profile.config, universe.modelDefaults.agentRun);
-    if (!config) return c.json({ error: "No default agent model is selected. Choose a model in Models.", kind: "model_default_unset", modelDefaultSlot: "agentRun" }, 400);
+    const resolvedConfig = sessionConfig(profile.config, universe, null);
+    if ("error" in resolvedConfig) return resolvedConfig.kind === "model_default_unset"
+      ? c.json({ error: "No default agent model is selected. Choose a model in Models.", kind: "model_default_unset", modelDefaultSlot: "agentRun" }, 400)
+      : badRequest(c, resolvedConfig.error);
+    const config = resolvedConfig.config;
     const sessionId = store.nextId("session");
     const resolved = resolveEnvironment(universe, profile);
     if ("error" in resolved) return conflict(c, `engine conflict: ${resolved.error}`);
@@ -280,7 +284,7 @@ export function sessionRoutes(store: DemoStore): Hono {
   app.put("/:id/sessions/:sessionId/config", async (c) => {
     const found = lookup(c);
     if (!found) return notFound(c, "not found in engine");
-    const { session } = found;
+    const { universe, session } = found;
     const body = await readBody<{ config?: unknown; expectedConfigRevision?: unknown }>(c);
     if (!isRecord(body.config)) return badRequest(c, "config must be an object");
     if (typeof body.expectedConfigRevision !== "number") {
@@ -292,8 +296,9 @@ export function sessionRoutes(store: DemoStore): Hono {
         `engine conflict: expected config revision ${body.expectedConfigRevision}, got ${session.view.configRevision}`,
       );
     }
-    const config = sessionConfig(body.config, modelOf(session.view.config));
-    if (!config) return badRequest(c, "Session has no model.");
+    const resolvedConfig = sessionConfig(body.config, universe, modelOf(session.view.config));
+    if ("error" in resolvedConfig) return badRequest(c, resolvedConfig.error);
+    const config = resolvedConfig.config;
     session.view.config = config;
     if (session.view.activeEnvironmentId && !isEnvironmentAttached(config, session.view.activeEnvironmentId)) session.view.activeEnvironmentId = null;
     session.view.configRevision += 1;
@@ -527,12 +532,54 @@ function resolveProfile(universe: UniverseState, source: ProfileSource): Resolve
   };
 }
 
-/// The session's own copy of a profile config, with the model the demo
-/// answers as when the profile leaves it open.
-function sessionConfig(config: Record<string, unknown>, fallback?: ModelConfig | null): Record<string, unknown> | null {
+/// The session's own copy of a profile config with every tier reference
+/// resolved, the way the runtime admits a document: an omitted model keeps
+/// the current one or resolves `default`, the `models` table is consumed,
+/// and a tier's settings fill unset generation fields.
+function sessionConfig(
+  config: Record<string, unknown>,
+  universe: UniverseState,
+  current: ModelConfig | null,
+): { config: Record<string, unknown> } | { error: string; kind?: string } {
   const copy = structuredClone(config);
-  const model = modelOf(copy) ?? fallback;
-  return model ? { ...copy, model: { ...model } } : null;
+  const table = copy.models as ModelTierTable | undefined;
+  delete copy.models;
+  const resolve = (name: string, field: string) => {
+    try {
+      return resolveModelTier(universe.modelDefaults, table, name);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "tier does not resolve";
+      throw Object.assign(new Error(`${field}: ${message}`), { kind: (error as { kind?: string }).kind });
+    }
+  };
+  try {
+    const generation = (copy.generation && typeof copy.generation === "object" ? copy.generation : {}) as Record<string, unknown>;
+    let model = modelOf(copy);
+    if (!model) {
+      const tier = modelTierRef(copy.model);
+      if (tier || !current) {
+        const resolved = resolve(tier ?? "default", "model");
+        model = resolved.route.model;
+        if (resolved.route.reasoningEffort && generation.reasoningEffort === undefined) generation.reasoningEffort = resolved.route.reasoningEffort;
+        if (resolved.route.maxOutputTokens && generation.maxOutputTokens === undefined) generation.maxOutputTokens = resolved.route.maxOutputTokens;
+      } else {
+        model = current;
+      }
+    }
+    const generate = (copy.features as { generate?: { models?: Array<Record<string, unknown>> } } | undefined)?.generate;
+    for (const entry of generate?.models ?? []) {
+      const tier = modelTierRef(entry.model);
+      if (!tier) continue;
+      const resolved = resolve(tier, `generate model ${JSON.stringify(entry.name)}`);
+      entry.model = { ...resolved.route.model };
+      if (resolved.route.reasoningEffort && entry.reasoningEffort === undefined) entry.reasoningEffort = resolved.route.reasoningEffort;
+      if (resolved.route.maxOutputTokens && entry.maxOutputTokens === undefined) entry.maxOutputTokens = resolved.route.maxOutputTokens;
+    }
+    if (Object.keys(generation).length) copy.generation = generation;
+    return { config: { ...copy, model: { ...model } } };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "invalid model", kind: (error as { kind?: string }).kind };
+  }
 }
 
 function instructionText(store: DemoStore, instructions: ProfileInstructions | null): string | null {
