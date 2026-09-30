@@ -1,13 +1,15 @@
 import { useActionPermissions } from "@/lib/permissions";
 import { useMcpToolDiscoverySource } from "@/lib/mcp/tool-discovery";
 import { useQuery } from "@tanstack/react-query";
-import { modelTierNames } from "@lightspeed/platform-shared";
+import { modelTierNames, resolveModelTier } from "@lightspeed/platform-shared";
 import { modelLabel, useModelDefaults, useModelDiscovery } from "@/lib/model-defaults";
 import {
   api,
   type Environment,
+  type ModelDefaults,
   type ProfileSummary,
 } from "@/api";
+import type { ModelPickerTier } from "@/components/models/model-choice-picker";
 import type {
   McpServerOption,
   WorkspaceOption,
@@ -48,10 +50,27 @@ export function useSessionConfigEditorOptions(
     workspaces: workspaces.data,
     workspacesLoading: workspaces.isLoading,
     models: models.data?.models,
-    defaultModelLabel: defaults.data?.agentRun ? `Universe default · ${modelLabel(defaults.data.agentRun)}` : "Universe default",
-    modelTiers: defaults.data ? modelTierNames(defaults.data).map(({ tier }) => tier) : undefined,
+    defaultModelLabel: defaults.data?.agentRun ? `Universe · default · ${modelLabel(defaults.data.agentRun)}` : "Universe · default",
+    modelTiers: defaults.data ? universeTierChoices(defaults.data) : undefined,
     profiles: profiles.data,
     environments: environments.data,
     mcpToolDiscovery: permissions.can("configure_resource") ? mcpToolDiscovery : undefined,
   };
+}
+
+/// Universe tiers other than `default` (the inherit choice), each with the
+/// route it resolves to as a hint.
+export function universeTierChoices(defaults: ModelDefaults): ModelPickerTier[] {
+  return modelTierNames(defaults)
+    .filter(({ tier }) => tier !== "default")
+    .map(({ tier }) => {
+      try {
+        const resolved = resolveModelTier(defaults, undefined, tier);
+        const settings = resolved.route.reasoningEffort ? ` · ${resolved.route.reasoningEffort}` : "";
+        const chain = resolved.chain.length > 1 ? `${resolved.chain.slice(1).join(" → ")} · ` : "";
+        return { tier, layer: "Universe", hint: `${chain}${modelLabel(resolved.route.model)}${settings}` };
+      } catch (error) {
+        return { tier, layer: "Universe", hint: error instanceof Error ? error.message : "does not resolve" };
+      }
+    });
 }

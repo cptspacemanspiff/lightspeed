@@ -233,7 +233,7 @@ it("lists tiers with their resolution, adds a route tier, and removes an alias",
   await act(async () => [...tier("grader").querySelectorAll("button")].find((button) => button.textContent === "Remove")!.click());
   for (let step = 0; step < 4; step++) await act(async () => { await vi.advanceTimersByTimeAsync(5); });
   expect(defaults.revision).toBe(9);
-  expect(Object.keys(defaults.tiers)).toEqual(["fast", "large"]);
+  expect(Object.keys(defaults.tiers ?? {})).toEqual(["fast", "large"]);
   const writes = mocks.api.mock.calls.filter(([method, path]) => method === "PUT" && String(path).endsWith("/models/tiers"));
   expect(writes.map(([, , body]) => (body as { expectedRevision: number }).expectedRevision)).toEqual([7, 8]);
 });

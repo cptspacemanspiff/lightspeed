@@ -583,6 +583,7 @@ function ConfigSection({
         models={options.models}
         defaultModelLabel={options.defaultModelLabel}
         modelTiers={options.modelTiers}
+        configLayerLabel="Profile"
         profiles={options.profiles}
         environments={options.environments}
         mcpToolDiscovery={options.mcpToolDiscovery}

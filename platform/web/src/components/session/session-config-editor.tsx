@@ -46,6 +46,7 @@ import { supportsOpenAiProcessingTier } from "@/lib/sessions/run-options";
 import { cn } from "@/lib/utils";
 import { resourceFeatureDisableReasons, selectableEnvironments } from "@/lib/sessions/resource-features";
 import { McpToolPicker } from "@/components/mcp/tool-picker";
+import { ModelChoicePicker, type ModelChoice, type ModelPickerTier } from "@/components/models/model-choice-picker";
 import type { McpToolDiscoverySource } from "@/lib/mcp/tool-discovery";
 
 export type SessionConfig = Record<string, unknown>;
@@ -98,9 +99,12 @@ type Props = {
   workspacesLoading?: boolean;
   models?: ModelOption[];
   defaultModelLabel?: string;
-  /// Tier names a document may reference in place of a route, `default`
-  /// first; from the universe tier table.
-  modelTiers?: string[];
+  /// Tiers a document may reference in place of a route, from the universe
+  /// tier table, each with a resolution hint.
+  modelTiers?: ModelPickerTier[];
+  /// How the picker labels tiers the document's own `models` table defines:
+  /// "Session" for a session, "Profile" for a profile.
+  configLayerLabel?: string;
   profiles?: ProfileOption[];
   environments?: EnvironmentOption[];
   allowInherit?: boolean;
@@ -117,12 +121,6 @@ type Props = {
 };
 
 type RecordValue = Record<string, unknown>;
-type ModelChoice = {
-  key: string;
-  label: string;
-  search: string;
-  option?: ModelOption;
-};
 
 const featureInfo: Record<
   FeatureName,
@@ -608,6 +606,7 @@ export function SessionConfigEditor({
   models = [],
   defaultModelLabel = "Universe default",
   modelTiers = [],
+  configLayerLabel = "Session",
   profiles = [],
   environments = [],
   allowInherit = false,
@@ -670,6 +669,7 @@ export function SessionConfigEditor({
           models={models}
           defaultModelLabel={defaultModelLabel}
           modelTiers={modelTiers}
+          configLayerLabel={configLayerLabel}
           manualModel={manualModel}
           onManualModelChange={setManualModel}
           pinnedApiKind={pinnedApiKind}
@@ -726,7 +726,7 @@ export function SessionConfigEditor({
                   />
                 )}
                 {name === "subagents" && <SubagentFields feature={record(features.subagents)} profiles={profiles} patch={(fn) => patchFeature("subagents", fn)} />}
-                {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} modelTiers={modelTiers} patch={(fn) => patchFeature("generate", fn)} />}
+                {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} modelTiers={configTiers(config, modelTiers, configLayerLabel)} patch={(fn) => patchFeature("generate", fn)} />}
                 {name === "mcp" && <McpFields feature={record(features.mcp)} servers={mcpServers} discoverySource={mcpToolDiscovery} patch={(fn) => patchFeature("mcp", fn)} />}
               </FeaturePanel>
             ))}
@@ -859,11 +859,12 @@ function EnvironmentFeatureEditor({
   );
 }
 
-function ModelFields({ config, models, defaultModelLabel, modelTiers, manualModel, onManualModelChange, pinnedApiKind, pinnedProviderId, change }: {
+function ModelFields({ config, models, defaultModelLabel, modelTiers, configLayerLabel, manualModel, onManualModelChange, pinnedApiKind, pinnedProviderId, change }: {
   config: RecordValue;
   models: ModelOption[];
   defaultModelLabel: string;
-  modelTiers: string[];
+  modelTiers: ModelPickerTier[];
+  configLayerLabel: string;
   manualModel: boolean;
   onManualModelChange: (enabled: boolean) => void;
   pinnedApiKind?: string;
@@ -879,50 +880,19 @@ function ModelFields({ config, models, defaultModelLabel, modelTiers, manualMode
   );
   const hasModel = Object.keys(model).length > 0;
   const selectedTier = string(model.tier) && !string(model.providerId) ? string(model.tier) : "";
-  const selected = selectedTier
-    ? `tier:${selectedTier}`
-    : currentModel
-      ? modelOptionKey(currentModel)
-      : manualModel || hasModel
-        ? "manual"
-        : "default";
   // A tier resolves when the document is admitted and may land on any
   // provider, so an existing session's pinned route offers no tiers.
-  const tierChoices = pinnedApiKind ? [] : [...new Set([...modelTiers.filter((tier) => tier !== "default"), ...(selectedTier && selectedTier !== "default" ? [selectedTier] : [])])];
-  const choices: ModelChoice[] = [
-    ...(!pinnedApiKind ? [{
-      key: "default",
-      label: defaultModelLabel,
-      search: `universe default ${defaultModelLabel}`,
-    }] : []),
-    ...tierChoices.map((tier) => ({
-      key: `tier:${tier}`,
-      label: `Tier · ${tier}`,
-      search: `tier ${tier}`,
-    })),
-    ...modelPickerOptions(models, currentModel, pinnedApiKind, pinnedProviderId)
-      .map((option) => ({
-        key: modelOptionKey(option),
-        label: `${option.displayName} (${option.providerId})`,
-        search: `${option.displayName} ${option.providerId} ${option.apiKind} ${option.model}`,
-        option,
-      })),
-    {
-      key: "manual",
-      label: "Enter model manually",
-      search: "manual custom model",
-    },
-  ];
-  const selectedChoice = choices.find((choice) => choice.key === selected) ?? {
-    key: "manual",
-    label: "Custom model",
-    search: "custom model",
-  };
-  const choiceKeys = choices.map((choice) => choice.key);
-  const [modelSearch, setModelSearch] = useState(selectedChoice.label);
-  useEffect(() => {
-    setModelSearch(selectedChoice.label);
-  }, [selectedChoice.label]);
+  const tiers = pinnedApiKind ? [] : configTiers(config, modelTiers, configLayerLabel);
+  if (selectedTier && !tiers.some((tier) => tier.tier === selectedTier)) tiers.push({ tier: selectedTier, layer: "Tier" });
+  const choice: ModelChoice = selectedTier
+    ? { kind: "tier", tier: selectedTier }
+    : currentModel
+      ? { kind: "route", route: currentModel }
+      : manualModel || hasModel
+        ? { kind: "manual" }
+        : { kind: "inherit" };
+  const routes = modelPickerOptions(models, currentModel, pinnedApiKind, pinnedProviderId);
+  const selected = choice.kind === "route" ? modelOptionKey(choice.route) : choice.kind;
   const update = (key: string, value: string) =>
     change((next) => {
       const nextModel = record(next.model);
@@ -960,91 +930,42 @@ function ModelFields({ config, models, defaultModelLabel, modelTiers, manualMode
       <div className="grid gap-3 md:grid-cols-2">
         <Field>
         <FieldLabel>Model</FieldLabel>
-        <Combobox
-          items={choiceKeys}
-          value={selected}
-          inputValue={modelSearch}
-          autoHighlight
-          itemToStringLabel={(key) => choices.find((choice) => choice.key === key)?.label ?? key}
-          filter={(key, query) => {
-            const choice = choices.find((item) => item.key === key);
-            return choice?.search.toLocaleLowerCase().includes(query.toLocaleLowerCase()) ?? false;
-          }}
-          onInputValueChange={setModelSearch}
-          onValueChange={(key) => {
-            if (!key) return;
-            const choice = choices.find((item) => item.key === key);
-            if (!choice) return;
-            setModelSearch(choice.label);
-            if (choice.key === "default") {
+        <ModelChoicePicker
+          id="session-config-model"
+          value={choice}
+          tiers={tiers}
+          routes={routes}
+          inheritLabel={pinnedApiKind ? undefined : defaultModelLabel}
+          formatCreatedAt={formatModelCreatedAt}
+          onChange={(next) => {
+            if (next.kind === "inherit") {
               onManualModelChange(false);
-              change((next) => {
-                delete next.model;
+              change((draft) => {
+                delete draft.model;
               });
               return;
             }
-            if (choice.key.startsWith("tier:")) {
+            if (next.kind === "tier") {
               onManualModelChange(false);
-              change((next) => {
-                next.model = { tier: choice.key.slice("tier:".length) };
+              change((draft) => {
+                draft.model = { tier: next.tier };
               });
               return;
             }
-            if (choice.key === "manual") {
+            if (next.kind === "manual") {
               onManualModelChange(true);
               return;
             }
-            const option = choice.option;
-            if (!option) return;
             onManualModelChange(false);
-            change((next) => {
-              next.model = {
-                providerId: option.providerId,
-                apiKind: option.apiKind,
-                model: option.model,
+            change((draft) => {
+              draft.model = {
+                providerId: next.route.providerId,
+                apiKind: next.route.apiKind,
+                model: next.route.model,
               };
             });
           }}
-        >
-          <ComboboxInput
-            id="session-config-model"
-            className="w-full"
-            placeholder="Search models..."
-            aria-label="Search models"
-          />
-          <ComboboxContent>
-            <ComboboxEmpty>No matching models.</ComboboxEmpty>
-            <ComboboxList>
-              {(key: string) => {
-                const choice = choices.find((item) => item.key === key);
-                if (!choice) return null;
-                return (
-                  <ComboboxItem
-                    key={choice.key}
-                    value={choice.key}
-                    className="py-2"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate">{choice.label}</span>
-                      {choice.option && (
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {choice.option.displayName !== choice.option.model
-                            ? choice.option.model + " · "
-                            : ""}
-                          {choice.option.apiKind}
-                          {choice.option.createdAtMs
-                            ? " · created " +
-                              formatModelCreatedAt(choice.option.createdAtMs)
-                            : ""}
-                        </span>
-                      )}
-                    </span>
-                  </ComboboxItem>
-                );
-              }}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
+        />
         <FieldDescription className="text-xs">
           {selectedTier
             ? `Resolved through the universe tier table when the document is admitted.`
@@ -1087,6 +1008,14 @@ function ModelFields({ config, models, defaultModelLabel, modelTiers, manualMode
       )}
     </div>
   );
+}
+
+/// Tiers the document's own `models` table defines come first, labelled by
+/// the document's layer, then the universe tiers it does not shadow.
+function configTiers(config: RecordValue, universe: ModelPickerTier[], layer: string): ModelPickerTier[] {
+  const own = Object.keys(record(config.models)).map((tier) => ({ tier, layer }));
+  const shadowed = new Set(own.map((tier) => tier.tier));
+  return [...own, ...universe.filter((tier) => !shadowed.has(tier.tier))];
 }
 
 function modelOptionKey(option: Pick<ModelOption, "providerId" | "apiKind" | "model">): string {
@@ -1753,7 +1682,7 @@ function GenerateFields({
 }: {
   feature: RecordValue;
   models: ModelOption[];
-  modelTiers: string[];
+  modelTiers: ModelPickerTier[];
   patch: (fn: (feature: RecordValue) => void) => void;
 }) {
   const id = useId();
@@ -1801,8 +1730,13 @@ function GenerateFields({
           option.providerId === string(model.providerId)
           && option.apiKind === string(model.apiKind)
           && option.model === string(model.model));
-        const selected = entryTier ? `tier:${entryTier}` : current ? modelOptionKey(current) : CUSTOM_GENERATE_MODEL;
-        const tierOptions = [...new Set([...modelTiers, ...(entryTier ? [entryTier] : [])])];
+        const choice: ModelChoice = entryTier
+          ? { kind: "tier", tier: entryTier }
+          : current ? { kind: "route", route: current } : { kind: "manual" };
+        const selected = choice.kind === "route" ? modelOptionKey(current!) : choice.kind === "tier" ? `tier:${entryTier}` : CUSTOM_GENERATE_MODEL;
+        const tiers = entryTier && !modelTiers.some((tier) => tier.tier === entryTier)
+          ? [...modelTiers, { tier: entryTier, layer: "Tier" }]
+          : modelTiers;
         const updateRoute = (key: string, value: string) =>
           updateEntry(index, (next) => {
             next.model = { ...record(next.model), [key]: value };
@@ -1821,35 +1755,20 @@ function GenerateFields({
             </Field>
             <Field>
               <FieldLabel>Model</FieldLabel>
-              <Select
-                value={selected}
-                onValueChange={(key) => updateEntry(index, (next) => {
-                  if (key?.startsWith("tier:")) {
-                    next.model = { tier: key.slice("tier:".length) };
-                    return;
-                  }
-                  const option = options.find((item) => modelOptionKey(item) === key);
-                  if (option) next.model = { providerId: option.providerId, apiKind: option.apiKind, model: option.model };
-                  else next.model = entryTier ? {} : { ...record(next.model) };
+              <ModelChoicePicker
+                id={`${fieldId}-model`}
+                ariaLabel={`Model for ${string(entry.name) || "generation model"}`}
+                value={choice}
+                tiers={tiers}
+                routes={options}
+                manualLabel="Custom route"
+                formatCreatedAt={formatModelCreatedAt}
+                onChange={(next) => updateEntry(index, (draft) => {
+                  if (next.kind === "tier") draft.model = { tier: next.tier };
+                  else if (next.kind === "route") draft.model = { providerId: next.route.providerId, apiKind: next.route.apiKind, model: next.route.model };
+                  else draft.model = entryTier ? {} : { ...record(draft.model) };
                 })}
-              >
-                <SelectTrigger aria-label={`Model for ${string(entry.name) || "generation model"}`} className="w-full">
-                  <SelectValue>
-                    {entryTier ? `Tier · ${entryTier}` : current ? `${current.displayName} (${current.providerId})` : "Custom route"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {tierOptions.map((tier) => (
-                    <SelectItem key={`tier:${tier}`} value={`tier:${tier}`}>Tier · {tier}</SelectItem>
-                  ))}
-                  {options.map((option) => (
-                    <SelectItem key={modelOptionKey(option)} value={modelOptionKey(option)}>
-                      {option.displayName} ({option.providerId})
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={CUSTOM_GENERATE_MODEL}>Custom route</SelectItem>
-                </SelectContent>
-              </Select>
+              />
             </Field>
             {selected === CUSTOM_GENERATE_MODEL && (
               <div className="grid gap-3 sm:col-span-2 sm:grid-cols-3">

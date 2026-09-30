@@ -379,10 +379,10 @@ describe("model tier references", () => {
     const html = renderToString(createElement(SessionConfigEditor, {
       value: { model: { tier: "grader" } },
       onChange: () => {},
-      modelTiers: ["default", "fast", "grader"],
+      modelTiers: [{ tier: "fast", layer: "Universe", hint: "OpenAI · mini" }, { tier: "grader", layer: "Universe" }],
     }));
     expect(html).toContain("Resolved through the universe tier table");
-    expect(html).toContain("Tier · grader");
+    expect(html).toContain("Universe · grader");
   });
 });
 

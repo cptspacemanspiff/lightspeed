@@ -118,7 +118,7 @@ binds a route with the settings it should run with, or aliases another tier:
 | `fast` | `openai / openai:responses / gpt-5.5-mini`, reasoning effort `low` | A cheap route with its own settings. |
 | `grader` | Alias for `fast` | Moves with `fast` when an operator rebinds it. |
 
-Reference a tier where the editor offers a model: choose **Tier · fast**
+Reference a tier where the editor offers a model: choose **Universe · fast**
 under **Model configuration → Model**, or write `{ "tier": "fast" }` in the
 JSON view. Generation models under **Model generation** accept tiers the
 same way. A tier is resolved when the session is created or its configuration

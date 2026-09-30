@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ModelChoicePicker, type ModelChoice, type ModelPickerTier } from "@/components/models/model-choice-picker";
 
 const apiLabels: Record<string, string> = {
   "openai:responses": "OpenAI Responses",
@@ -114,19 +115,19 @@ function bindingLabel(binding: ModelTierBinding): string {
 
 type Draft = {
   name: string;
-  kind: "route" | "alias";
+  /// Set when the tier aliases another; otherwise the route fields apply.
+  alias: string | null;
   providerId: string;
   apiKind: string;
   model: string;
   reasoningEffort: string;
   maxOutputTokens: string;
-  alias: string;
 };
 
 function draftFor(name: string | null, binding: ModelTierBinding | undefined): Draft {
-  const base: Draft = { name: name ?? "", kind: "route", providerId: "", apiKind: AGENT_MODEL_API_KINDS[0], model: "", reasoningEffort: "", maxOutputTokens: "", alias: MODEL_TIER_DEFAULT };
+  const base: Draft = { name: name ?? "", alias: null, providerId: "", apiKind: AGENT_MODEL_API_KINDS[0], model: "", reasoningEffort: "", maxOutputTokens: "" };
   if (!binding) return base;
-  if (isModelTierAlias(binding)) return { ...base, kind: "alias", alias: binding.tier };
+  if (isModelTierAlias(binding)) return { ...base, alias: binding.tier };
   return {
     ...base,
     providerId: binding.model.providerId,
@@ -138,7 +139,7 @@ function draftFor(name: string | null, binding: ModelTierBinding | undefined): D
 }
 
 function bindingFor(draft: Draft): ModelTierBinding {
-  if (draft.kind === "alias") return { tier: draft.alias.trim() };
+  if (draft.alias !== null) return { tier: draft.alias.trim() };
   const maxOutputTokens = Number(draft.maxOutputTokens);
   return {
     model: { providerId: draft.providerId.trim(), apiKind: draft.apiKind, model: draft.model.trim() },
@@ -147,7 +148,26 @@ function bindingFor(draft: Draft): ModelTierBinding {
   };
 }
 
+/// The picker's tier entries: every universe tier this one could alias,
+/// with the route each resolves to.
+function aliasTargets(defaults: ModelDefaults, table: ModelTierTable, own: string): ModelPickerTier[] {
+  const universe = { ...defaults, tiers: table };
+  return [MODEL_TIER_DEFAULT, ...Object.keys(table)]
+    .filter((tier) => tier !== own)
+    .map((tier) => {
+      try {
+        const resolved = resolveModelTier(universe, undefined, tier);
+        const settings = resolved.route.reasoningEffort ? ` · ${resolved.route.reasoningEffort}` : "";
+        return { tier, layer: "Universe", hint: `${modelLabel(resolved.route.model)}${settings}` };
+      } catch (error) {
+        return { tier, layer: "Universe", hint: error instanceof Error ? error.message : "does not resolve" };
+      }
+    });
+}
+
 /// Adds or changes one tier by replacing the whole table under its revision.
+/// One picker offers the other tiers (an alias) and discovered models (a
+/// route); a route typed by hand is a route too.
 export function ModelTierDialog({ universeId, initial, tier, onClose }: {
   universeId: string;
   initial: ModelDefaults;
@@ -168,7 +188,6 @@ export function ModelTierDialog({ universeId, initial, tier, onClose }: {
   nextTable[name] = bindingFor(draft);
   const params: ModelTiersPutParams = { tiers: nextTable, expectedRevision: revision };
   const parsed = modelTiersPutSchema.safeParse(params);
-  const aliasTargets = [MODEL_TIER_DEFAULT, ...Object.keys(table).filter((other) => other !== name)];
   let resolveError: string | null = null;
   if (parsed.success) {
     try {
@@ -196,58 +215,51 @@ export function ModelTierDialog({ universeId, initial, tier, onClose }: {
     finally { setReloading(false); }
   };
   const routes = (discovery.data?.models ?? []).filter((route) => (AGENT_MODEL_API_KINDS as readonly string[]).includes(route.apiKind));
+  const currentRoute = draft.alias === null
+    ? routes.find((route) => route.providerId === draft.providerId.trim() && route.apiKind === draft.apiKind && route.model === draft.model.trim())
+    : undefined;
+  const choice: ModelChoice = draft.alias !== null
+    ? { kind: "tier", tier: draft.alias }
+    : currentRoute ? { kind: "route", route: currentRoute } : { kind: "manual" };
   const update = (patch: Partial<Draft>) => setDraft((current) => ({ ...current, ...patch }));
   return <Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose(); }}>
     <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>{tier ? `Tier ${tier}` : "Add tier"}</DialogTitle>
-        <DialogDescription>Bind a route with its settings, or alias another tier. Profiles reference tiers by name.</DialogDescription>
+        <DialogDescription>Point the tier at another tier or at a model. Profiles reference tiers by name.</DialogDescription>
       </DialogHeader>
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); if (valid && !conflict && !save.isPending) save.mutate(); }}>
         <fieldset className="grid gap-4" disabled={save.isPending || reloading}>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field>
-              <FieldLabel htmlFor={`${id}-name`}>Name</FieldLabel>
-              <Input id={`${id}-name`} value={draft.name} placeholder="fast" onChange={(event) => update({ name: event.target.value })} />
-              <FieldDescription>Letters, digits, '-', '_', or '.'; <span className="font-mono">default</span> is set under Defaults.</FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor={`${id}-kind`}>Binding</FieldLabel>
-              <Select value={draft.kind} onValueChange={(value) => { if (value) update({ kind: value as Draft["kind"] }); }}>
-                <SelectTrigger id={`${id}-kind`} className="w-full"><SelectValue>{(value: string) => value === "alias" ? "Alias for another tier" : "Route and settings"}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="route">Route and settings</SelectItem>
-                  <SelectItem value="alias">Alias for another tier</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-          </div>
-          {draft.kind === "alias" ? (
-            <Field>
-              <FieldLabel htmlFor={`${id}-alias`}>Points at</FieldLabel>
-              <Select value={draft.alias} onValueChange={(value) => { if (value) update({ alias: value }); }}>
-                <SelectTrigger id={`${id}-alias`} className="w-full"><SelectValue>{(value: string) => value}</SelectValue></SelectTrigger>
-                <SelectContent>{aliasTargets.map((target) => <SelectItem key={target} value={target}>{target}</SelectItem>)}</SelectContent>
-              </Select>
-              <FieldDescription>Rebinding the target moves every profile that uses this tier with it.</FieldDescription>
-            </Field>
-          ) : (
+          <Field>
+            <FieldLabel htmlFor={`${id}-name`}>Name</FieldLabel>
+            <Input id={`${id}-name`} value={draft.name} placeholder="fast" onChange={(event) => update({ name: event.target.value })} />
+            <FieldDescription>Letters, digits, '-', '_', or '.'; <span className="font-mono">default</span> is set under Defaults.</FieldDescription>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor={`${id}-target`}>Points at</FieldLabel>
+            <ModelChoicePicker
+              id={`${id}-target`}
+              ariaLabel="Search tiers and models"
+              value={choice}
+              tiers={aliasTargets(initial, table, name)}
+              routes={routes}
+              onChange={(next) => {
+                if (next.kind === "tier") update({ alias: next.tier });
+                else if (next.kind === "route") update({ alias: null, providerId: next.route.providerId, apiKind: next.route.apiKind, model: next.route.model });
+                else update({ alias: null });
+              }}
+            />
+            <FieldDescription>
+              {draft.alias !== null
+                ? "An alias moves with its target: rebinding the target moves every profile that uses this tier."
+                : discovery.isLoading ? "Loading suggestions…" : discovery.error ? "Suggestions are unavailable. You can still enter and save a route." : "Choose another tier, a discovered model, or enter a route below."}
+            </FieldDescription>
+          </Field>
+          {draft.alias === null && (
             <>
-              <Field>
-                <FieldLabel htmlFor={`${id}-route`}>Discovered model</FieldLabel>
-                <Select value="" onValueChange={(key) => {
-                  const route = routes.find((candidate) => JSON.stringify([candidate.providerId, candidate.apiKind, candidate.model]) === key);
-                  if (route) update({ providerId: route.providerId, apiKind: route.apiKind, model: route.model });
-                }}>
-                  <SelectTrigger id={`${id}-route`} className="w-full"><SelectValue>{() => routes.length ? "Choose a discovered model…" : discovery.isLoading ? "Loading suggestions…" : "No suggestions; enter a route below"}</SelectValue></SelectTrigger>
-                  <SelectContent>{routes.map((route) => {
-                    const key = JSON.stringify([route.providerId, route.apiKind, route.model]);
-                    return <SelectItem key={key} value={key}>{modelLabel(route)} · {apiLabels[route.apiKind] ?? route.apiKind}</SelectItem>;
-                  })}</SelectContent>
-                </Select>
-              </Field>
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field><FieldLabel htmlFor={`${id}-provider`}>Provider</FieldLabel><Input id={`${id}-provider`} value={draft.providerId} placeholder="Provider ID" onChange={(event) => update({ providerId: event.target.value })} /></Field>
+                <Field><FieldLabel htmlFor={`${id}-provider`}>Provider</FieldLabel><Input id={`${id}-provider`} value={draft.providerId} list={`${id}-providers`} placeholder="Provider ID" onChange={(event) => update({ providerId: event.target.value })} /></Field>
+                <datalist id={`${id}-providers`}>{discovery.data?.providers?.map((provider) => <option key={provider.providerId} value={provider.providerId} />)}</datalist>
                 <Field><FieldLabel htmlFor={`${id}-api`}>API</FieldLabel><Select value={draft.apiKind} onValueChange={(value) => { if (value) update({ apiKind: value }); }}>
                   <SelectTrigger id={`${id}-api`} className="w-full"><SelectValue>{(value: string) => apiLabels[value] ?? value}</SelectValue></SelectTrigger>
                   <SelectContent>{AGENT_MODEL_API_KINDS.map((kind) => <SelectItem key={kind} value={kind}>{apiLabels[kind]}</SelectItem>)}</SelectContent>
