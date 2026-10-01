@@ -9,6 +9,11 @@ export const CALL_REQUESTED_SIGNAL = "call_requested";
 /** Signal a `host` target sends back with the call's outcome. */
 export const CALL_COMPLETED_SIGNAL = "call_completed";
 
+/** A driver delivers results for the calls of a step. */
+export const DRIVER_RESULTS_SIGNAL = "driver_results";
+/** A driver reads the execution's current step. */
+export const DRIVER_STATE_QUERY = "driver_state";
+
 /** Built-in durable sleep, exposed to scripts as `sleep(ms)`. */
 export const SLEEP_TOOL = "sleep";
 
@@ -25,6 +30,8 @@ export type JsonSchema = { [key: string]: Json } | boolean;
 export interface CodeExecutionInput {
   /** TypeScript async function body. `input` and `tools` are in scope. */
   source: string;
+  /** Prefix of driver call ids, unique to this execution within its driver. */
+  driver_call_prefix?: string;
   input: Json;
   tools: ToolManifestEntry[];
   limits?: Partial<ExecutionLimits>;
@@ -68,6 +75,15 @@ export type ToolTarget =
       type: "host";
       workflow_id: string;
       timeout_ms: number;
+    }
+  | {
+      /**
+       * Executed by whoever drives the execution. The script pauses as soon
+       * as it waits only on driver calls; the pending calls are published as
+       * a step through `driver_state`, and the driver answers them with
+       * `driver_results`.
+       */
+      type: "driver";
     };
 
 /** What an `activity` or `workflow` target receives as its one argument. */
@@ -180,7 +196,33 @@ export interface CodeExecutionResult {
   error?: ExecutionError;
   logs: LogEntry[];
   logs_truncated: boolean;
+  /** How many leading `logs` entries earlier driver steps already reported. */
+  logs_reported: number;
   stats: ExecutionStats;
+}
+
+/** One call a driver must execute. */
+export interface DriverCall {
+  call_id: string;
+  tool: string;
+  arguments: Json;
+}
+
+/** The calls the script paused on, with the log lines since the last step. */
+export interface DriverStep {
+  index: number;
+  calls: DriverCall[];
+  logs: LogEntry[];
+}
+
+export interface DriverState {
+  status: "running" | "finished";
+  /** The latest step; its calls are answered once they are in the journal. */
+  step?: DriverStep;
+}
+
+export interface DriverResults {
+  results: { call_id: string; outcome: CallOutcome }[];
 }
 
 /** One completed call, in completion order. */

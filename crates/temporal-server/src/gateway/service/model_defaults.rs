@@ -71,7 +71,7 @@ pub(super) fn resolve_session_config(
             )?,
         },
     };
-    api::ModelDefaultSlot::AgentRun.validate_model(&model)?;
+    validate_session_model(&model)?;
     let selection = api_config::model_selection_from_api(model.clone())?;
     if let Some(generate) = config
         .features
@@ -221,6 +221,22 @@ impl GatewayAgentApi {
             Err(error) => Err(error),
         }
     }
+}
+
+/// A session runs on an agent model, or on the code runtime when it is a
+/// code sub-agent. The code runtime is never a universe default.
+fn validate_session_model(model: &api::ModelConfig) -> Result<(), AgentApiError> {
+    let code_runtime = api_projection::api_kind_to_str(&engine::ProviderApiKind::CodeRuntime);
+    if model.api_kind != code_runtime {
+        return api::ModelDefaultSlot::AgentRun.validate_model(model);
+    }
+    if model.provider_id != tools::code_run::CODE_RUNTIME_PROVIDER_ID {
+        return Err(AgentApiError::invalid_request(format!(
+            "API kind {code_runtime} requires provider {}",
+            tools::code_run::CODE_RUNTIME_PROVIDER_ID
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

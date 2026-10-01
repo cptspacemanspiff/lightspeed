@@ -38,8 +38,8 @@ export interface SessionResources {
   agents?: { profiles: string[]; maxDepth?: number; maxConcurrent?: number };
   /// Models the agent may call standalone; empty means the session's own model.
   generate?: { models: Array<{ name: string; route: string }> };
-  /// Tools a code_run program may call.
-  code?: { tools: string[] };
+  /// Limits of code_run programs; unset uses the runtime defaults.
+  code?: { maxCalls?: number; deadlineMs?: number };
   web?: { search: boolean; fetch: boolean };
   timers: boolean;
 }
@@ -179,9 +179,10 @@ export function sessionResources(
   }
 
   if ("code" in features) {
-    const tools = record(features.code).tools;
+    const feature = record(features.code);
     result.code = {
-      tools: Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === "string" && tool !== "") : [],
+      ...(typeof feature.maxCalls === "number" ? { maxCalls: feature.maxCalls } : {}),
+      ...(typeof feature.deadlineMs === "number" ? { deadlineMs: feature.deadlineMs } : {}),
     };
   }
 

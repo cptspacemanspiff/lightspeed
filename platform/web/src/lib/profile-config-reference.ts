@@ -13,7 +13,7 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
   },
   // Capability grants. An absent feature is not granted; \`{}\` grants it with defaults. Every block carries a behavior \`version\` that pins semantics.
   "features": {
-    // Grants \`code_run\`: the model writes a TypeScript program, and the code runtime executes it durably. The program calls tools itself, concurrently when useful, and returns a JSON result. \`tools\` lists which of the session's own tools a program may call, by logical id; a listed tool the session does not have is unavailable to programs. Only tools whose calls leave no session state behind can be listed: \`web.fetch\`, \`vfs.read_file\`, \`vfs.grep\`, \`vfs.glob\`, and \`vfs.list_dir\`.
+    // Grants \`code_run\`: the model writes a TypeScript program and hands it to a code sub-agent, a child session configured like this one whose model is Lightspeed's code runtime. The program calls this session's tools itself, concurrently when useful; each time it waits on calls, the child session records its log lines and those calls. The program's JSON result is the tool's reply.
     "code": {
       // Longest one program may run, in milliseconds, at most one hour. Defaults to ten minutes.
       "deadlineMs": 0,
@@ -21,8 +21,6 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       "maxCalls": 0,
       // Most tool calls one program may have in flight, 1–64. Defaults to 16.
       "maxConcurrentCalls": 0,
-      // Logical ids of the tools a program may call, at most 64.
-      "tools": ["string"],
       "version": 0,
     },
     // Grants session environments. The \`environments\` list is the allowed set: the session can select, read, and run work only on a listed machine, each with its own access grant and working directory. The installed tool surface is the union of every attachment's grant; a call the active machine's grant does not cover fails at execution, so switching machines never changes the toolset. \`{}\` grants the feature with no reachable machine.

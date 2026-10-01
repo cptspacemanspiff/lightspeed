@@ -5,9 +5,14 @@ import { Worker } from "@temporalio/worker";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   CODE_EXECUTION_WORKFLOW,
+  DRIVER_RESULTS_SIGNAL,
+  DRIVER_STATE_QUERY,
   TOOL_ERROR_TYPE,
   type CodeExecutionInput,
   type CodeExecutionResult,
+  type DriverResults,
+  type DriverState,
+  type DriverStep,
   type Json,
   type ToolCallRequest,
   type ToolManifestEntry,
@@ -170,6 +175,7 @@ describe("CodeExecutionWorkflow", () => {
       output: { sum: 6 },
       logs: [{ level: "info", text: "hello" }],
       logs_truncated: false,
+      logs_reported: 0,
       stats: { generations: 1, calls: 0, rejected_calls: 0 },
     });
   });
@@ -325,6 +331,65 @@ describe("CodeExecutionWorkflow", () => {
       status: "completed",
       output: { reply: { handled: "session.lookup", by: "session-1" }, waited: true },
     });
+  });
+
+  it("publishes driver calls as steps and continues with the driver's results", async () => {
+    const workflowId = `code-driver-${Date.now()}`;
+    const handle = await env.client.workflow.start(CODE_EXECUTION_WORKFLOW, {
+      taskQueue: "code-runtime",
+      workflowId,
+      args: [
+        {
+          source: `
+            console.log("starting");
+            const [a, b] = await Promise.all([tools.add({ a: 1, b: 2 }), tools.add({ a: 3, b: 4 })]);
+            console.log("sum", a + b);
+            const doubled = await tools.add({ a: a + b, b: a + b });
+            return { doubled };`,
+          input: null,
+          driver_call_prefix: "r1",
+          tools: [
+            {
+              name: "add",
+              input_schema: {
+                type: "object",
+                properties: { a: { type: "number" }, b: { type: "number" } },
+                required: ["a", "b"],
+              },
+              target: { type: "driver" },
+            },
+          ],
+        } satisfies CodeExecutionInput,
+      ],
+    });
+    const nextStep = async (index: number): Promise<DriverStep> => {
+      for (;;) {
+        const state = await handle.query<DriverState>(DRIVER_STATE_QUERY);
+        if (state.step && state.step.index === index) return state.step;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    const answer = async (step: DriverStep) =>
+      handle.signal(DRIVER_RESULTS_SIGNAL, {
+        results: step.calls.map((call) => {
+          const { a, b } = call.arguments as { a: number; b: number };
+          return { call_id: call.call_id, outcome: { ok: true, value: a + b } };
+        }),
+      } satisfies DriverResults);
+
+    const first = await nextStep(0);
+    expect(first.calls.map((call) => call.call_id)).toEqual(["r1_1", "r1_2"]);
+    expect(first.logs).toEqual([{ level: "info", text: "starting" }]);
+    await answer(first);
+    const second = await nextStep(1);
+    expect(second.calls).toEqual([{ call_id: "r1_3", tool: "add", arguments: { a: 10, b: 10 } }]);
+    // Only what the script logged since the previous step.
+    expect(second.logs).toEqual([{ level: "info", text: "sum 10" }]);
+    await answer(second);
+
+    const result = (await handle.result()) as CodeExecutionResult;
+    expect(result).toMatchObject({ status: "completed", output: { doubled: 20 }, logs_reported: 2 });
+    expect(result.logs.slice(result.logs_reported)).toEqual([]);
   });
 
   it.each<[string, string, Partial<TestInput>, string]>([

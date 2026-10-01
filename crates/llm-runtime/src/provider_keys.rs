@@ -198,6 +198,7 @@ fn provider_api_kind_name(api_kind: &ProviderApiKind) -> &'static str {
         ProviderApiKind::OpenAiResponses => "openai:responses",
         ProviderApiKind::OpenAiCompletions => "openai:completions",
         ProviderApiKind::AnthropicMessages => "anthropic:messages",
+        ProviderApiKind::CodeRuntime => "code:runtime",
     }
 }
 

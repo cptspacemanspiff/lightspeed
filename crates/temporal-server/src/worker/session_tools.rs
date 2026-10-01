@@ -762,9 +762,9 @@ impl SessionTools {
             binding.definition.semantic_type.as_str(),
         ) {
             // Code run admission: the grant on the batch request is the
-            // authority. Pin the tools a script may call, as this session's
-            // toolset admitted them, with the batch facts needed to execute
-            // them for this session.
+            // authority. Pin the limits and the parent's identity; the
+            // execution creates the code sub-agent from the parent's
+            // configuration.
             let Some(policy) = request.code_policy.as_ref() else {
                 return failed_result(
                     self.blobs.as_ref(),
@@ -788,18 +788,24 @@ impl SessionTools {
                 return failed_result(self.blobs.as_ref(), call.call_id.clone(), error.to_string())
                     .await;
             }
+            // The child counts against the same root limits a sub-agent
+            // would, and runs no longer than the program's deadline.
+            let limits = tools::code_run::CodeRunLimits::from(policy).bounded();
+            let grant_limits = engine::SubagentLimits {
+                deadline_ms: limits.deadline_ms,
+                ..request
+                    .subagents_policy
+                    .as_ref()
+                    .map(|subagents| subagents.limits)
+                    .unwrap_or_default()
+            };
             let context = tools::code_run::CodeRunExecutionContextV1 {
                 version: tools::code_run::CODE_RUN_EXECUTION_CONTEXT_VERSION,
-                session_id: request.session_id.as_str().to_owned(),
-                run_id: request.run_id.as_u64(),
-                turn_id: request.turn_id.as_u64(),
-                batch_id: request.batch_id.as_u64(),
-                workspace_attachments: request.workspace_attachments.clone(),
-                vfs_working_directory: request.vfs_working_directory.clone(),
-                active_environment_id: request.active_environment_id.clone(),
-                environment_policy: request.environment_policy.clone(),
-                tools: tools::code_run::script_tools(policy),
-                limits: tools::code_run::CodeRunLimits::from(&policy.feature),
+                parent_session_id: request.session_id.as_str().to_owned(),
+                parent_run_id: request.run_id.as_u64(),
+                grant_limits,
+                parent_active_environment_id: request.active_environment_id.clone(),
+                limits,
             };
             Some(
                 self.blobs
@@ -3651,23 +3657,10 @@ mod tests {
         .expect("admit code_run binding")
     }
 
-    fn code_policy(tools: &[&str]) -> engine::CodePolicy {
-        engine::CodePolicy {
-            feature: engine::CodeFeature {
-                tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-                max_calls: Some(25),
-                ..engine::CodeFeature::default()
-            },
-            tools: tools
-                .iter()
-                .map(|tool| engine::CodeToolRuntime {
-                    tool_id: ToolName::new(*tool),
-                    spec: engine::BuiltinToolSpec {
-                        settings: serde_json::Value::Null,
-                    },
-                })
-                .collect(),
-            turn_model: test_builtin_runtime().model,
+    fn code_policy() -> engine::CodeFeature {
+        engine::CodeFeature {
+            max_calls: Some(25),
+            ..engine::CodeFeature::default()
         }
     }
 
@@ -3675,7 +3668,7 @@ mod tests {
         blobs: &InMemoryBlobStore,
         binding: &engine::WorkflowToolBinding,
         arguments: serde_json::Value,
-        policy: Option<engine::CodePolicy>,
+        policy: Option<engine::CodeFeature>,
     ) -> ToolInvocationBatchRequest {
         let arguments_ref = blobs
             .put_bytes(serde_json::to_vec(&arguments).expect("encode arguments"))
@@ -3735,7 +3728,7 @@ mod tests {
                     &blobs,
                     &binding,
                     serde_json::json!({"source": "   "}),
-                    Some(code_policy(&["web.fetch"])),
+                    Some(code_policy()),
                 )
                 .await,
             )
@@ -3748,20 +3741,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn code_run_pins_the_scriptable_tools_and_batch_facts() {
+    async fn code_run_pins_the_parent_and_limits() {
         let blobs = Arc::new(InMemoryBlobStore::new());
         let binding = code_run_binding(&blobs).await;
         let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let mut request = code_run_batch(
+            &blobs,
+            &binding,
+            serde_json::json!({"source": "return input;", "input": {"n": 1}}),
+            Some(code_policy()),
+        )
+        .await;
+        request.active_environment_id = Some(engine::EnvironmentId::new("machine-a"));
         let outcome = tools
-            .invoke_batch(
-                code_run_batch(
-                    &blobs,
-                    &binding,
-                    serde_json::json!({"source": "return input;", "input": {"n": 1}}),
-                    Some(code_policy(&["web.fetch", "vfs.write_file"])),
-                )
-                .await,
-            )
+            .invoke_batch(request)
             .await
             .expect("invoke code_run")
             .completed_result()
@@ -3783,17 +3776,21 @@ mod tests {
                 .expect("read execution context"),
         )
         .expect("decode execution context");
-        assert_eq!(context.session_id, "session-caller");
-        assert_eq!((context.run_id, context.turn_id, context.batch_id), (4, 2, 1));
-        assert_eq!(context.vfs_working_directory.as_deref(), Some("/workspace"));
-        // A granted tool that cannot run from a script is never pinned.
-        let names: Vec<_> = context.tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert_eq!(names, ["web.fetch"]);
-        assert_eq!(context.tools[0].tool_name.as_str(), "web_fetch");
-        assert_eq!(context.limits.max_calls, Some(25));
+        assert_eq!(context.parent_session_id, "session-caller");
+        assert_eq!(context.parent_run_id, 4);
         assert_eq!(
-            context.limits.deadline_ms,
-            tools::code_run::DEFAULT_CODE_DEADLINE_MS
+            context.parent_active_environment_id,
+            Some(engine::EnvironmentId::new("machine-a"))
+        );
+        assert_eq!(context.limits.max_calls, Some(25));
+        // Without a sub-agent grant the child counts against the default
+        // tree limits, and runs no longer than the program's deadline.
+        assert_eq!(
+            context.grant_limits,
+            engine::SubagentLimits {
+                deadline_ms: tools::code_run::DEFAULT_CODE_DEADLINE_MS,
+                ..engine::SubagentLimits::default()
+            }
         );
     }
 

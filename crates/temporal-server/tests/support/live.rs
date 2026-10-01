@@ -638,12 +638,7 @@ pub async fn seed_agent_default(
             slot: api::ModelDefaultSlot::AgentRun,
             model: Some(api::ModelConfig {
                 provider_id: model.provider_id.clone(),
-                api_kind: match model.api_kind {
-                    ProviderApiKind::OpenAiResponses => "openai:responses",
-                    ProviderApiKind::OpenAiCompletions => "openai:completions",
-                    ProviderApiKind::AnthropicMessages => "anthropic:messages",
-                }
-                .into(),
+                api_kind: api_projection::api_kind_to_str(&model.api_kind).into(),
                 model: model.model.clone(),
             }),
             expected_revision: current.revision,

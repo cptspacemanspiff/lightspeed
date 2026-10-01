@@ -1,6 +1,5 @@
 pub mod bots;
 pub mod channels;
-mod code_run;
 mod environment_job;
 mod model_generate;
 mod session;
@@ -9,7 +8,6 @@ mod transcriptions;
 
 pub use bots::{BotControllerWorkflow, BotTriggerFireWorkflow};
 pub use channels::ChannelConversationWorkflow;
-pub use code_run::CodeRunWorkflow;
 pub use environment_job::EnvironmentJobWorkflow;
 pub use model_generate::ModelGenerateWorkflow;
 pub use session::AgentSessionWorkflow;

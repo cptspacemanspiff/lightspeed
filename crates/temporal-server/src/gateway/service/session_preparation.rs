@@ -274,22 +274,26 @@ impl SessionPreparationService {
     ) -> Result<WorkflowToolDeclaration, AgentApiError> {
         use tools::code_run::{
             CODE_RUN_DEADLINE_AFTER_MS, CODE_RUN_LOGICAL_ID, CODE_RUN_WORKFLOW_SEMANTIC_TYPE,
-            CODE_RUN_WORKFLOW_TOOL_ID, CODE_RUN_WORKFLOW_TYPE,
+            CODE_RUN_WORKFLOW_TOOL_ID,
         };
+        // A code run is a sub-agent execution whose child is configured from
+        // this session instead of a profile.
         let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
-            workflow_type: CODE_RUN_WORKFLOW_TYPE.to_owned(),
+            workflow_type: tools::subagents::SUBAGENT_WORKFLOW_TYPE.to_owned(),
             task_queue: self.task_queue.clone(),
         })
-        .map_err(|error| AgentApiError::internal(format!("encode core code run recipe: {error}")))?;
+        .map_err(|error| {
+            AgentApiError::internal(format!("encode core code run recipe: {error}"))
+        })?;
         let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe_bytes);
         let recipe_ref = self
             .store
             .put_bytes(recipe_bytes)
             .await
             .map_err(map_blob_store_error)?;
-        // As for model generation, the granted tools are published into the
-        // toolset at each preparation and pinned per call, so the immutable
-        // binding never changes with the grant.
+        // As for model generation, the declared tools are published into the
+        // toolset at each preparation, so the immutable binding never changes
+        // with the session's tools.
         let tool = tools::definitions::register(
             CODE_RUN_LOGICAL_ID,
             Default::default(),
@@ -406,8 +410,8 @@ impl SessionPreparationService {
         if let Some(generate) = generate {
             publish_generate_models(&mut toolset, generate)?;
         }
-        if let Some(code) = code {
-            publish_code_tools(&mut toolset, code, &session_config.model)?;
+        if code.is_some() {
+            publish_code_tools(&mut toolset, self.store.as_ref()).await?;
         }
         let desired_mcp = self.desired_mcp_tools(&session_config.features).await?;
         if let Some(name) = toolset
@@ -569,31 +573,48 @@ impl GatewayAgentApi {
     }
 }
 
-/// Declare the tools a script may call in `code_run`'s description: the
-/// granted ids that are scriptable built-ins of this toolset, in the form a
-/// script calls them. The runtime pins the same set per call.
-pub(super) fn publish_code_tools(
+/// Declare every tool a program can call in `code_run`'s description, in the
+/// form the code sub-agent, configured like this session, advertises it.
+pub(super) async fn publish_code_tools(
     toolset: &mut tools::toolset::RegisteredToolset,
-    code: &engine::CodeFeature,
-    model: &engine::ModelSelection,
+    blobs: &dyn engine::storage::BlobStore,
 ) -> Result<(), AgentApiError> {
-    let choices = code
-        .tools
-        .iter()
-        .filter_map(|id| {
-            let tool_id = engine::ToolName::new(id.as_str());
-            let engine::ToolKind::Builtin(spec) = &toolset.tools.get(&tool_id)?.kind else {
-                return None;
-            };
-            let runtime = engine::CodeToolRuntime {
-                tool_id,
-                spec: spec.clone(),
-            };
-            tools::code_run::script_tool(&runtime, model)
-                .ok()
-                .map(|tool| tool.choice())
-        })
-        .collect();
+    let mut choices = Vec::new();
+    for (name, tool) in &toolset.tools {
+        match &tool.kind {
+            engine::ToolKind::Builtin(spec) => {
+                choices.extend(tools::code_run::builtin_choices(name, spec));
+            }
+            engine::ToolKind::Function(function)
+                if tools::code_run::is_program_tool(name.as_str()) =>
+            {
+                let schema = blobs
+                    .read_bytes(&function.input_schema_ref)
+                    .await
+                    .map_err(map_blob_store_error)?;
+                let input_schema = serde_json::from_slice::<serde_json::Value>(&schema)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let description = match &function.description_ref {
+                    Some(blob_ref) => Some(
+                        String::from_utf8_lossy(
+                            &blobs
+                                .read_bytes(blob_ref)
+                                .await
+                                .map_err(map_blob_store_error)?,
+                        )
+                        .into_owned(),
+                    ),
+                    None => None,
+                };
+                choices.push(tools::code_run::CodeToolChoice {
+                    name: name.as_str().to_owned(),
+                    description,
+                    input_schema,
+                });
+            }
+            _ => {}
+        }
+    }
     let name = engine::ToolName::new(tools::code_run::CODE_RUN_LOGICAL_ID);
     let Some(tool) = toolset.tools.get_mut(&name) else {
         return Ok(());

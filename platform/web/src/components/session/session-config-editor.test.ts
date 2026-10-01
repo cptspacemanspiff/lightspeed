@@ -422,19 +422,17 @@ describe("model generation feature config", () => {
 });
 
 describe("code mode feature config", () => {
-  it("keeps granted tools in a stable order and drops ones programs cannot call", () => {
-    const config = { features: { code: { tools: ["web.fetch", "vfs.read_file"], maxCalls: 50 } } };
+  it("keeps only positive limits across normalization", () => {
+    const config = { features: { code: { maxCalls: 50 } } };
     expect(normalizeSessionConfig(normalizeSessionConfig(config))).toEqual(config);
-    expect(normalizeSessionConfig({
-      features: { code: { tools: ["vfs.read_file", "vfs.write_file", "vfs.read_file"], maxCalls: 0 } },
-    })).toEqual({ features: { code: { tools: ["vfs.read_file"] } } });
-    expect(normalizeSessionConfig({ features: { code: {} } })).toEqual({ features: { code: {} } });
+    expect(normalizeSessionConfig({ features: { code: { maxCalls: 0, tools: ["web.fetch"] } } })).toEqual({
+      features: { code: {} },
+    });
   });
 
-  it("rejects tools and limits the runtime would refuse", () => {
+  it("rejects limits the runtime would refuse", () => {
     const error = (code: Record<string, unknown>) => configError({ features: { code } });
-    expect(error({ tools: ["web.fetch"], maxConcurrentCalls: 64, deadlineMs: 3_600_000 })).toBeNull();
-    expect(error({ tools: ["vfs.write_file"] })).toContain("cannot grant vfs.write_file");
+    expect(error({ maxConcurrentCalls: 64, deadlineMs: 3_600_000 })).toBeNull();
     expect(error({ maxCalls: 1001 })).toContain("between 1 and 1000");
     expect(error({ deadlineMs: 3_600_001 })).toContain("between 1 and 3600000");
   });

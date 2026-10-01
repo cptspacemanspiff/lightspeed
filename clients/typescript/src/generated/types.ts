@@ -2240,13 +2240,12 @@ export interface FeaturesConfig {
   web?: WebFeature | null;
 }
 /**
- * Grants `code_run`: the model writes a TypeScript program, and the code
- * runtime executes it durably. The program calls tools itself, concurrently
- * when useful, and returns a JSON result. `tools` lists which of the
- * session's own tools a program may call, by logical id; a listed tool the
- * session does not have is unavailable to programs. Only tools whose calls
- * leave no session state behind can be listed: `web.fetch`,
- * `vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.
+ * Grants `code_run`: the model writes a TypeScript program and hands it to
+ * a code sub-agent, a child session configured like this one whose model is
+ * Lightspeed's code runtime. The program calls this session's tools itself,
+ * concurrently when useful; each time it waits on calls, the child session
+ * records its log lines and those calls. The program's JSON result is the
+ * tool's reply.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "CodeFeature".
@@ -2265,10 +2264,6 @@ export interface CodeFeature {
    * Most tool calls one program may have in flight, 1–64. Defaults to 16.
    */
   maxConcurrentCalls?: number | null;
-  /**
-   * Logical ids of the tools a program may call, at most 64.
-   */
-  tools?: string[];
   version?: number;
 }
 /**

@@ -80,4 +80,7 @@ export type RunScriptOutput =
       /** Every outstanding call outlived its hold; the sandbox was discarded. */
       status: "suspended";
       delivered: number;
+      /** Everything the script logged, from its start, in this generation. */
+      logs: LogEntry[];
+      logs_truncated: boolean;
     };

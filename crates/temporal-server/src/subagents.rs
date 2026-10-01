@@ -4,12 +4,16 @@
 //! child from the pinned profile, and starts its run with a notify intent
 //! back to the execution; resolve builds the result envelope and closes the
 //! child; close force-closes a cancelled child.
+//!
+//! A `code_run` call is the same execution with a different child: a code
+//! sub-agent configured from the calling session, whose model is the code
+//! runtime, running the call's program.
 
 use std::sync::Arc;
 
 use api::{
     AgentApiError, AgentApiService, AgentProfile, InlineAgentProfile, InputItem, ProfileId,
-    ProfileSource, SessionCloseParams, SessionReadParams,
+    ProfileSource, SessionCloseParams, SessionConfig, SessionReadParams,
 };
 use async_trait::async_trait;
 use engine::{
@@ -24,6 +28,11 @@ use temporal_workflow::{
     SubagentChildRef, SubagentPrepareActivityResult, SubagentTerminal, WorkflowToolStartArgs,
 };
 use tools::{
+    code_run::{
+        CODE_RUN_AGENT, CODE_RUN_EXECUTION_CONTEXT_VERSION, CODE_RUNTIME_MODEL,
+        CODE_RUNTIME_PROVIDER_ID, CodeProgram, CodeRunArgs, CodeRunExecutionContextV1,
+        is_code_run_binding,
+    },
     concurrency::{AwaitArgs, AwaitModeArg},
     subagents::{
         AgentCallArgs, SubagentExecutionContextV1, SubagentResultEnvelope, SubagentResultStatus,
@@ -45,6 +54,19 @@ pub trait SubagentChildRuntime: Send + Sync {
         &self,
         session_id: &SessionId,
         profile: ProfileSource,
+    ) -> Result<(), AgentApiError>;
+
+    /// The session's current configuration, as its API view reports it.
+    async fn read_session_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionConfig>, AgentApiError>;
+
+    /// Start a child from an explicit configuration instead of a profile.
+    async fn start_session_with_config(
+        &self,
+        session_id: &SessionId,
+        config: SessionConfig,
     ) -> Result<(), AgentApiError>;
 
     async fn start_run(
@@ -97,6 +119,29 @@ impl SubagentChildRuntime for AgentApiSubagentRuntime {
         crate::gateway::service::authorization::with_controller_authority(authority, async {
             self.api
                 .start_session_for_subagent(session_id, profile)
+                .await
+        })
+        .await
+    }
+
+    async fn read_session_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionConfig>, AgentApiError> {
+        // The parent may be a root session, which has no delegated authority;
+        // its configuration is read from the runtime's own state.
+        self.api.session_config_for_code_run(session_id).await
+    }
+
+    async fn start_session_with_config(
+        &self,
+        session_id: &SessionId,
+        config: SessionConfig,
+    ) -> Result<(), AgentApiError> {
+        let authority = self.api.delegated_session_authority(session_id).await?;
+        crate::gateway::service::authorization::with_controller_authority(authority, async {
+            self.api
+                .start_session_for_code_run(session_id, config)
                 .await
         })
         .await
@@ -228,6 +273,13 @@ impl SubagentService {
                 "subagent invocation is missing its reply completion promise",
             ));
         };
+        if is_code_run_binding(
+            invocation.tool_id.as_str(),
+            invocation.semantic_type.as_str(),
+        ) {
+            let reply_promise_id = reply_promise_id.clone();
+            return self.prepare_code(start, reply_promise_id, now_ms).await;
+        }
         if SubagentToolKind::from_binding(
             invocation.tool_id.as_str(),
             invocation.semantic_type.as_str(),
@@ -322,45 +374,11 @@ impl SubagentService {
             profile_revision: profile.revision,
             limits,
         };
-        match self
-            .sessions
-            .create_session(CreateSession {
-                session_id: child_session_id.clone(),
-                display_name,
-                // Copied once at spawn so a filter on the parent's campaign
-                // catches its descendants; later puts do not propagate.
-                metadata: parent.metadata.clone(),
-                origin: Some(origin.clone()),
-                delete_after_close_ms: None,
-                created_at_ms: now_ms,
-            })
-            .await
+        if let Some(rejected) = self
+            .create_child_row(&child_session_id, display_name, &parent, origin, now_ms)
+            .await?
         {
-            Ok(_) => {}
-            Err(SessionStoreError::SessionAlreadyExists { .. }) => {
-                // Retry of this execution: the row is ours iff it names this
-                // invocation; anything else is an identity collision.
-                let existing = self
-                    .sessions
-                    .load_session(&child_session_id)
-                    .await
-                    .map_err(api_projection::map_session_store_error)?;
-                let ours = existing.as_ref().is_some_and(|record| {
-                    record
-                        .origin
-                        .as_ref()
-                        .is_some_and(|existing| existing.invocation_id == origin.invocation_id)
-                });
-                if !ours {
-                    return Err(AgentApiError::conflict(format!(
-                        "subagent child session id collides with an unrelated session: {child_session_id}"
-                    )));
-                }
-            }
-            Err(error @ SessionStoreError::OriginLimitExceeded { .. }) => {
-                return self.rejected(error.to_string()).await;
-            }
-            Err(error) => return Err(api_projection::map_session_store_error(error)),
+            return Ok(rejected);
         }
         // The profile is applied inline so the child runs the revision that
         // was pinned on its origin, not whatever the registry holds later,
@@ -423,6 +441,177 @@ impl SubagentService {
             },
             deadline_ms: limits.deadline_ms,
         })
+    }
+
+    /// Step A for `code_run`: the child is configured like the parent, with
+    /// the code runtime as its model, and its run input is the program.
+    async fn prepare_code(
+        &self,
+        start: WorkflowToolStartArgs,
+        reply_promise_id: engine::PromiseId,
+        now_ms: u64,
+    ) -> Result<SubagentPrepareActivityResult, AgentApiError> {
+        let invocation = &start.invocation;
+        let args: CodeRunArgs = self.read_json(&invocation.arguments_ref).await?;
+        if let Err(error) = args.validate() {
+            return self.rejected(error.to_string()).await;
+        }
+        let context_ref = invocation.execution_context_ref.as_ref().ok_or_else(|| {
+            AgentApiError::invalid_request("code run invocation is missing its execution context")
+        })?;
+        let context: CodeRunExecutionContextV1 = self.read_json(context_ref).await?;
+        if context.parent_session_id != invocation.session_id.as_str() {
+            return Err(AgentApiError::rejected(
+                "code run parent does not match admitted invocation",
+            ));
+        }
+        if context.version != CODE_RUN_EXECUTION_CONTEXT_VERSION {
+            return Err(AgentApiError::invalid_request(format!(
+                "unsupported code run execution context version {}",
+                context.version
+            )));
+        }
+        let parent_session_id = SessionId::try_new(context.parent_session_id.clone())
+            .map_err(|error| AgentApiError::internal(format!("invalid parent id: {error}")))?;
+        let parent = self
+            .sessions
+            .load_session(&parent_session_id)
+            .await
+            .map_err(api_projection::map_session_store_error)?
+            .ok_or_else(|| {
+                AgentApiError::not_found(format!("parent session not found: {parent_session_id}"))
+            })?;
+        let (root_session_id, depth, limits) = match parent.origin.as_ref() {
+            Some(origin) => (
+                origin.root_session_id.clone(),
+                origin.depth.saturating_add(1),
+                context.grant_limits.attenuated_by(origin.limits),
+            ),
+            None => (parent_session_id.clone(), 1, context.grant_limits),
+        };
+        let parent_config = self
+            .runtime
+            .read_session_config(&parent_session_id)
+            .await?
+            .unwrap_or_default();
+        let child_session_id = child_session_id(&start.execution_id);
+        let origin = SessionOrigin {
+            kind: SessionOriginKind::Subagent,
+            parent_session_id: parent_session_id.clone(),
+            parent_run_id: context.parent_run_id,
+            root_session_id,
+            depth,
+            invocation_id: invocation.invocation_id.as_str().to_owned(),
+            profile_id: CODE_RUN_AGENT.to_owned(),
+            profile_revision: 0,
+            limits,
+        };
+        let display_name = Some(args.label.clone().unwrap_or_else(|| "Code".to_owned()));
+        if let Some(rejected) = self
+            .create_child_row(&child_session_id, display_name, &parent, origin, now_ms)
+            .await?
+        {
+            return Ok(rejected);
+        }
+        if let Err(error) = self
+            .runtime
+            .start_session_with_config(&child_session_id, code_child_config(parent_config))
+            .await
+        {
+            if is_caller_error(&error) {
+                let _ = self.close(child_session_id.as_str()).await;
+                return self
+                    .rejected(format!("the code sub-agent could not be started: {error}"))
+                    .await;
+            }
+            return Err(error);
+        }
+        let program = CodeProgram {
+            source: args.source,
+            input: args.input.unwrap_or(serde_json::Value::Null),
+            limits: context.limits,
+        };
+        let text = serde_json::to_string(&program)
+            .map_err(|error| AgentApiError::internal(format!("encode program: {error}")))?;
+        let run_id = self
+            .runtime
+            .start_run(
+                &child_session_id,
+                vec![InputItem::Text {
+                    provenance_ref: None,
+                    origin: None,
+                    text,
+                }],
+                SubmissionId::new(format!("code_run_{}", digest_suffix(&start.execution_id))),
+                vec![RunTerminalNotifyIntent {
+                    holder_workflow_id: start.execution_id.clone(),
+                    token: reply_promise_id.as_str().to_owned(),
+                }],
+            )
+            .await?;
+        let run_id = parse_api_run_id(&run_id)?;
+        Ok(SubagentPrepareActivityResult::Prepared {
+            child: SubagentChildRef {
+                session_id: child_session_id.as_str().to_owned(),
+                run_id,
+                agent_profile_id: CODE_RUN_AGENT.to_owned(),
+            },
+            deadline_ms: limits.deadline_ms,
+        })
+    }
+
+    /// Create the child's session row, which reserves its slot in the root's
+    /// tree. A retry finds its own row; a row for another invocation is an
+    /// identity collision. Returns the rejection when a root limit refuses
+    /// the child.
+    async fn create_child_row(
+        &self,
+        child_session_id: &SessionId,
+        display_name: Option<String>,
+        parent: &engine::storage::SessionRecord,
+        origin: SessionOrigin,
+        now_ms: u64,
+    ) -> Result<Option<SubagentPrepareActivityResult>, AgentApiError> {
+        match self
+            .sessions
+            .create_session(CreateSession {
+                session_id: child_session_id.clone(),
+                display_name,
+                // Copied once at spawn so a filter on the parent's campaign
+                // catches its descendants; later puts do not propagate.
+                metadata: parent.metadata.clone(),
+                origin: Some(origin.clone()),
+                delete_after_close_ms: None,
+                created_at_ms: now_ms,
+            })
+            .await
+        {
+            Ok(_) => Ok(None),
+            Err(SessionStoreError::SessionAlreadyExists { .. }) => {
+                let existing = self
+                    .sessions
+                    .load_session(child_session_id)
+                    .await
+                    .map_err(api_projection::map_session_store_error)?;
+                let ours = existing.as_ref().is_some_and(|record| {
+                    record
+                        .origin
+                        .as_ref()
+                        .is_some_and(|existing| existing.invocation_id == origin.invocation_id)
+                });
+                if ours {
+                    Ok(None)
+                } else {
+                    Err(AgentApiError::conflict(format!(
+                        "subagent child session id collides with an unrelated session: {child_session_id}"
+                    )))
+                }
+            }
+            Err(error @ SessionStoreError::OriginLimitExceeded { .. }) => {
+                self.rejected(error.to_string()).await.map(Some)
+            }
+            Err(error) => Err(api_projection::map_session_store_error(error)),
+        }
     }
 
     /// The media `text` links by handle that the child session actually
@@ -618,6 +807,34 @@ pub fn await_spec_from_args(
     })
 }
 
+/// A code sub-agent's configuration: the parent's, with the code runtime as
+/// its model. Settings that belong to a language model (generation, context
+/// compaction, turn limits) do not apply; `code_run` is left out so a
+/// program cannot start programs, and so is web search, which the model's
+/// provider executes and a program has no way to call.
+pub fn code_child_config(parent: SessionConfig) -> SessionConfig {
+    let mut features = parent.features.unwrap_or_default();
+    features.code = None;
+    if let Some(web) = features.web.as_mut() {
+        web.search = None;
+    }
+    // A web feature granting neither fetch nor search is invalid.
+    features.web = features.web.filter(|web| web.fetch.is_some());
+    SessionConfig {
+        model: Some(api::ModelRef::Route(api::ModelConfig {
+            provider_id: CODE_RUNTIME_PROVIDER_ID.to_owned(),
+            api_kind: api_projection::api_kind_to_str(&engine::ProviderApiKind::CodeRuntime)
+                .to_owned(),
+            model: CODE_RUNTIME_MODEL.to_owned(),
+        })),
+        models: None,
+        generation: None,
+        limits: None,
+        context: None,
+        features: Some(features),
+    }
+}
+
 pub fn child_session_id(execution_id: &str) -> SessionId {
     SessionId::new(format!("agent_{}", digest_suffix(execution_id)))
 }
@@ -761,6 +978,8 @@ mod tests {
         start_session_error: Mutex<Option<AgentApiError>>,
         close_error: Mutex<Option<AgentApiError>>,
         started_sessions: Mutex<Vec<(String, ProfileSource)>>,
+        parent_config: Mutex<Option<SessionConfig>>,
+        configured_sessions: Mutex<Vec<(String, SessionConfig)>>,
         started_runs: Mutex<Vec<StartedRun>>,
         closed: Mutex<Vec<(String, bool)>>,
         media: Mutex<Vec<MediaDescriptor>>,
@@ -813,6 +1032,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((session_id.as_str().to_owned(), profile));
+            Ok(())
+        }
+
+        async fn read_session_config(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<SessionConfig>, AgentApiError> {
+            Ok(self.parent_config.lock().unwrap().clone())
+        }
+
+        async fn start_session_with_config(
+            &self,
+            session_id: &SessionId,
+            config: SessionConfig,
+        ) -> Result<(), AgentApiError> {
+            self.configured_sessions
+                .lock()
+                .unwrap()
+                .push((session_id.as_str().to_owned(), config));
             Ok(())
         }
 
@@ -982,6 +1220,152 @@ mod tests {
             }
             SubagentPrepareActivityResult::Prepared { .. } => panic!("expected a rejection"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_runs_start_a_child_configured_like_the_parent() {
+        let runtime = Arc::new(FakeChildRuntime::default());
+        *runtime.parent_config.lock().unwrap() = Some(SessionConfig {
+            model: Some(api::ModelRef::Route(api::ModelConfig {
+                provider_id: "openai".to_owned(),
+                api_kind: "openai:responses".to_owned(),
+                model: "gpt".to_owned(),
+            })),
+            generation: Some(api::GenerationConfig {
+                reasoning_effort: Some("high".to_owned()),
+                ..Default::default()
+            }),
+            features: Some(api::FeaturesConfig {
+                web: Some(api::WebFeature {
+                    version: api::CURRENT_FEATURE_VERSION,
+                    search: None,
+                    fetch: Some(Default::default()),
+                }),
+                code: Some(api::CodeFeature {
+                    version: api::CURRENT_FEATURE_VERSION,
+                    max_calls: None,
+                    max_concurrent_calls: None,
+                    deadline_ms: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let harness = harness(runtime.clone()).await;
+        let mut start = start_args(
+            &harness.blobs,
+            "wtx:code1",
+            "parent",
+            "unused",
+            "unused",
+            SubagentLimits::default(),
+        )
+        .await;
+        let limits = tools::code_run::CodeRunLimits {
+            max_calls: Some(9),
+            max_concurrent_calls: None,
+            deadline_ms: 60_000,
+        };
+        start.invocation.tool_id = WorkflowToolId::new(tools::code_run::CODE_RUN_WORKFLOW_TOOL_ID);
+        start.invocation.semantic_type =
+            tools::code_run::CODE_RUN_WORKFLOW_SEMANTIC_TYPE.to_owned();
+        start.invocation.arguments_ref = harness
+            .blobs
+            .put_bytes(
+                serde_json::to_vec(&serde_json::json!({
+                    "source": "return input.n;",
+                    "input": { "n": 3 },
+                    "label": "count",
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        start.invocation.execution_context_ref = Some(
+            harness
+                .blobs
+                .put_bytes(
+                    serde_json::to_vec(&CodeRunExecutionContextV1 {
+                        version: CODE_RUN_EXECUTION_CONTEXT_VERSION,
+                        parent_session_id: "parent".to_owned(),
+                        parent_run_id: 3,
+                        grant_limits: SubagentLimits {
+                            deadline_ms: 60_000,
+                            ..SubagentLimits::default()
+                        },
+                        parent_active_environment_id: None,
+                        limits,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let (child, deadline_ms) = prepared(harness.service.prepare(start, 10).await.unwrap());
+        assert_eq!(child.agent_profile_id, CODE_RUN_AGENT);
+        assert_eq!(deadline_ms, 60_000);
+        let record = harness
+            .sessions
+            .load_session(&SessionId::new(child.session_id.clone()))
+            .await
+            .unwrap()
+            .expect("child row");
+        assert_eq!(record.display_name.as_deref(), Some("count"));
+        let origin = record.origin.expect("origin");
+        assert_eq!(origin.parent_session_id.as_str(), "parent");
+        assert_eq!(origin.profile_id, CODE_RUN_AGENT);
+
+        // The child keeps the parent's tools, runs on the code runtime, and
+        // drops what only a language model or a nested program would use.
+        let configured = runtime.configured_sessions.lock().unwrap().clone();
+        let (_, config) = &configured[0];
+        let route = config
+            .model
+            .as_ref()
+            .and_then(api::ModelRef::route)
+            .expect("route");
+        assert_eq!(route.api_kind, "code:runtime");
+        assert!(config.generation.is_none());
+        let features = config.features.as_ref().expect("features");
+        assert!(features.web.is_some());
+        assert!(features.code.is_none());
+
+        let runs = runtime.started_runs.lock().unwrap().clone();
+        let InputItem::Text { text, .. } = &runs[0].1[0] else {
+            panic!("the program is text input");
+        };
+        let program: CodeProgram = serde_json::from_str(text).expect("program document");
+        assert_eq!(program.source, "return input.n;");
+        assert_eq!(program.input, serde_json::json!({ "n": 3 }));
+        assert_eq!(program.limits, limits);
+        assert_eq!(runs[0].3[0].holder_workflow_id, "wtx:code1");
+    }
+
+    #[test]
+    fn code_children_drop_provider_executed_web_search() {
+        fn parent(fetch: bool) -> SessionConfig {
+            SessionConfig {
+                features: Some(api::FeaturesConfig {
+                    web: Some(api::WebFeature {
+                        version: api::CURRENT_FEATURE_VERSION,
+                        search: Some(Default::default()),
+                        fetch: fetch.then(Default::default),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        let child = code_child_config(parent(true));
+        let web = child.features.and_then(|features| features.web);
+        let web = web.expect("fetch survives");
+        assert!(web.search.is_none());
+        assert!(web.fetch.is_some());
+
+        let child = code_child_config(parent(false));
+        assert!(child.features.expect("features").web.is_none());
     }
 
     #[test]

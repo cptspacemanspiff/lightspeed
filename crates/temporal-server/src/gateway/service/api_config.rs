@@ -262,22 +262,9 @@ fn features_from_api(
     })
 }
 
-/// Only tools that leave no session state behind can run from a script, so
-/// any other listed tool is rejected here rather than silently dropped.
 fn code_feature_from_api(code: api::CodeFeature) -> Result<engine::CodeFeature, AgentApiError> {
-    if let Some(tool) = code
-        .tools
-        .iter()
-        .find(|tool| !tools::code_run::is_scriptable_tool(tool))
-    {
-        return Err(AgentApiError::invalid_request(format!(
-            "code feature tool {tool:?} cannot be called from a program; allowed tools are {}",
-            tools::code_run::SCRIPTABLE_TOOL_IDS.join(", ")
-        )));
-    }
     Ok(engine::CodeFeature {
         version: code.version,
-        tools: code.tools,
         max_calls: code.max_calls,
         max_concurrent_calls: code.max_concurrent_calls,
         deadline_ms: code.deadline_ms,
@@ -438,6 +425,7 @@ pub(super) fn validate_reasoning_effort(
         ProviderApiKind::OpenAiCompletions => {
             llm_runtime::params::OPENAI_COMPLETIONS_REASONING_EFFORT_TIERS
         }
+        ProviderApiKind::CodeRuntime => &[],
     };
     if supported.contains(&effort) {
         Ok(())

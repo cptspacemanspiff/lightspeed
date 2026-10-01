@@ -1301,73 +1301,57 @@ fn generate_models_are_published_into_the_tool_schema_only() {
     );
 }
 
-fn code_config(tools: &[&str]) -> api::SessionConfig {
-    api::SessionConfig {
-        features: Some(api::FeaturesConfig {
-            code: Some(api::CodeFeature {
-                version: api::CURRENT_FEATURE_VERSION,
-                tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-                max_calls: Some(20),
-                max_concurrent_calls: None,
-                deadline_ms: None,
+#[test]
+fn code_feature_maps_its_limits() {
+    let config = engine_session_config_from_api(
+        api::SessionConfig {
+            features: Some(api::FeaturesConfig {
+                code: Some(api::CodeFeature {
+                    version: api::CURRENT_FEATURE_VERSION,
+                    max_calls: Some(20),
+                    max_concurrent_calls: None,
+                    deadline_ms: Some(60_000),
+                }),
+                ..Default::default()
             }),
             ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-#[test]
-fn code_feature_maps_scriptable_tools_and_rejects_the_rest() {
-    let config = engine_session_config_from_api(
-        code_config(&["web.fetch", "vfs.read_file"]),
+        },
         openai_model(),
     )
     .expect("map code feature");
     let code = config.features.code.expect("code grant");
-    assert_eq!(code.tools, ["web.fetch", "vfs.read_file"]);
     assert_eq!(code.max_calls, Some(20));
-
-    let error = engine_session_config_from_api(code_config(&["vfs.write_file"]), openai_model())
-        .expect_err("writes carry session effects");
-    assert_eq!(error.kind, AgentApiErrorKind::InvalidRequest);
-    assert!(
-        error.message.contains("\"vfs.write_file\""),
-        "{}",
-        error.message
-    );
+    assert_eq!(code.deadline_ms, Some(60_000));
 }
 
-#[test]
-fn code_tools_are_published_into_the_code_run_description() {
+#[tokio::test(flavor = "current_thread")]
+async fn every_program_tool_is_published_into_the_code_run_description() {
+    let blobs = engine::storage::InMemoryBlobStore::new();
     let mut toolset = tools::toolset::RegisteredToolset::default();
-    let code_run = tools::definitions::register(
+    for id in [
         tools::code_run::CODE_RUN_LOGICAL_ID,
-        Default::default(),
-        engine::ToolParallelism::ParallelSafe,
-        Default::default(),
-    );
-    let fetch = tools::definitions::register(
         "web.fetch",
-        Default::default(),
-        engine::ToolParallelism::ParallelSafe,
-        Default::default(),
-    );
-    toolset.tools.insert(code_run.name.clone(), code_run.clone());
-    toolset.tools.insert(fetch.name.clone(), fetch);
-    // vfs.read_file is granted but not in this toolset, so it is not declared.
-    let feature = engine::CodeFeature {
-        tools: vec!["web.fetch".to_owned(), "vfs.read_file".to_owned()],
-        ..Default::default()
-    };
-    session_preparation::publish_code_tools(&mut toolset, &feature, &openai_model())
+        "vfs.write_file",
+        "concurrency.await",
+    ] {
+        let tool = tools::definitions::register(
+            id,
+            Default::default(),
+            engine::ToolParallelism::ParallelSafe,
+            Default::default(),
+        );
+        toolset.tools.insert(tool.name.clone(), tool);
+    }
+    session_preparation::publish_code_tools(&mut toolset, &blobs)
+        .await
         .expect("publish code tools");
 
-    let engine::ToolKind::Builtin(spec) = &toolset.tools[&code_run.name].kind else {
+    let name = engine::ToolName::new(tools::code_run::CODE_RUN_LOGICAL_ID);
+    let engine::ToolKind::Builtin(spec) = &toolset.tools[&name].kind else {
         panic!("code run is a built-in tool");
     };
     let resolved = tools::definitions::resolve(
-        &code_run.name,
+        &name,
         spec,
         &tools::runtime::ToolTarget::from(&openai_model()),
     )
@@ -1376,9 +1360,15 @@ fn code_tools_are_published_into_the_code_run_description() {
         panic!("code run is a function tool");
     };
     let description = function.description.as_deref().expect("description");
-    assert!(description.contains("web: {"), "{description}");
-    assert!(description.contains("fetch(args: {"), "{description}");
-    assert!(!description.contains("read_file"), "{description}");
+    // Every session tool, effects included, in its code runtime form.
+    assert!(description.contains("web_fetch(args: {"), "{description}");
+    assert!(
+        description.contains("vfs_write_file(args: {"),
+        "{description}"
+    );
+    // Promise controls and code_run itself are not program tools.
+    assert!(!description.contains("await(args"), "{description}");
+    assert!(!description.contains("code_run(args"), "{description}");
 }
 
 fn environments_feature(attachments: Vec<api::EnvironmentAttachment>) -> api::EnvironmentsFeature {

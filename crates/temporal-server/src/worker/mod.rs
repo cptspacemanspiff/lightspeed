@@ -3,6 +3,7 @@
 mod activities;
 mod bots;
 mod channels;
+mod code_runtime;
 mod fake;
 pub(crate) mod mcp;
 mod reaper;
@@ -28,6 +29,7 @@ pub use activities::{
 };
 pub use bots::BotWorkerActivities;
 pub use channels::ChannelWorkerActivities;
+pub use code_runtime::{CodeRuntimeDriver, code_runtime_task_queue};
 pub use fake::{FAKE_TRANSIENT_RETRY_AFTER, FakeLlm, FakeRuntimeCounters, FakeTools};
 pub use reaper::{
     CasBlobSweeper, CasSweepStats, PromiseReaper, ReaperStats, SessionRetentionReaper,
@@ -36,8 +38,7 @@ pub use reaper::{
 pub use secrets::{BrokerSecretResolver, StoredModelProviderResolver, StoredProviderKeyResolver};
 pub use session_tools::{SessionTools, ToolCallExecution};
 pub use temporal_workflow::{
-    ACTIVITY_APPEND_EVENTS, ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CODE_RUN_FINISH,
-    ACTIVITY_CODE_RUN_PREPARE, ACTIVITY_CODE_TOOL_CALL,
+    ACTIVITY_APPEND_EVENTS, ACTIVITY_CANCEL_WORKFLOW_TOOL_EXECUTION,
     ACTIVITY_CHECK_WORKFLOW_TOOL_EXECUTION, ACTIVITY_CONTEXT_COMPACT,
     ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
@@ -52,7 +53,7 @@ pub use temporal_workflow::{
     DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, EnvironmentJobCancelActivityRequest,
     EnvironmentJobPollActivityRequest, EnvironmentJobPollActivityResult,
     EnvironmentJobStartActivityRequest, EnvironmentJobStartActivityResult, EnvironmentJobWorkflow,
-    EnvironmentJobWorkflowArgs, FAKE_TOOL_NAME, LlmGenerateActivityRequest, ModelGenerateWorkflow, CodeRunWorkflow,
+    EnvironmentJobWorkflowArgs, FAKE_TOOL_NAME, LlmGenerateActivityRequest, ModelGenerateWorkflow,
     PutBlobRequest, ReadBlobRequest, ReadBlobResult, RuntimeProjectionRefreshActivityRequest,
     RuntimeProjectionRefreshActivityResult, SubagentExecutionWorkflow,
     ToolInvokeBatchActivityRequest, ToolInvokeCallActivityRequest,
@@ -103,7 +104,6 @@ pub fn sessions_worker(
         .register_workflow::<EnvironmentJobWorkflow>()
         .register_workflow::<SubagentExecutionWorkflow>()
         .register_workflow::<ModelGenerateWorkflow>()
-        .register_workflow::<CodeRunWorkflow>()
         .register_activities(activities)
         .task_types(task_types)
         .build();

@@ -79,6 +79,10 @@ async function runScript(
   });
   const heartbeat = setInterval(() => context.heartbeat(), HEARTBEAT_MS);
 
+  const suspended = (delivered: number): RunScriptOutput => {
+    const logs = session.logs();
+    return { status: "suspended", delivered, logs: logs.entries, logs_truncated: logs.truncated };
+  };
   const finished = (fields: { status: "completed"; output: Json } | FailedFields): RunScriptOutput => {
     const logs = session.logs();
     return { ...fields, logs: logs.entries, logs_truncated: logs.truncated };
@@ -162,12 +166,12 @@ async function runScript(
           },
         });
       }
-      if (Date.now() >= deadline) return { status: "suspended", delivered };
+      if (Date.now() >= deadline) return suspended(delivered);
       const request: NextRequest = { generation: input.generation, after: delivered };
       const response = await cancellable(
         workflow.executeUpdate<NextResponse, [NextRequest]>(NEXT_UPDATE, { args: [request] }),
       );
-      if (response.status === "suspend") return { status: "suspended", delivered };
+      if (response.status === "suspend") return suspended(delivered);
       total = response.total;
     }
   } finally {

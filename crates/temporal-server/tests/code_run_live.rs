@@ -1,7 +1,8 @@
 //! Live coverage for the `code_run` workflow tool: a session turn hands a
-//! program to the code runtime, the program calls one of the session's own
-//! tools through the code-run workflow as its host, and the joined reply
-//! resumes the turn with the program's result.
+//! program to a code sub-agent, a child session whose model is the code
+//! runtime. The program calls the parent's tools, including ones with
+//! session effects, through the child's own engine; each pause is a turn in
+//! the child, and the program's result resumes the parent's turn.
 //!
 //! Besides the local infrastructure, this needs Node and the repository's
 //! npm dependencies: the test starts the code runtime's worker itself.
@@ -28,7 +29,11 @@ use support::live::{
 use temporal_server::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
-    worker::{ActivityState, SessionTools, WorkerActivities, core_runtime, worker_with_activities},
+    subagents::AgentApiSubagentRuntime,
+    worker::{
+        ActivityState, CodeRuntimeDriver, SessionTools, WorkerActivities, core_runtime,
+        worker_with_activities,
+    },
 };
 use temporal_workflow::{DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, connect_temporal};
 use tools::code_run::CODE_RUN_TOOL_NAME;
@@ -36,15 +41,14 @@ use tools::code_run::CODE_RUN_TOOL_NAME;
 /// A program exercising the host path: a successful call to a granted tool,
 /// a call to a tool the grant leaves out, and a result built from both.
 const PROGRAM: &str = r#"
-const listing = await tools.vfs.list_dir({ path: "/workspace" });
-let refused = "none";
-try {
-  await (tools as any).web.fetch({ url: "https://example.com" });
-} catch (error) {
-  refused = error instanceof TypeError ? "absent" : error.code;
-}
-console.log("listed the workspace");
-return { sum: input.a + input.b, listing, refused };
+console.log("writing notes");
+await tools.vfs_write_file({ path: "/workspace/notes.txt", content: "hello from a program" });
+const [listing, text] = await Promise.all([
+  tools.vfs_list_dir({ path: "/workspace" }),
+  tools.vfs_read_file({ path: "/workspace/notes.txt" }),
+]);
+console.log("read back the notes");
+return { sum: input.a + input.b, listed: JSON.stringify(listing).includes("notes.txt"), text };
 "#;
 
 #[tokio::test(flavor = "current_thread")]
@@ -74,7 +78,8 @@ async fn temporal_live_code_run_calls_session_tools_from_a_program() -> anyhow::
     );
 
     let blobs: Arc<dyn BlobStore> = store.clone();
-    let llm = Arc::new(CodeScriptedLlm { blobs });
+    let driver = CodeRuntimeDriver::new(client.clone(), blobs.clone(), store.config().universe_id);
+    let llm = Arc::new(CodeScriptedLlm { blobs, driver });
     let hosted = Arc::new(SessionTools::from_pg_store(store.clone()));
     let activities = WorkerActivities::for_universe(
         store.config().universe_id,
@@ -84,7 +89,8 @@ async fn temporal_live_code_run_calls_session_tools_from_a_program() -> anyhow::
             hosted.clone() as Arc<dyn CoreAgentTools>,
         )
         .with_hosted_tools(hosted)
-        .with_workflow_tool_executions(client.clone()),
+        .with_workflow_tool_executions(client.clone())
+        .with_subagent_runtime(Arc::new(AgentApiSubagentRuntime::new(api.clone()))),
     );
     let mut worker =
         worker_with_activities(&runtime, client.clone(), task_queue.clone(), activities)?;
@@ -167,14 +173,13 @@ async fn run_program_client(
                         path: "/workspace".to_owned(),
                         workspace_id: Some(workspace.workspace_id.clone()),
                         snapshot_ref: None,
-                        access: api::WorkspaceAccess::Read,
+                        access: api::WorkspaceAccess::Edit,
                     }],
                     prompts: None,
                     skills: None,
                 }),
                 code: Some(api::CodeFeature {
                     version: api::CURRENT_FEATURE_VERSION,
-                    tools: vec!["vfs.list_dir".to_owned()],
                     max_calls: Some(10),
                     max_concurrent_calls: None,
                     deadline_ms: Some(120_000),
@@ -205,23 +210,76 @@ async fn run_program_client(
     let finished = wait_for_terminal_run(api.as_ref(), session_id, &run.result.run.id).await?;
     assert_eq!(finished.status, api::RunStatus::Completed);
     let output = final_assistant_text(&finished).expect("final assistant output");
-    // The program ran, reached the granted tool through its host, and could
-    // not reach the tool the grant leaves out.
+    // The parent received the program's result through the sub-agent
+    // envelope: the write took effect, and the program saw its own file.
     assert!(
-        output.contains(r#""status":"completed""#) && output.contains(r#""sum":5"#),
-        "expected the program's completed result, got: {output}"
+        output.contains(r#""status":"completed""#) && output.contains(r#""agent":"code""#),
+        "expected a completed code sub-agent, got: {output}"
     );
     assert!(
-        output.contains(r#""refused":"absent""#),
-        "expected the ungranted tool to be absent, got: {output}"
+        output.contains(r#"\"sum\":5"#) && output.contains(r#"\"listed\":true"#),
+        "expected the program's result, got: {output}"
     );
     assert!(
-        output.contains(r#""listing":{"#),
-        "expected the workspace listing from the granted tool, got: {output}"
+        output.contains("hello from a program"),
+        "expected the file the program wrote and read, got: {output}"
+    );
+
+    // The child is a sub-agent session whose turns record the program's
+    // progress: its log lines and the calls it paused on.
+    let envelope_start = output.find('{').expect("envelope");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&output[envelope_start..]).expect("envelope json");
+    let child_id = envelope["session_id"]
+        .as_str()
+        .expect("child session id")
+        .to_owned();
+    let child = api
+        .read_session(api::SessionReadParams {
+            session_id: child_id.clone(),
+            run_limit: Some(1),
+        })
+        .await?
+        .result
+        .session;
+    assert_eq!(
+        child
+            .origin
+            .as_ref()
+            .map(|origin| origin.parent_session_id.as_str()),
+        Some(session_id.as_str())
+    );
+    let child_run =
+        support::live::read_run(api.as_ref(), &SessionId::new(child_id), &child.runs[0].id)
+            .await?
+            .expect("child run");
+    let calls: Vec<_> = child_run
+        .tool_batches
+        .iter()
+        .map(|batch| {
+            batch
+                .calls
+                .iter()
+                .map(|call| call.tool_name.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            vec!["vfs_write_file".to_owned()],
+            vec!["vfs_list_dir".to_owned(), "vfs_read_file".to_owned()]
+        ],
+        "each pause is one batch in the child"
+    );
+    let child_text = serde_json::to_string(&child_run).expect("child run json");
+    assert!(
+        child_text.contains("writing notes"),
+        "expected the first log line in the child"
     );
     assert!(
-        output.contains("listed the workspace"),
-        "expected the program's console output, got: {output}"
+        child_text.contains("read back the notes"),
+        "expected the last log line in the child"
     );
     Ok(())
 }
@@ -230,6 +288,8 @@ async fn run_program_client(
 /// that sees a tool result ends the run with it.
 struct CodeScriptedLlm {
     blobs: Arc<dyn BlobStore>,
+    /// Code sub-agents' generations go to the code runtime.
+    driver: CodeRuntimeDriver,
 }
 
 impl CodeScriptedLlm {
@@ -360,6 +420,12 @@ impl CoreAgentLlm for CodeScriptedLlm {
         &self,
         request: LlmGenerationRequest,
     ) -> Result<LlmGenerationResult, CoreAgentIoError> {
+        if request.request.model.api_kind == engine::ProviderApiKind::CodeRuntime {
+            return llm_runtime::LlmGenerationAdapter::generate(&self.driver, request)
+                .await
+                .map(|execution| execution.result)
+                .map_err(io_error);
+        }
         let results = self
             .texts(&request, |kind| {
                 matches!(kind, ContextEntryKind::ToolResult { .. })

@@ -187,6 +187,7 @@ impl BuiltinToolPresentation {
                 ProviderApiKind::OpenAiResponses | ProviderApiKind::OpenAiCompletions => {
                     BuiltinToolSurface::CodexLike
                 }
+                ProviderApiKind::CodeRuntime => BuiltinToolSurface::Canonical,
             },
             Self::Canonical => BuiltinToolSurface::Canonical,
             Self::CodexLike => BuiltinToolSurface::CodexLike,

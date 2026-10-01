@@ -450,16 +450,13 @@ pub const GENERATE_MAX_MODELS: usize = 32;
 pub const GENERATE_MODEL_NAME_MAX_BYTES: usize = 64;
 pub const GENERATE_MODEL_DESCRIPTION_MAX_BYTES: usize = 1024;
 
-/// Grants `code_run`: the model hands a script to the code runtime, and the
-/// script calls tools itself. `tools` lists the logical ids of the session's
-/// own tools a script may call; a script can never reach a tool the session
-/// does not have. The limits bound one script execution.
+/// Grants `code_run`: the model hands a program to a code sub-agent, a child
+/// session configured like this one whose model is the code runtime. The
+/// program calls this session's tools itself. The limits bound one program.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,7 +469,6 @@ impl Default for CodeFeature {
     fn default() -> Self {
         Self {
             version: CURRENT_FEATURE_VERSION,
-            tools: Vec::new(),
             max_calls: None,
             max_concurrent_calls: None,
             deadline_ms: None,
@@ -480,7 +476,6 @@ impl Default for CodeFeature {
     }
 }
 
-pub const CODE_MAX_TOOLS: usize = 64;
 pub const CODE_MAX_CALLS: u32 = 1_000;
 pub const CODE_MAX_CONCURRENT_CALLS: u32 = 64;
 pub const CODE_MAX_DEADLINE_MS: u64 = 60 * 60 * 1_000;
@@ -860,24 +855,6 @@ fn validate_features(
 }
 
 fn validate_code_feature(code: &CodeFeature) -> Result<(), DomainError> {
-    if code.tools.len() > CODE_MAX_TOOLS {
-        return Err(DomainError::InvariantViolation(format!(
-            "code feature lists more than {CODE_MAX_TOOLS} tools"
-        )));
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for tool in &code.tools {
-        if tool.is_empty() || tool.trim() != tool {
-            return Err(DomainError::InvariantViolation(
-                "code feature tool ids must be non-empty without surrounding whitespace".into(),
-            ));
-        }
-        if !seen.insert(tool.as_str()) {
-            return Err(DomainError::InvariantViolation(format!(
-                "code feature lists tool {tool:?} more than once"
-            )));
-        }
-    }
     for (field, value, max) in [
         ("max calls", code.max_calls, CODE_MAX_CALLS),
         (
@@ -1300,6 +1277,9 @@ fn validate_context_config(
             | ProviderApiKind::OpenAiCompletions
             | ProviderApiKind::AnthropicMessages,
         ) => validate_provider_standalone_compaction(*compact_threshold_tokens, *target_tokens),
+        (Some(CompactionPolicy::ProviderStandalone { .. }), ProviderApiKind::CodeRuntime) => Err(
+            DomainError::ProviderCompatibility("the code runtime has no context to compact".into()),
+        ),
         (Some(CompactionPolicy::ProviderTriggered { .. }), api_kind) => {
             Err(DomainError::ProviderCompatibility(format!(
                 "provider-triggered compaction requires OpenAI Responses api kind, got {:?}",
@@ -1705,10 +1685,9 @@ mod tests {
     fn code_feature_accepts_bounded_grants() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         config.features.code = Some(CodeFeature::default());
-        config.validate().expect("an empty tool list is a valid grant");
+        config.validate().expect("the default grant is valid");
 
         config.features.code = Some(CodeFeature {
-            tools: vec!["web.fetch".to_owned(), "vfs.read_file".to_owned()],
             max_calls: Some(CODE_MAX_CALLS),
             max_concurrent_calls: Some(1),
             deadline_ms: Some(CODE_MAX_DEADLINE_MS),
@@ -1718,21 +1697,9 @@ mod tests {
     }
 
     #[test]
-    fn code_feature_rejects_invalid_tools_and_limits() {
+    fn code_feature_rejects_out_of_range_limits() {
         let mut config = config(ProviderApiKind::OpenAiResponses, None);
         let invalid = [
-            CodeFeature {
-                tools: vec!["web.fetch".to_owned(), "web.fetch".to_owned()],
-                ..CodeFeature::default()
-            },
-            CodeFeature {
-                tools: vec![" web.fetch".to_owned()],
-                ..CodeFeature::default()
-            },
-            CodeFeature {
-                tools: (0..=CODE_MAX_TOOLS).map(|index| format!("tool.{index}")).collect(),
-                ..CodeFeature::default()
-            },
             CodeFeature {
                 max_calls: Some(0),
                 ..CodeFeature::default()

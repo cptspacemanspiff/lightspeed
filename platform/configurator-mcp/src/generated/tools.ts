@@ -134,7 +134,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -162,13 +162,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,
@@ -1501,7 +1494,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -1529,13 +1522,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,
@@ -3877,7 +3863,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -3905,13 +3891,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,
@@ -6211,7 +6190,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -6239,13 +6218,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,
@@ -7528,7 +7500,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -7556,13 +7528,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,
@@ -8782,7 +8747,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants `code_run`: the model writes a TypeScript program, and the code\nruntime executes it durably. The program calls tools itself, concurrently\nwhen useful, and returns a JSON result. `tools` lists which of the\nsession's own tools a program may call, by logical id; a listed tool the\nsession does not have is unavailable to programs. Only tools whose calls\nleave no session state behind can be listed: `web.fetch`,\n`vfs.read_file`, `vfs.grep`, `vfs.glob`, and `vfs.list_dir`.",
+          "description": "Grants `code_run`: the model writes a TypeScript program and hands it to\na code sub-agent, a child session configured like this one whose model is\nLightspeed's code runtime. The program calls this session's tools itself,\nconcurrently when useful; each time it waits on calls, the child session\nrecords its log lines and those calls. The program's JSON result is the\ntool's reply.",
           "properties": {
             "deadlineMs": {
               "description": "Longest one program may run, in milliseconds, at most one hour.\nDefaults to ten minutes.",
@@ -8810,13 +8775,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
-            },
-            "tools": {
-              "description": "Logical ids of the tools a program may call, at most 64.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "version": {
               "default": 1,

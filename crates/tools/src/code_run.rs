@@ -1,19 +1,17 @@
-//! Code-mode tool contract: `code_run` hands a TypeScript program to the code
-//! runtime and returns its result (joined completion). The program calls
-//! tools itself, concurrently when it likes, so a fixed pipeline runs without
-//! a model turn per step. It is a system workflow-tool binding whose
-//! start-on-call recipe runs the code-run workflow; the session runtime only
-//! admits the call and pins the tools the program may reach.
+//! Code-mode tool contract: `code_run` hands a TypeScript program to a code
+//! sub-agent and returns its result (joined completion). The program runs in
+//! a child session of the caller whose model is the code runtime: each time
+//! the program waits on tool calls, the child records a turn with the
+//! program's log lines since the last turn and those calls; the child's own
+//! engine executes them with the session's full tool machinery, and their
+//! results resume the program. The child's final turn is the program's
+//! result, which becomes the call's reply.
 //!
-//! A program reaches only the session's own built-in tools that the `code`
-//! grant lists and that are safe to run outside the session's turn: tools
-//! whose results carry no session effects. Each one is always presented in
-//! its canonical function form, whatever the session's provider, because the
-//! program runs outside any provider request.
+//! The child is configured like the caller, so a program can call every tool
+//! the calling session has, in the form it takes under the code runtime.
 
 use engine::{
-    BuiltinToolCallRuntime, BuiltinToolSpec, CodePolicy, CodeToolRuntime, EnvironmentId,
-    EnvironmentsFeature, ModelSelection, ProviderApiKind, ToolName, WorkspaceAttachment,
+    BuiltinToolSpec, EnvironmentId, ModelSelection, ProviderApiKind, SubagentLimits, ToolName,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -28,37 +26,35 @@ pub const CODE_RUN_LOGICAL_ID: &str = "code.run";
 pub const CODE_RUN_TOOL_NAME: &str = "code_run";
 pub const CODE_RUN_WORKFLOW_TOOL_ID: &str = "code-run";
 pub const CODE_RUN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.code.run.v1";
-pub const CODE_RUN_WORKFLOW_TYPE: &str = "CodeRunWorkflow";
 /// The code runtime's execution workflow and its default task queue.
 pub const CODE_EXECUTION_WORKFLOW_TYPE: &str = "CodeExecutionWorkflow";
 pub const DEFAULT_CODE_RUNTIME_TASK_QUEUE: &str = "code-runtime";
-/// A script's own deadline when the grant sets none.
+/// The origin profile id recorded on code-run child sessions.
+pub const CODE_RUN_AGENT: &str = "code";
+/// The model route of code-run child sessions.
+pub const CODE_RUNTIME_PROVIDER_ID: &str = "code";
+pub const CODE_RUNTIME_MODEL: &str = "typescript";
+/// A program's own deadline when the grant sets none.
 pub const DEFAULT_CODE_DEADLINE_MS: u64 = 10 * 60 * 1_000;
 /// Hard bound on one call, above the longest deadline a grant may set so
-/// the script's own deadline always fires first.
+/// the program's own deadline always fires first.
 pub const CODE_RUN_DEADLINE_AFTER_MS: u64 = engine::CODE_MAX_DEADLINE_MS + 5 * 60 * 1_000;
 pub const MAX_CODE_RUN_SOURCE_BYTES: usize = 256 * 1024;
 pub const MAX_CODE_RUN_INPUT_BYTES: usize = 512 * 1024;
 pub const MAX_CODE_RUN_LABEL_BYTES: usize = 200;
 pub const CODE_RUN_EXECUTION_CONTEXT_VERSION: u32 = 1;
 
-/// Built-in tools a script may call. Each runs to completion inside one call
-/// and returns no session effects, so running it outside the session's turn
-/// cannot leave session state behind.
-pub const SCRIPTABLE_TOOL_IDS: &[&str] = &[
-    "web.fetch",
-    "vfs.read_file",
-    "vfs.grep",
-    "vfs.glob",
-    "vfs.list_dir",
-];
-
-pub fn is_scriptable_tool(id: &str) -> bool {
-    SCRIPTABLE_TOOL_IDS.contains(&id)
-}
-
 pub fn is_code_run_binding(tool_id: &str, semantic_type: &str) -> bool {
     tool_id == CODE_RUN_WORKFLOW_TOOL_ID && semantic_type == CODE_RUN_WORKFLOW_SEMANTIC_TYPE
+}
+
+/// The model route of a code-run child session.
+pub fn code_runtime_model() -> ModelSelection {
+    ModelSelection {
+        api_kind: ProviderApiKind::CodeRuntime,
+        provider_id: CODE_RUNTIME_PROVIDER_ID.to_owned(),
+        model: CODE_RUNTIME_MODEL.to_owned(),
+    }
 }
 
 /// Model arguments of `code_run`.
@@ -103,93 +99,7 @@ impl CodeRunArgs {
     }
 }
 
-/// A tool as a script sees it, carried in the `code.run` built-in settings
-/// so the advertised tool description can declare it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CodeToolChoice {
-    /// The logical id, which is also the script's call path:
-    /// `vfs.read_file` is `tools.vfs.read_file(args)`.
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: Value,
-}
-
-/// A granted tool resolved for script use: what the script is told, and the
-/// admitted runtime facts that execute it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScriptTool {
-    pub name: String,
-    pub tool_name: ToolName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: Value,
-    pub builtin: BuiltinToolCallRuntime,
-}
-
-impl ScriptTool {
-    pub fn choice(&self) -> CodeToolChoice {
-        CodeToolChoice {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            input_schema: self.input_schema.clone(),
-        }
-    }
-}
-
-/// Resolve one of the session's built-in tools for script use. The canonical
-/// presentation and a Chat Completions target select the tool's plain
-/// function form, which Lightspeed executes itself; the session's own
-/// provider might otherwise present it as a provider-native tool.
-pub fn script_tool(tool: &CodeToolRuntime, turn_model: &ModelSelection) -> ToolResult<ScriptTool> {
-    let id = tool.tool_id.as_str();
-    if !is_scriptable_tool(id) {
-        return Err(invalid(format!("{id} cannot be called from a script")));
-    }
-    let mut settings = match &tool.spec.settings {
-        Value::Object(settings) => settings.clone(),
-        Value::Null => Map::new(),
-        _ => return Err(invalid(format!("invalid settings for built-in {id}"))),
-    };
-    settings.insert("presentation".to_owned(), json!("canonical"));
-    let spec = BuiltinToolSpec {
-        settings: Value::Object(settings),
-    };
-    let model = ModelSelection {
-        api_kind: ProviderApiKind::OpenAiCompletions,
-        ..turn_model.clone()
-    };
-    let resolved = resolve(&tool.tool_id, &spec, &ToolTarget::from(&model))?;
-    let (tool_name, definition) = resolved
-        .into_iter()
-        .find_map(|resolved| match (resolved.definition, resolved.binding) {
-            (Definition::Function(definition), Some(_)) => Some((resolved.name, definition)),
-            _ => None,
-        })
-        .ok_or_else(|| invalid(format!("{id} has no function form for scripts")))?;
-    Ok(ScriptTool {
-        name: id.to_owned(),
-        tool_name,
-        description: definition.description,
-        input_schema: definition.input_schema,
-        builtin: BuiltinToolCallRuntime { spec, model },
-    })
-}
-
-/// Every granted tool a script can use, in grant order. Tools the session
-/// lacks never reach the policy; tools that cannot run from a script are
-/// skipped.
-pub fn script_tools(policy: &CodePolicy) -> Vec<ScriptTool> {
-    policy
-        .tools
-        .iter()
-        .filter_map(|tool| script_tool(tool, &policy.turn_model).ok())
-        .collect()
-}
-
-/// Limits for one script execution, resolved from the grant at admission.
+/// Limits for one program, resolved from the grant at admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodeRunLimits {
@@ -210,93 +120,116 @@ impl From<&engine::CodeFeature> for CodeRunLimits {
     }
 }
 
-/// Runtime-owned facts pinned when a call is admitted: the tools the script
-/// may call and the batch facts needed to execute them for the calling
-/// session. The model never sees or supplies any of it.
+impl CodeRunLimits {
+    /// A run input can come from anyone who may start runs on the child, so
+    /// a program always runs within the runtime's bounds.
+    pub fn bounded(self) -> Self {
+        Self {
+            max_calls: self
+                .max_calls
+                .map(|calls| calls.clamp(1, engine::CODE_MAX_CALLS)),
+            max_concurrent_calls: self
+                .max_concurrent_calls
+                .map(|calls| calls.clamp(1, engine::CODE_MAX_CONCURRENT_CALLS)),
+            deadline_ms: self.deadline_ms.clamp(1, engine::CODE_MAX_DEADLINE_MS),
+        }
+    }
+}
+
+/// The run input of a code-run child session: what its model, the code
+/// runtime, executes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeProgram {
+    pub source: String,
+    #[serde(default)]
+    pub input: Value,
+    pub limits: CodeRunLimits,
+}
+
+impl CodeProgram {
+    /// Read a child run's input. Plain text that is not a program document
+    /// is taken as source with default limits, so an operator can also start
+    /// a code session by hand.
+    pub fn parse(text: &str) -> Self {
+        serde_json::from_str::<Self>(text).unwrap_or_else(|_| Self {
+            source: text.to_owned(),
+            input: Value::Null,
+            limits: CodeRunLimits {
+                max_calls: None,
+                max_concurrent_calls: None,
+                deadline_ms: DEFAULT_CODE_DEADLINE_MS,
+            },
+        })
+    }
+}
+
+/// Runtime-owned facts pinned when a call is admitted. The execution reads
+/// this through the invocation's opaque execution context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodeRunExecutionContextV1 {
     pub version: u32,
-    pub session_id: String,
-    pub run_id: u64,
-    pub turn_id: u64,
-    pub batch_id: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_attachments: Vec<WorkspaceAttachment>,
+    pub parent_session_id: String,
+    pub parent_run_id: u64,
+    /// Depth, descendant, and concurrency limits the child counts against,
+    /// with the program's deadline as its run deadline.
+    pub grant_limits: SubagentLimits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vfs_working_directory: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_environment_id: Option<EnvironmentId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment_policy: Option<EnvironmentsFeature>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ScriptTool>,
+    pub parent_active_environment_id: Option<EnvironmentId>,
     pub limits: CodeRunLimits,
 }
 
-impl CodeRunExecutionContextV1 {
-    pub fn tool(&self, name: &str) -> Option<&ScriptTool> {
-        self.tools.iter().find(|tool| tool.name == name)
+/// A tool as a program sees it, carried in the `code.run` built-in settings
+/// so the advertised tool description can declare it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeToolChoice {
+    /// The exposed tool name: `read_file` is `tools.read_file(args)`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+/// Tools that make no sense to call from a program: `code_run` itself, and
+/// promise controls, which programs replace with ordinary promises.
+pub fn is_program_tool(logical_id: &str) -> bool {
+    logical_id != CODE_RUN_LOGICAL_ID && !logical_id.starts_with("concurrency.")
+}
+
+/// The function forms of a built-in tool under the code runtime, which is
+/// what a code-run child advertises and executes.
+pub fn builtin_choices(id: &ToolName, spec: &BuiltinToolSpec) -> Vec<CodeToolChoice> {
+    if !is_program_tool(id.as_str()) {
+        return Vec::new();
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodeRunStatus {
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeRunError {
-    /// The runtime's error code, such as `script_error` or `deadline_exceeded`.
-    pub code: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stack: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeRunLog {
-    pub level: String,
-    pub text: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeRunStats {
-    #[serde(default)]
-    pub generations: u32,
-    #[serde(default)]
-    pub calls: u32,
-    #[serde(default)]
-    pub rejected_calls: u32,
-}
-
-/// The `reply` payload, for both outcomes: the runtime's execution result as
-/// the model reads it. A completed run carries `output`; a failed one carries
-/// `error`. Both carry the script's console output.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CodeRunResultEnvelope {
-    pub status: CodeRunStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<CodeRunError>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub logs: Vec<CodeRunLog>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub logs_truncated: bool,
-    #[serde(default)]
-    pub stats: CodeRunStats,
+    let target = ToolTarget::from(&code_runtime_model());
+    let Ok(resolved) = resolve(id, spec, &target) else {
+        return Vec::new();
+    };
+    resolved
+        .into_iter()
+        .filter_map(|resolved| match (resolved.definition, resolved.binding) {
+            (Definition::Function(definition), Some(_)) => Some(CodeToolChoice {
+                name: resolved.name.as_str().to_owned(),
+                description: definition.description,
+                input_schema: definition.input_schema,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn code_run_tool_definition(tools: &[CodeToolChoice]) -> FunctionDefinition {
     let description = format!(
-        "Run a TypeScript program and return its result. Write the body of an async function: \
-         `input` is in scope, `return` a JSON value, and call tools with `await tools.<path>(args)`. \
-         Independent calls can run concurrently with Promise.all. A failed call throws a \
-         ToolError. There is no network, file system, or timer access except through tools; \
-         use `await sleep(ms)` to wait. console.log output is returned with the result. \
+        "Run a TypeScript program as a code sub-agent and return its result. Write the body of \
+         an async function: `input` is in scope, `return` a JSON value, and call tools with \
+         `await tools.<name>(args)`. Independent calls can run concurrently with Promise.all. \
+         A failed call throws a ToolError. Tool results arrive as this session would see them: \
+         parsed JSON when the result is JSON, otherwise text. There is no network, file \
+         system, or timer access except through tools; use `await sleep(ms)` to wait. \
+         console.log output is reported in the sub-agent's session as the program runs. \
          Prefer this over many separate tool calls for fixed, multi-step work.\n\n\
          Available in the program:\n```ts\n{}```",
         declarations(tools)
@@ -325,80 +258,30 @@ pub fn code_run_tool_definition(tools: &[CodeToolChoice]) -> FunctionDefinition 
     )
 }
 
-/// TypeScript declarations of everything a script can reach.
+/// TypeScript declarations of everything a program can reach.
 pub fn declarations(tools: &[CodeToolChoice]) -> String {
-    let mut root = Namespace::default();
-    for tool in tools {
-        let mut node = &mut root;
-        let parts: Vec<&str> = tool.name.split('.').collect();
-        let (last, parents) = parts.split_last().expect("split yields one part");
-        for part in parents {
-            node = node.child(part);
-        }
-        node.members.push((last.to_string(), Member::Tool(tool.clone())));
-    }
     let mut out = String::from(
         "declare const input: unknown;\n\
          declare function sleep(ms: number): Promise<void>;\n\
-         declare class ToolError extends Error { tool: string; code: string; details: unknown; }\n",
+         declare class ToolError extends Error { tool: string; code: string; details: unknown; }\n\
+         declare const tools: {\n",
     );
-    out.push_str("declare const tools: ");
-    render_namespace(&root, "", &mut out);
-    out.push_str(";\n");
+    for tool in tools {
+        if let Some(description) = &tool.description {
+            push_comment(description, "  ", &mut out);
+        }
+        let name = if is_identifier(&tool.name) {
+            tool.name.clone()
+        } else {
+            Value::String(tool.name.clone()).to_string()
+        };
+        out.push_str(&format!(
+            "  {name}(args: {}): Promise<unknown>;\n",
+            type_of(&tool.input_schema, "  ", &tool.input_schema, 0)
+        ));
+    }
+    out.push_str("};\n");
     out
-}
-
-#[derive(Default)]
-struct Namespace {
-    members: Vec<(String, Member)>,
-}
-
-enum Member {
-    Tool(CodeToolChoice),
-    Namespace(Namespace),
-}
-
-impl Namespace {
-    fn child(&mut self, name: &str) -> &mut Namespace {
-        let index = self
-            .members
-            .iter()
-            .position(|(member, kind)| member == name && matches!(kind, Member::Namespace(_)));
-        let index = index.unwrap_or_else(|| {
-            self.members
-                .push((name.to_owned(), Member::Namespace(Namespace::default())));
-            self.members.len() - 1
-        });
-        match &mut self.members[index].1 {
-            Member::Namespace(namespace) => namespace,
-            Member::Tool(_) => unreachable!("position matched a namespace"),
-        }
-    }
-}
-
-fn render_namespace(namespace: &Namespace, indent: &str, out: &mut String) {
-    let inner = format!("{indent}  ");
-    out.push_str("{\n");
-    for (name, member) in &namespace.members {
-        match member {
-            Member::Tool(tool) => {
-                if let Some(description) = &tool.description {
-                    push_comment(description, &inner, out);
-                }
-                out.push_str(&format!(
-                    "{inner}{name}(args: {}): Promise<unknown>;\n",
-                    type_of(&tool.input_schema, &inner, &tool.input_schema, 0)
-                ));
-            }
-            Member::Namespace(child) => {
-                out.push_str(&format!("{inner}{name}: "));
-                render_namespace(child, &inner, out);
-                out.push_str(";\n");
-            }
-        }
-    }
-    out.push_str(indent);
-    out.push('}');
 }
 
 fn push_comment(text: &str, indent: &str, out: &mut String) {
@@ -417,8 +300,8 @@ fn push_comment(text: &str, indent: &str, out: &mut String) {
 }
 
 /// A TypeScript type for a JSON Schema. Unfamiliar constructs widen to
-/// `unknown`: the declarations guide the author, and the runtime validates
-/// every call against the real schema.
+/// `unknown`: the declarations guide the author, and the child session
+/// validates every call against the real schema.
 fn type_of(schema: &Value, indent: &str, root: &Value, depth: usize) -> String {
     let Value::Object(object) = schema else {
         return match schema {
@@ -444,7 +327,12 @@ fn type_of(schema: &Value, indent: &str, root: &Value, depth: usize) -> String {
     }
     for keyword in ["anyOf", "oneOf"] {
         if let Some(Value::Array(options)) = object.get(keyword) {
-            return join_union(options.iter().map(|option| recurse(option, indent)).collect());
+            return join_union(
+                options
+                    .iter()
+                    .map(|option| recurse(option, indent))
+                    .collect(),
+            );
         }
     }
     if let Some(Value::Array(types)) = object.get("type") {
@@ -502,7 +390,11 @@ fn object_type(
             } else {
                 Value::String(name.clone()).to_string()
             };
-            let optional = if required.contains(&name.as_str()) { "" } else { "?" };
+            let optional = if required.contains(&name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
             lines.push_str(&format!(
                 "{inner}{key}{optional}: {};\n",
                 recurse(property, &inner)
@@ -511,7 +403,10 @@ fn object_type(
     }
     match object.get("additionalProperties") {
         Some(extra @ Value::Object(_)) => {
-            lines.push_str(&format!("{inner}[key: string]: {};\n", recurse(extra, &inner)));
+            lines.push_str(&format!(
+                "{inner}[key: string]: {};\n",
+                recurse(extra, &inner)
+            ));
         }
         Some(Value::Bool(false)) if lines.is_empty() => return "{}".to_owned(),
         _ if lines.is_empty() => return "{ [key: string]: unknown }".to_owned(),
@@ -536,7 +431,7 @@ fn join_union(types: Vec<String>) -> String {
     unique.join(" | ")
 }
 
-fn is_identifier(name: &str) -> bool {
+pub fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -559,64 +454,56 @@ fn invalid(message: impl Into<String>) -> ToolError {
 mod tests {
     use super::*;
 
-    fn turn_model(api_kind: ProviderApiKind) -> ModelSelection {
-        ModelSelection {
-            api_kind,
-            provider_id: "anthropic".to_owned(),
-            model: "claude-test".to_owned(),
-        }
-    }
+    #[test]
+    fn builtins_take_their_code_runtime_function_form() {
+        let spec = BuiltinToolSpec::default();
+        // Anthropic sessions present web.fetch as a provider-native tool;
+        // under the code runtime it is Lightspeed's own function.
+        let fetch = builtin_choices(&ToolName::new("web.fetch"), &spec);
+        assert_eq!(fetch.len(), 1);
+        assert_eq!(fetch[0].name, "web_fetch");
+        assert!(fetch[0].input_schema["properties"]["url"].is_object());
 
-    fn runtime(id: &str) -> CodeToolRuntime {
-        CodeToolRuntime {
-            tool_id: ToolName::new(id),
-            spec: BuiltinToolSpec {
-                settings: json!({ "presentation": "claude_code_like" }),
-            },
-        }
+        let write = builtin_choices(&ToolName::new("vfs.write_file"), &spec);
+        assert_eq!(write[0].name, "vfs_write_file");
+
+        // Provider-native search has no function form, and promise controls
+        // and code_run itself are not program tools.
+        assert!(builtin_choices(&ToolName::new("web.search"), &spec).is_empty());
+        assert!(builtin_choices(&ToolName::new("concurrency.await"), &spec).is_empty());
+        assert!(builtin_choices(&ToolName::new(CODE_RUN_LOGICAL_ID), &spec).is_empty());
     }
 
     #[test]
-    fn scripts_get_the_function_form_whatever_the_session_provider() {
-        // Anthropic sessions present web.fetch as a provider-native tool.
-        let tool = script_tool(
-            &runtime("web.fetch"),
-            &turn_model(ProviderApiKind::AnthropicMessages),
-        )
-        .expect("web.fetch resolves");
-        assert_eq!(tool.name, "web.fetch");
-        assert_eq!(tool.tool_name.as_str(), "web_fetch");
-        assert_eq!(tool.builtin.model.api_kind, ProviderApiKind::OpenAiCompletions);
-        assert_eq!(tool.builtin.model.provider_id, "anthropic");
-        assert!(tool.input_schema["properties"]["url"].is_object());
-
-        let read = script_tool(
-            &runtime("vfs.read_file"),
-            &turn_model(ProviderApiKind::AnthropicMessages),
-        )
-        .expect("vfs.read_file resolves");
-        assert_eq!(read.builtin.spec.settings["presentation"], "canonical");
-    }
-
-    #[test]
-    fn only_effect_free_tools_are_scriptable() {
-        let error = script_tool(
-            &runtime("vfs.write_file"),
-            &turn_model(ProviderApiKind::OpenAiResponses),
-        )
-        .expect_err("writes carry session effects");
-        assert!(error.to_string().contains("cannot be called from a script"));
-
-        let policy = CodePolicy {
-            feature: engine::CodeFeature::default(),
-            tools: vec![runtime("vfs.write_file"), runtime("web.fetch")],
-            turn_model: turn_model(ProviderApiKind::OpenAiResponses),
+    fn programs_parse_from_documents_or_plain_source() {
+        let limits = CodeRunLimits {
+            max_calls: Some(5),
+            max_concurrent_calls: None,
+            deadline_ms: 1_000,
         };
-        let names: Vec<_> = script_tools(&policy)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
-        assert_eq!(names, ["web.fetch"]);
+        let document = serde_json::to_string(&CodeProgram {
+            source: "return input;".to_owned(),
+            input: json!({ "n": 1 }),
+            limits,
+        })
+        .expect("encode");
+        assert_eq!(CodeProgram::parse(&document).limits, limits);
+        let plain = CodeProgram::parse("return 1;");
+        assert_eq!(plain.source, "return 1;");
+        assert_eq!(plain.limits.deadline_ms, DEFAULT_CODE_DEADLINE_MS);
+    }
+
+    #[test]
+    fn limits_stay_within_the_runtime_bounds() {
+        let bounded = CodeRunLimits {
+            max_calls: Some(u32::MAX),
+            max_concurrent_calls: Some(0),
+            deadline_ms: u64::MAX,
+        }
+        .bounded();
+        assert_eq!(bounded.max_calls, Some(engine::CODE_MAX_CALLS));
+        assert_eq!(bounded.max_concurrent_calls, Some(1));
+        assert_eq!(bounded.deadline_ms, engine::CODE_MAX_DEADLINE_MS);
     }
 
     #[test]
@@ -628,57 +515,38 @@ mod tests {
         };
         assert!(args("return 1;").validate().is_ok());
         assert!(args("  ").validate().is_err());
-        assert!(args(&"x".repeat(MAX_CODE_RUN_SOURCE_BYTES + 1)).validate().is_err());
         assert!(
-            CodeRunArgs {
-                label: Some("x".repeat(MAX_CODE_RUN_LABEL_BYTES + 1)),
-                ..args("return 1;")
-            }
-            .validate()
-            .is_err()
+            args(&"x".repeat(MAX_CODE_RUN_SOURCE_BYTES + 1))
+                .validate()
+                .is_err()
         );
     }
 
     #[test]
-    fn declarations_render_a_typed_namespace() {
+    fn declarations_render_every_tool_by_name() {
         let declared = declarations(&[
             CodeToolChoice {
-                name: "web.fetch".to_owned(),
+                name: "web_fetch".to_owned(),
                 description: Some("Fetch a page.".to_owned()),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "description": "Absolute URL." },
-                        "max_chars": { "type": ["integer", "null"] },
-                        "mode": { "enum": ["text", "raw"] }
+                        "max_chars": { "type": ["integer", "null"] }
                     },
                     "required": ["url"]
                 }),
             },
             CodeToolChoice {
-                name: "vfs.list_dir".to_owned(),
+                name: "list_dir".to_owned(),
                 description: None,
                 input_schema: json!({ "type": "object", "additionalProperties": false }),
             },
         ]);
-        assert!(declared.contains(
-            "declare const tools: {\n  web: {\n    /** Fetch a page. */\n    fetch(args: {\n      \
-             max_chars?: number | null;\n      mode?: \"text\" | \"raw\";\n      \
-             /** Absolute URL. */\n      url: string;\n    }): Promise<unknown>;\n  };\n  vfs: {\n    \
-             list_dir(args: {}): Promise<unknown>;\n  };\n};\n"
+        assert!(declared.ends_with(
+            "declare const tools: {\n  /** Fetch a page. */\n  web_fetch(args: {\n    \
+             max_chars?: number | null;\n    /** Absolute URL. */\n    url: string;\n  }): \
+             Promise<unknown>;\n  list_dir(args: {}): Promise<unknown>;\n};\n"
         ));
-    }
-
-    #[test]
-    fn the_definition_declares_the_granted_tools() {
-        let definition = code_run_tool_definition(&[CodeToolChoice {
-            name: "web.fetch".to_owned(),
-            description: None,
-            input_schema: json!({ "type": "object" }),
-        }]);
-        assert_eq!(definition.name.as_str(), CODE_RUN_TOOL_NAME);
-        let description = definition.description.expect("description");
-        assert!(description.contains("fetch(args: { [key: string]: unknown }): Promise<unknown>;"));
-        assert_eq!(definition.input_schema["required"], json!(["source"]));
     }
 }

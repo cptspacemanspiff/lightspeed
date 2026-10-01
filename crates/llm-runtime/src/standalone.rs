@@ -172,7 +172,7 @@ fn native_output_params(
                 }
             }
         }),
-        ProviderApiKind::OpenAiCompletions => return Ok(None),
+        ProviderApiKind::OpenAiCompletions | ProviderApiKind::CodeRuntime => return Ok(None),
         ProviderApiKind::AnthropicMessages => {
             if !anthropic_native_compatible(schema) {
                 return Ok(None);

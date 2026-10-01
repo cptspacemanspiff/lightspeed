@@ -181,10 +181,9 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
       )}
       {code && (
         <Chip icon={Code2} label="Code mode" title="Code mode">
-          <Heading title="Code mode" detail="Programs the agent writes may call these tools." />
-          {code.tools.length === 0
-            ? <Empty>Programs may not call any tools.</Empty>
-            : code.tools.map((tool) => <Row key={tool} primary={<span className="font-mono">{tool}</span>} />)}
+          <Heading title="Code mode" detail="Programs run as sub-agents with this session's tools." />
+          <Row primary="Tool calls" secondary={code.maxCalls !== undefined ? `Up to ${code.maxCalls}` : "Default limit"} />
+          <Row primary="Deadline" secondary={code.deadlineMs !== undefined ? `${Math.round(code.deadlineMs / 1000)}s` : "Default"} />
           {footer()}
         </Chip>
       )}

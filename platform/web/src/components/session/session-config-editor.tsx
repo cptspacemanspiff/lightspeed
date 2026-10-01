@@ -149,7 +149,7 @@ const featureInfo: Record<
   },
   code: {
     title: "Code mode",
-    description: "Let the agent hand a TypeScript program to the code runtime (code_run); the program calls granted tools itself, concurrently, and returns a JSON result.",
+    description: "Let the agent hand a TypeScript program to a code sub-agent (code_run) that calls this session's tools itself, concurrently, and returns a JSON result.",
     icon: Code2,
   },
   timers: {
@@ -179,15 +179,6 @@ const featureDisplayOrder: FeatureName[] = [
   "web",
   "timers",
 ];
-
-/** Tools a program may call: the ones whose calls leave no session state behind. */
-export const CODE_SCRIPTABLE_TOOLS = [
-  { id: "web.fetch", label: "Fetch web pages", requires: "web fetch" },
-  { id: "vfs.read_file", label: "Read files", requires: "a workspace attachment" },
-  { id: "vfs.grep", label: "Search file contents", requires: "a workspace attachment" },
-  { id: "vfs.glob", label: "Find files by pattern", requires: "a workspace attachment" },
-  { id: "vfs.list_dir", label: "List directories", requires: "a workspace attachment" },
-] as const;
 
 const CODE_LIMITS = [
   { key: "maxCalls", label: "Max tool calls", placeholder: "200", max: 1000, hint: "Tool calls one program may make, 1–1000." },
@@ -395,10 +386,6 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
       if (models.length) next.models = models;
     }
     if (name === "code") {
-      const allowed = new Set<string>(CODE_SCRIPTABLE_TOOLS.map((tool) => tool.id));
-      const tools = [...new Set(stringList(feature.tools).map((tool) => tool.trim()))]
-        .filter((tool) => allowed.has(tool));
-      if (tools.length) next.tools = tools;
       for (const limit of CODE_LIMITS) {
         const value = parseNumber(numberString(feature[limit.key]));
         if (value !== undefined && value > 0) next[limit.key] = value;
@@ -541,9 +528,6 @@ export function configError(config: SessionConfig | undefined, pinnedApiKind?: s
 
 /** Mirrors the gateway's and engine's rules for the code grant. */
 export function codeFeatureError(feature: RecordValue): string | null {
-  const allowed = new Set<string>(CODE_SCRIPTABLE_TOOLS.map((tool) => tool.id));
-  const unsupported = stringList(feature.tools).find((tool) => !allowed.has(tool));
-  if (unsupported) return `Code mode cannot grant ${unsupported}; programs may call only ${[...allowed].join(", ")}.`;
   for (const limit of CODE_LIMITS) {
     const value = feature[limit.key];
     if (value == null) continue;
@@ -776,13 +760,7 @@ export function SessionConfigEditor({
                 )}
                 {name === "subagents" && <SubagentFields feature={record(features.subagents)} profiles={profiles} patch={(fn) => patchFeature("subagents", fn)} />}
                 {name === "generate" && <GenerateFields feature={record(features.generate)} models={models} modelTiers={configTiers(config, modelTiers, configLayerLabel)} patch={(fn) => patchFeature("generate", fn)} />}
-                {name === "code" && (
-                  <CodeFields
-                    feature={record(features.code)}
-                    features={features}
-                    patch={(fn) => patchFeature("code", fn)}
-                  />
-                )}
+                {name === "code" && <CodeFields feature={record(features.code)} patch={(fn) => patchFeature("code", fn)} />}
                 {name === "mcp" && <McpFields feature={record(features.mcp)} servers={mcpServers} discoverySource={mcpToolDiscovery} patch={(fn) => patchFeature("mcp", fn)} />}
               </FeaturePanel>
             ))}
@@ -1730,54 +1708,19 @@ function SubagentFields({
 
 function CodeFields({
   feature,
-  features,
   patch,
 }: {
   feature: RecordValue;
-  features: RecordValue;
   patch: (fn: (feature: RecordValue) => void) => void;
 }) {
   const id = useId();
-  const granted = new Set(stringList(feature.tools));
-  const hasFetch = "fetch" in record(features.web);
-  const hasWorkspace = Array.isArray(record(features.vfs).workspaces)
-    && (record(features.vfs).workspaces as unknown[]).length > 0;
-  const available = (toolId: string) => toolId === "web.fetch" ? hasFetch : hasWorkspace;
-  const setTool = (toolId: string, enabled: boolean) =>
-    patch((next) => {
-      const tools = new Set(stringList(next.tools));
-      if (enabled) tools.add(toolId);
-      else tools.delete(toolId);
-      const ordered = CODE_SCRIPTABLE_TOOLS.map((tool) => tool.id).filter((tool) => tools.has(tool));
-      if (ordered.length) next.tools = ordered;
-      else delete next.tools;
-    });
   const customLimits = CODE_LIMITS.filter((limit) => feature[limit.key] != null).length;
   return (
     <div className="grid gap-4 sm:grid-cols-2">
-      <Field className="sm:col-span-2">
-        <FieldLabel>Tools programs may call</FieldLabel>
-        <div className="grid gap-2">
-          {CODE_SCRIPTABLE_TOOLS.map((tool) => (
-            <Label key={tool.id} className="gap-2 font-normal">
-              <Checkbox
-                checked={granted.has(tool.id)}
-                onCheckedChange={(checked) => setTool(tool.id, checked === true)}
-              />
-              <span>
-                {tool.label} <code className="text-xs text-muted-foreground">{tool.id}</code>
-                {granted.has(tool.id) && !available(tool.id) && (
-                  <span className="text-xs text-muted-foreground"> · needs {tool.requires} in this config</span>
-                )}
-              </span>
-            </Label>
-          ))}
-        </div>
-        <FieldDescription className="text-xs">
-          A program reaches only tools the session itself has, so each one also needs its own grant.
-          Tools that change session state, such as file writes, cannot be called from programs.
-        </FieldDescription>
-      </Field>
+      <p className="text-xs text-muted-foreground sm:col-span-2">
+        Each program runs as a sub-agent session configured like this one, so it can call every tool
+        this session has. Its log lines and tool calls are recorded in that session as it runs.
+      </p>
       <SettingsDisclosure
         className="sm:col-span-2"
         contentClassName="sm:grid-cols-2"

@@ -92,9 +92,9 @@ it("lists generation models with the default first", () => {
   expect(sessionResources({ features: { generate: {} } }, null).generate).toEqual({ models: [] });
 });
 
-it("lists the tools code mode programs may call", () => {
-  const resources = sessionResources({ features: { code: { tools: ["web.fetch", "vfs.grep"] } } }, null);
-  expect(resources.code).toEqual({ tools: ["web.fetch", "vfs.grep"] });
+it("reports code mode with its limits", () => {
+  const resources = sessionResources({ features: { code: { maxCalls: 50 } } }, null);
+  expect(resources.code).toEqual({ maxCalls: 50 });
   expect(hasResources(resources)).toBe(true);
-  expect(sessionResources({ features: { code: {} } }, null).code).toEqual({ tools: [] });
+  expect(sessionResources({ features: { code: {} } }, null).code).toEqual({});
 });

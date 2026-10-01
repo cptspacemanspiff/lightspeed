@@ -6,8 +6,7 @@ use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use crate::{
-    AppendEventsRequest, CodeRunFinishActivityRequest, CodeRunPrepareActivityRequest,
-    CodeRunPrepared, CodeToolCallActivityRequest, AwaitEnvironmentReadyActivityRequest, AwaitEnvironmentReadyActivityResult,
+    AppendEventsRequest, AwaitEnvironmentReadyActivityRequest, AwaitEnvironmentReadyActivityResult,
     AwaitMaterializationRequest, AwaitMaterializationResult, ContextCompactActivityRequest,
     CreateOrLoadSessionRequest, CreateOrLoadSessionResult, EnvironmentJobCancelActivityRequest,
     EnvironmentJobPollActivityRequest, EnvironmentJobPollActivityResult,
@@ -55,9 +54,6 @@ pub const ACTIVITY_SUBAGENT_PREPARE: &str = "WorkflowActivities::subagent_prepar
 pub const ACTIVITY_SUBAGENT_RESOLVE: &str = "WorkflowActivities::subagent_resolve";
 pub const ACTIVITY_SUBAGENT_CLOSE: &str = "WorkflowActivities::subagent_close";
 pub const ACTIVITY_MODEL_GENERATE: &str = "WorkflowActivities::model_generate";
-pub const ACTIVITY_CODE_RUN_PREPARE: &str = "WorkflowActivities::code_run_prepare";
-pub const ACTIVITY_CODE_TOOL_CALL: &str = "WorkflowActivities::code_tool_call";
-pub const ACTIVITY_CODE_RUN_FINISH: &str = "WorkflowActivities::code_run_finish";
 
 pub struct WorkflowActivities;
 
@@ -314,34 +310,6 @@ impl WorkflowActivities {
     pub async fn model_generate(
         _ctx: ActivityContext,
         _request: ModelGenerateActivityRequest,
-    ) -> Result<engine::PromiseResolution, ActivityError> {
-        unimplemented!("workflow activity definition only")
-    }
-
-    /// Read a pinned `code_run` call and build the code runtime's input.
-    #[activity(name = ACTIVITY_CODE_RUN_PREPARE)]
-    pub async fn code_run_prepare(
-        _ctx: ActivityContext,
-        _request: CodeRunPrepareActivityRequest,
-    ) -> Result<CodeRunPrepared, ActivityError> {
-        unimplemented!("workflow activity definition only")
-    }
-
-    /// Execute one script call against the pinned tools and return the
-    /// runtime's call outcome. Tool failures are outcomes, not errors.
-    #[activity(name = ACTIVITY_CODE_TOOL_CALL)]
-    pub async fn code_tool_call(
-        _ctx: ActivityContext,
-        _request: CodeToolCallActivityRequest,
-    ) -> Result<serde_json::Value, ActivityError> {
-        unimplemented!("workflow activity definition only")
-    }
-
-    /// Store the script's result and return the caller's `reply` resolution.
-    #[activity(name = ACTIVITY_CODE_RUN_FINISH)]
-    pub async fn code_run_finish(
-        _ctx: ActivityContext,
-        _request: CodeRunFinishActivityRequest,
     ) -> Result<engine::PromiseResolution, ActivityError> {
         unimplemented!("workflow activity definition only")
     }

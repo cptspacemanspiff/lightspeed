@@ -393,6 +393,11 @@ impl ActivityState {
             clients.openai_audio.clone(),
             provider_keys.clone(),
         ));
+        let code_runtime = Arc::new(crate::worker::CodeRuntimeDriver::new(
+            temporal_client.clone(),
+            blobs.clone(),
+            universe_id,
+        ));
         let llm = llm_runtime_with_clients(
             blobs,
             Some(secrets),
@@ -402,6 +407,7 @@ impl ActivityState {
             clients.openai_completions.clone(),
             clients.anthropic.clone(),
             crate::config::llm_debug_dumps_from_env()?,
+            Some(code_runtime),
         );
         let temporal_client_for_workflow_tools = temporal_client.clone();
         let hosted = Arc::new(
@@ -533,6 +539,7 @@ fn default_llm_runtime(
         openai_completions,
         anthropic,
         debug_dumps,
+        None,
     ))
 }
 
@@ -546,8 +553,13 @@ fn llm_runtime_with_clients(
     openai_completions: Arc<oai_completions::Client>,
     anthropic: Arc<am::Client>,
     debug_dumps: bool,
+    code_runtime: Option<Arc<crate::worker::CodeRuntimeDriver>>,
 ) -> Arc<dyn CoreAgentLlm> {
     let mut registry = LlmAdapterRegistry::new();
+    // Code sub-agents need a Temporal client to reach the code runtime.
+    if let Some(code_runtime) = code_runtime {
+        registry.insert_generation_adapter(ProviderApiKind::CodeRuntime, code_runtime);
+    }
 
     let mut adapter =
         OpenAiResponsesLlmAdapter::new(openai, blobs.clone()).with_debug_dumps(debug_dumps);

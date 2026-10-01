@@ -249,6 +249,9 @@ pub fn validate_provider_params(params: &ProviderParams) -> LlmAdapterResult<()>
         ProviderApiKind::OpenAiCompletions => {
             parse_params_body::<OpenAiCompletionsParams>(&params.body).map(|_| ())
         }
+        ProviderApiKind::CodeRuntime => Err(LlmAdapterError::InvalidProviderRequest {
+            message: "the code runtime takes no provider params".to_owned(),
+        }),
     }
 }
 

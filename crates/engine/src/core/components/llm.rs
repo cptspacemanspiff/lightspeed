@@ -14,6 +14,10 @@ pub enum ProviderApiKind {
     OpenAiResponses,
     AnthropicMessages,
     OpenAiCompletions,
+    /// Lightspeed's code runtime in the model's place: each turn reports the
+    /// tool calls a program made since the last turn, and the final turn its
+    /// result. Used by code-run child sessions.
+    CodeRuntime,
 }
 
 /// Deterministic model route: which provider API to speak, which configured

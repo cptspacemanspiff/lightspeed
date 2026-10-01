@@ -2166,7 +2166,6 @@ fn features_config_to_api(
         generate: features.generate.as_ref().map(generate_feature_to_api),
         code: features.code.as_ref().map(|code| api::CodeFeature {
             version: code.version,
-            tools: code.tools.clone(),
             max_calls: code.max_calls,
             max_concurrent_calls: code.max_concurrent_calls,
             deadline_ms: code.deadline_ms,
@@ -2431,6 +2430,7 @@ pub fn api_kind_to_str(api_kind: &ProviderApiKind) -> &'static str {
         ProviderApiKind::OpenAiResponses => "openai:responses",
         ProviderApiKind::AnthropicMessages => "anthropic:messages",
         ProviderApiKind::OpenAiCompletions => "openai:completions",
+        ProviderApiKind::CodeRuntime => "code:runtime",
     }
 }
 
@@ -2445,6 +2445,7 @@ pub fn api_kind_from_str(value: &str) -> Result<ProviderApiKind, AgentApiError> 
         "openai:completions" | "openai_completions" | "openAiCompletions" => {
             Ok(ProviderApiKind::OpenAiCompletions)
         }
+        "code:runtime" | "code_runtime" | "codeRuntime" => Ok(ProviderApiKind::CodeRuntime),
         _ => Err(AgentApiError::invalid_request(format!(
             "unsupported provider api kind: {value}"
         ))),
@@ -4548,7 +4549,6 @@ mod tests {
                 }),
                 code: Some(engine::CodeFeature {
                     version: engine::CURRENT_FEATURE_VERSION,
-                    tools: vec!["web.fetch".to_owned()],
                     max_calls: Some(50),
                     max_concurrent_calls: None,
                     deadline_ms: Some(60_000),
@@ -4665,7 +4665,6 @@ mod tests {
                     }),
                     code: Some(api::CodeFeature {
                         version: api::CURRENT_FEATURE_VERSION,
-                        tools: vec!["web.fetch".to_owned()],
                         max_calls: Some(50),
                         max_concurrent_calls: None,
                         deadline_ms: Some(60_000),

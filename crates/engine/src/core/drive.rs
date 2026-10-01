@@ -913,32 +913,11 @@ pub fn next_tool_batch_request(
                     .unwrap_or_else(|| config.model.clone()),
             })
         }),
-        code_policy: state.lifecycle.config.as_ref().and_then(|config| {
-            let feature = config.features.code.clone()?;
-            let tools = feature
-                .tools
-                .iter()
-                .filter_map(|id| {
-                    let tool_id = crate::ToolName::new(id.as_str());
-                    match &state.tooling.tools.get(&tool_id)?.kind {
-                        crate::ToolKind::Builtin(spec) => Some(crate::CodeToolRuntime {
-                            tool_id,
-                            spec: spec.clone(),
-                        }),
-                        _ => None,
-                    }
-                })
-                .collect();
-            Some(crate::CodePolicy {
-                feature,
-                tools,
-                turn_model: active_run
-                    .run_config
-                    .model_override
-                    .clone()
-                    .unwrap_or_else(|| config.model.clone()),
-            })
-        }),
+        code_policy: state
+            .lifecycle
+            .config
+            .as_ref()
+            .and_then(|config| config.features.code.clone()),
         calls,
     }))
 }
@@ -2585,6 +2564,11 @@ mod tests {
         session_config.features.environments = Some(environments.clone());
         session_config.features.subagents = Some(test_subagents_feature());
         session_config.features.generate = Some(crate::GenerateFeature::default());
+        let code = crate::CodeFeature {
+            max_calls: Some(40),
+            ..crate::CodeFeature::default()
+        };
+        session_config.features.code = Some(code.clone());
         let session_model = session_config.model.clone();
         open_session_with_config(&mut drive, session_config);
         let set_active = drive
@@ -2615,64 +2599,7 @@ mod tests {
             }),
             "the generate grant is pinned with the turn's effective model"
         );
-    }
-
-    #[test]
-    fn tool_batch_pins_only_granted_builtin_tools_into_the_code_policy() {
-        let session_id = SessionId::new("session-code-policy");
-        let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
-        let mut session_config = config();
-        let feature = crate::CodeFeature {
-            tools: vec![
-                "web.fetch".to_owned(),
-                "environment_read".to_owned(),
-                "vfs.read_file".to_owned(),
-            ],
-            ..crate::CodeFeature::default()
-        };
-        session_config.features.code = Some(feature.clone());
-        let session_model = session_config.model.clone();
-        open_session_with_config(&mut drive, session_config);
-        let fetch_spec = crate::BuiltinToolSpec {
-            settings: serde_json::json!({ "presentation": "canonical" }),
-        };
-        let fetch = ToolSpec {
-            name: ToolName::new("web.fetch"),
-            execution: Default::default(),
-            kind: ToolKind::Builtin(fetch_spec.clone()),
-            parallelism: ToolParallelism::ParallelSafe,
-        };
-        let function = test_tool_spec("environment_read");
-        let action = drive
-            .admit_command(
-                CoreAgentCommand::ReplaceTools {
-                    expected_revision: Some(drive.state().tooling.revision),
-                    tools: std::collections::BTreeMap::from([
-                        (fetch.name.clone(), fetch),
-                        (function.name.clone(), function),
-                    ]),
-                },
-                15,
-            )
-            .expect("replace tools");
-        commit_action(&mut drive, action);
-        request_run(&mut drive, BlobRef::from_bytes(b"input"));
-        let generation = drive_until_generate(&mut drive);
-        let request = drive_until_tool_batch_request(&mut drive, generation, "environment_read");
-
-        // A granted id the toolset lacks, or that is not a built-in, never
-        // reaches executors.
-        assert_eq!(
-            request.code_policy,
-            Some(crate::CodePolicy {
-                feature,
-                tools: vec![crate::CodeToolRuntime {
-                    tool_id: ToolName::new("web.fetch"),
-                    spec: fetch_spec,
-                }],
-                turn_model: session_model,
-            })
-        );
+        assert_eq!(request.code_policy, Some(code));
     }
 
     #[test]

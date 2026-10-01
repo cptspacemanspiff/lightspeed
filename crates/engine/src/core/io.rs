@@ -116,10 +116,9 @@ pub struct ToolInvocationBatchRequest {
     /// calling turn's model so executors never reconstruct session state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_policy: Option<GeneratePolicy>,
-    /// Admitted code grant for this tool batch, with the granted tools as
-    /// the session's toolset admitted them.
+    /// Admitted code grant for this tool batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_policy: Option<CodePolicy>,
+    pub code_policy: Option<crate::CodeFeature>,
     /// First promise id the executors of this dispatch may mint (see
     /// `ActiveToolBatch::promise_id_base`). A batch-unit dispatch counts up
     /// from here across all its calls; a per-call dispatch gets its own
@@ -157,24 +156,6 @@ pub struct ToolInvocationRequest {
 pub struct GeneratePolicy {
     pub feature: crate::GenerateFeature,
     pub turn_model: crate::ModelSelection,
-}
-
-/// The `code` grant a batch was dispatched under. `tools` holds only the
-/// granted ids that are built-in tools of this session's toolset, each with
-/// its admitted spec, so an executor can run them for a script without
-/// rebuilding the toolset. `turn_model` is the calling turn's model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodePolicy {
-    pub feature: crate::CodeFeature,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<CodeToolRuntime>,
-    pub turn_model: crate::ModelSelection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeToolRuntime {
-    pub tool_id: ToolName,
-    pub spec: crate::BuiltinToolSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,7 +337,7 @@ pub struct ToolInvocationCallRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_policy: Option<GeneratePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_policy: Option<CodePolicy>,
+    pub code_policy: Option<crate::CodeFeature>,
     /// The one promise id this call may mint: the batch base plus the
     /// call's index, so sibling per-call dispatches never collide.
     pub promise_id_base: u64,

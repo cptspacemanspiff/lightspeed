@@ -86,11 +86,13 @@ async fn text_with_provenance_is_unchanged_across_all_provider_apis() {
                         .unwrap(),
                 )
                 .unwrap(),
+                ProviderApiKind::CodeRuntime => unreachable!("not a provider wire format"),
             };
             let rendered = match api_kind {
                 ProviderApiKind::OpenAiResponses => &raw["input"][0]["content"],
                 ProviderApiKind::OpenAiCompletions => &raw["messages"][0]["content"],
                 ProviderApiKind::AnthropicMessages => &raw["messages"][0]["content"][0]["text"],
+                ProviderApiKind::CodeRuntime => unreachable!("not a provider wire format"),
             };
             assert_eq!(rendered, &json!(expected), "{api_kind:?}");
             assert_eq!(blobs.read_bytes(&reference).await.unwrap(), bytes);

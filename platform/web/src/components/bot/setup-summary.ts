@@ -21,7 +21,6 @@ export function capabilitySummary(config: Record<string, unknown> | undefined): 
     if (key === "mcp" && Array.isArray(value?.servers)) return `MCP servers (${value.servers.length})`;
     if (key === "subagents" && Array.isArray(value?.agents)) return `Sub-agents (${value.agents.length})`;
     if (key === "generate" && Array.isArray(value?.models)) return `Model generation (${value.models.length})`;
-    if (key === "code" && Array.isArray(value?.tools)) return `Code mode (${value.tools.length} tools)`;
     return FEATURE_LABELS[key] ?? key;
   });
   const model = (config?.model as { model?: string } | undefined)?.model;

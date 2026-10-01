@@ -147,6 +147,7 @@ async fn fixture(api: ProviderApiKind, case: &str) -> Value {
                 .await
                 .expect("completions"),
         ),
+        ProviderApiKind::CodeRuntime => unreachable!("not a provider wire format"),
     }
     .expect("request json")
 }

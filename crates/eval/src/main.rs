@@ -789,6 +789,9 @@ async fn build_runtime(
     let default_config = session_config(case, model.clone());
     let diagnostics = Arc::new(LlmDiagnostics::default());
     let registry = match provider.api_kind {
+        ProviderApiKind::CodeRuntime => {
+            anyhow::bail!("the code runtime is not an evaluation provider");
+        }
         ProviderApiKind::OpenAiResponses => {
             let openai = DiagnosticOpenAiResponsesApi {
                 inner: oai::Client::new(openai_config(provider))?,

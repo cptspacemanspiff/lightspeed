@@ -28,6 +28,8 @@ import {
   CALL_REQUESTED_SIGNAL,
   DEFAULT_HOLD_MS,
   DEFAULT_LIMITS,
+  DRIVER_RESULTS_SIGNAL,
+  DRIVER_STATE_QUERY,
   SLEEP_TOOL,
   TOOL_ERROR_TYPE,
   byteLength,
@@ -35,6 +37,9 @@ import {
   type CallOutcome,
   type CodeExecutionInput,
   type CodeExecutionResult,
+  type DriverResults,
+  type DriverState,
+  type DriverStep,
   type ExecutionError,
   type ExecutionLimits,
   type HostCallCompleted,
@@ -75,6 +80,8 @@ const issueUpdate = defineUpdate<IssueResponse, [IssueRequest]>(ISSUE_UPDATE);
 const nextUpdate = defineUpdate<NextResponse, [NextRequest]>(NEXT_UPDATE);
 const journalQuery = defineQuery<JournalPage, [JournalPageRequest]>(JOURNAL_QUERY);
 const callCompletedSignal = defineSignal<[HostCallCompleted]>(CALL_COMPLETED_SIGNAL);
+const driverResultsSignal = defineSignal<[DriverResults]>(DRIVER_RESULTS_SIGNAL);
+const driverStateQuery = defineQuery<DriverState>(DRIVER_STATE_QUERY);
 
 interface CallRecord {
   key: string;
@@ -84,6 +91,10 @@ interface CallRecord {
   done: boolean;
   /** Until when the current generation's sandbox waits for this call. */
   holdUntil: number;
+  /** Set for calls a driver executes: the id the driver answers with. */
+  driverCallId?: string;
+  /** The driver step that published this call. */
+  step?: number;
 }
 
 export async function CodeExecutionWorkflow(
@@ -107,6 +118,12 @@ export async function CodeExecutionWorkflow(
   let diverged: string | undefined;
   let running = 0;
   let rejected = 0;
+  const steps: DriverStep[] = [];
+  const driverCalls = new Map<string, CallRecord>();
+  // Log lines already published through driver steps. Every generation logs
+  // the same prefix again, so a step publishes only what follows it.
+  let logsReported = 0;
+  let finished = false;
   // Bumped whenever calls are registered, to wake `next` waiters.
   let revision = 0;
 
@@ -117,10 +134,12 @@ export async function CodeExecutionWorkflow(
   ): CodeExecutionResult => {
     // Fence out any sandbox still attached to this execution.
     generation += 1;
+    finished = true;
     return {
       ...fields,
       logs,
       logs_truncated: logsTruncated,
+      logs_reported: Math.min(logsReported, logs.length),
       stats: { generations: generation - 1, calls: calls.size, rejected_calls: rejected },
     };
   };
@@ -177,7 +196,9 @@ export async function CodeExecutionWorkflow(
   };
 
   const holdUntil = (tool: string): number => {
-    const hold = manifest.get(tool)?.hold_ms ?? DEFAULT_HOLD_MS;
+    const entry = manifest.get(tool);
+    // A driver call can only progress once the script is paused.
+    const hold = entry?.target.type === "driver" ? 0 : entry?.hold_ms ?? DEFAULT_HOLD_MS;
     return Math.min(Date.now() + hold, generationStartedAt + limits.generation_timeout_ms);
   };
 
@@ -228,6 +249,8 @@ export async function CodeExecutionWorkflow(
           });
           return { ok: true, value: value as Json };
         }
+        case "driver":
+          return callError("target_failed", "driver calls are not dispatched");
         case "host": {
           await getExternalWorkflowHandle(target.workflow_id).signal(
             CALL_REQUESTED_SIGNAL,
@@ -298,6 +321,11 @@ export async function CodeExecutionWorkflow(
         () => record(call, { ok: true, value: null }),
         (error) => record(call, failureOutcome(error)),
       );
+      return;
+    }
+    if (entry?.target.type === "driver") {
+      call.driverCallId = `${input.driver_call_prefix ?? "call"}_${calls.size}`;
+      driverCalls.set(call.driverCallId, call);
       return;
     }
     queue.push(call);
@@ -377,6 +405,19 @@ export async function CodeExecutionWorkflow(
     return { entries, total: journal.length };
   });
 
+  setHandler(driverStateQuery, (): DriverState => {
+    const step = steps[steps.length - 1];
+    return { status: finished ? "finished" : "running", ...(step ? { step } : {}) };
+  });
+
+  setHandler(driverResultsSignal, ({ results }) => {
+    for (const { call_id, outcome } of results) {
+      const call = driverCalls.get(call_id);
+      if (!call || call.done || call.step === undefined) continue;
+      record(call, checkResult(call, outcome));
+    }
+  });
+
   setHandler(callCompletedSignal, (completed) => {
     const known = [...calls.values()].some(
       (call) => call.callId === completed.call_id && !call.done,
@@ -395,6 +436,26 @@ export async function CodeExecutionWorkflow(
     // so at most one sandbox can speak for a generation number.
     retry: { maximumAttempts: 1 },
   });
+
+  /** Publish the driver calls the script is paused on as a new step. */
+  const publishStep = (logs: LogEntry[]): void => {
+    const pending = [...driverCalls.values()].filter(
+      (call) => !call.done && call.step === undefined,
+    );
+    if (pending.length === 0) return;
+    const index = steps.length;
+    for (const call of pending) call.step = index;
+    steps.push({
+      index,
+      calls: pending.map((call) => ({
+        call_id: call.driverCallId ?? call.callId,
+        tool: call.tool,
+        arguments: call.args,
+      })),
+      logs: logs.slice(logsReported),
+    });
+    logsReported = Math.max(logsReported, logs.length);
+  };
 
   const seed: [number, number] = [
     Math.floor(Math.random() * 0x1_0000_0000),
@@ -464,6 +525,7 @@ export async function CodeExecutionWorkflow(
     }
 
     const delivered = output.delivered;
+    publishStep(output.logs);
     const remaining = limits.deadline_ms - (Date.now() - startedAt);
     if (remaining <= 0) return fail(deadlineError);
     const progressed = await condition(() => journal.length > delivered, remaining);

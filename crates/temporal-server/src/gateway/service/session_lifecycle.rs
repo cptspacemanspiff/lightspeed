@@ -209,6 +209,47 @@ impl GatewayAgentApi {
         Ok(())
     }
 
+    /// A session's current configuration, read for trusted in-process use:
+    /// a code sub-agent is configured from its parent's.
+    pub(crate) async fn session_config_for_code_run(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<api::SessionConfig>, AgentApiError> {
+        let loaded = self.load_session_state(session_id).await?;
+        loaded
+            .state
+            .lifecycle
+            .config
+            .as_ref()
+            .map(api_projection::session_config_to_api)
+            .transpose()
+    }
+
+    /// A code sub-agent is configured from its parent rather than a profile.
+    pub(crate) async fn start_session_for_code_run(
+        &self,
+        session_id: &SessionId,
+        config: api::SessionConfig,
+    ) -> Result<(), AgentApiError> {
+        self.start_session_internal(
+            SessionStartParams {
+                metadata: Default::default(),
+                session_id: Some(session_id.as_str().to_owned()),
+                display_name: None,
+                config: Some(config),
+                profile: None,
+                // Like any delegated child, it inherits its retention root.
+                delete_after_close_ms: Some(None),
+                access: None,
+            },
+            false,
+            true,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Trusted in-process workflow-plugin entry point. The main API exposes
     /// the same immutable target and completion vocabulary through wire DTOs.
     pub async fn start_managed_session_for_workflow_with_profile(
