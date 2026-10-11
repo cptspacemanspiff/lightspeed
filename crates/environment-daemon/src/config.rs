@@ -1,8 +1,10 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
+    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, bail};
@@ -29,11 +31,13 @@ pub struct DaemonArgs {
     #[command(subcommand)]
     pub command: Option<DaemonCommand>,
 
-    /// WebSocket listener reachable by Lightspeed or an environment provider.
-    /// Defaults to 127.0.0.1:19091 unless a gateway URL makes the daemon
-    /// dial out instead.
+    /// WebSocket listener reachable by Lightspeed or an environment provider:
+    /// `host:port` (or `tcp://host:port`), or `unix:///absolute/path` for a
+    /// host that reaches the daemon over a local bridge (such as a VM's vsock
+    /// socket relay) rather than the network. Defaults to 127.0.0.1:19091
+    /// unless a gateway URL makes the daemon dial out instead.
     #[arg(long, env = "LIGHTSPEED_ENVD_LISTEN")]
-    pub listen: Option<SocketAddr>,
+    pub listen: Option<ListenAddr>,
 
     /// Public environment-gateway connect URL to dial outbound
     /// (`wss://host/environment-gateway/connect`).
@@ -101,10 +105,54 @@ pub enum DaemonCommand {
     Upgrade,
 }
 
+/// Where the passive WebSocket listener binds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListenAddr {
+    Tcp(SocketAddr),
+    /// Absolute path of a Unix socket.
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
+impl FromStr for ListenAddr {
+    type Err = anyhow::Error;
+
+    /// Accepts `host:port`, `tcp://host:port`, `unix:///path`, or `unix:/path`.
+    fn from_str(value: &str) -> Result<Self> {
+        if let Some(rest) = value.strip_prefix("unix:") {
+            // Checked first: `/run/envd.sock` is not absolute on Windows, which
+            // would otherwise report the wrong problem.
+            if cfg!(not(unix)) {
+                bail!("a Unix-socket listener needs a Unix host: {value}");
+            }
+            let path = PathBuf::from(rest.strip_prefix("//").unwrap_or(rest));
+            if !path.is_absolute() {
+                bail!("Unix-socket listener path must be absolute: {value}");
+            }
+            #[cfg(unix)]
+            return Ok(Self::Unix(path));
+        }
+        let addr = value.strip_prefix("tcp://").unwrap_or(value);
+        addr.parse()
+            .map(Self::Tcp)
+            .with_context(|| format!("listener must be host:port or unix:///path: {value}"))
+    }
+}
+
+impl fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(addr) => write!(f, "{addr}"),
+            #[cfg(unix)]
+            Self::Unix(path) => write!(f, "unix://{}", path.display()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
     /// Passive listener, when enabled.
-    pub listen: Option<SocketAddr>,
+    pub listen: Option<ListenAddr>,
     pub cwd: PathBuf,
     pub fs_root: PathBuf,
     pub state_dir: PathBuf,
@@ -452,13 +500,33 @@ mod tests {
         }
         .into_config()
         .expect("config");
-        assert_eq!(config.listen.map(|listen| listen.port()), Some(0));
+        assert_eq!(config.listen, Some("127.0.0.1:0".parse().unwrap()));
         assert!(config.registration.is_none());
         let defaulted = args(&temp).into_config().expect("config");
         assert_eq!(
             defaulted.listen,
             Some(DEFAULT_LISTEN.parse().expect("default"))
         );
+    }
+
+    #[test]
+    fn listener_addresses_select_tcp_or_a_unix_socket_by_scheme() {
+        let tcp = ListenAddr::Tcp("0.0.0.0:19091".parse().unwrap());
+        assert_eq!("0.0.0.0:19091".parse::<ListenAddr>().unwrap(), tcp);
+        assert_eq!("tcp://0.0.0.0:19091".parse::<ListenAddr>().unwrap(), tcp);
+        assert_eq!(tcp.to_string(), "0.0.0.0:19091");
+
+        #[cfg(unix)]
+        {
+            let unix = ListenAddr::Unix(PathBuf::from("/run/envd.sock"));
+            assert_eq!("unix:///run/envd.sock".parse::<ListenAddr>().unwrap(), unix);
+            assert_eq!("unix:/run/envd.sock".parse::<ListenAddr>().unwrap(), unix);
+            assert_eq!(unix.to_string(), "unix:///run/envd.sock");
+        }
+        assert!("unix://envd.sock".parse::<ListenAddr>().is_err());
+        assert!("unix:envd.sock".parse::<ListenAddr>().is_err());
+        assert!("ws://127.0.0.1:19091".parse::<ListenAddr>().is_err());
+        assert!("localhost".parse::<ListenAddr>().is_err());
     }
 
     #[test]
