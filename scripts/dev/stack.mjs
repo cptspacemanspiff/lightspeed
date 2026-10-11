@@ -32,6 +32,7 @@ let cli;
 let stopping = false;
 let phase = "reading command arguments";
 let infrastructureTouched = false;
+let supervisorState = null;
 
 try {
   await main();
@@ -44,6 +45,13 @@ async function main() {
   if (cli.help) return printHelp();
   process.once("SIGINT", () => void shutdown(0));
   process.once("SIGTERM", () => void shutdown(0));
+  // Closing the terminal sends SIGHUP to the supervisor alone: its children run
+  // in process groups of their own, so it must stop them itself. Writes to the
+  // closed terminal then fail with EIO; ignore them so cleanup still runs.
+  process.once("SIGHUP", () => {
+    for (const stream of [process.stdout, process.stderr]) stream.on("error", () => {});
+    void shutdown(0);
+  });
   phase = "loading the development environment";
   try {
     process.loadEnvFile(path.join(repoRoot, ".env"));
@@ -64,6 +72,7 @@ async function main() {
   phase = `starting the ${cli.profile} profile`;
   if (plan.profile !== "infra") {
     assertSupervisorStopped();
+    await stopOrphanedProcesses();
     claimSupervisor(plan.profile);
   }
   // Check host ports before starting Docker or running migrations.
@@ -584,6 +593,11 @@ async function runDevelopmentAction(options, env) {
       ? `Host supervisor: running (profile ${supervisor.profile}, pid ${supervisor.pid}, started ${supervisor.startedAt})`
       : "Host supervisor: stopped",
   );
+  const orphans = orphanedProcessGroups();
+  if (orphans.length > 0) {
+    console.log(`Orphaned processes from a supervisor that exited without stopping them: ${orphans.map((group) => `${group.name} (process group ${group.pgid})`).join(", ")}`);
+    console.log("Stop them with ./dev.sh stop; starting a profile also stops them.");
+  }
   await runChecked(
     "infra",
     "docker",
@@ -614,6 +628,7 @@ function claimSupervisor(profile) {
     pid: process.pid,
     profile,
     startedAt: new Date().toISOString(),
+    processGroups: [],
   };
   let descriptor;
   try {
@@ -629,13 +644,39 @@ function claimSupervisor(profile) {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+  supervisorState = state;
   process.once("exit", () => {
     try { clearSupervisorState(process.pid); }
     catch (error) { console.error(formatFailure(error, { phase: "removing supervisor state", debug })); }
   });
 }
 
+// Records a child's process group in the supervisor state, so that if the
+// supervisor dies without stopping it, a later stop or start still can. The
+// group leader's start time identifies it even after `cargo run` execs.
+function recordProcessGroup(name, record) {
+  if (!supervisorState || !record.child.pid || process.platform === "win32") return;
+  const startedAt = processStartTime(record.child.pid);
+  if (!startedAt) return;
+  supervisorState.processGroups.push({ name, pgid: record.child.pid, startedAt });
+  writeFileSync(supervisorStatePath, `${JSON.stringify(supervisorState, null, 2)}\n`, "utf8");
+}
+
+function processStartTime(pid) {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8", env: { ...process.env, LC_ALL: "C" },
+  });
+  return result.status === 0 ? result.stdout.trim() || null : null;
+}
+
 function readSupervisorState() {
+  const state = readSupervisorFile();
+  return state && isSupervisorProcess(state.pid) ? state : null;
+}
+
+// The state file whether or not its supervisor is alive: a dead supervisor's
+// file still names the process groups it may have left behind.
+function readSupervisorFile() {
   let state;
   try {
     state = JSON.parse(readFileSync(supervisorStatePath, "utf8"));
@@ -648,13 +689,39 @@ function readSupervisorState() {
     state?.version !== 1 ||
     !Number.isSafeInteger(state.pid) ||
     typeof state.profile !== "string" ||
-    typeof state.startedAt !== "string" ||
-    !isSupervisorProcess(state.pid)
+    typeof state.startedAt !== "string"
   ) {
     rmSync(supervisorStatePath, { force: true });
     return null;
   }
   return state;
+}
+
+// Process groups a dead supervisor recorded whose leader is still the process
+// it started: a matching start time leaves a reused group id alone.
+function orphanedProcessGroups() {
+  const state = readSupervisorFile();
+  if (!state || isSupervisorProcess(state.pid) || process.platform === "win32") return [];
+  return (Array.isArray(state.processGroups) ? state.processGroups : []).filter((group) =>
+    Number.isSafeInteger(group?.pgid) && group.pgid > 1 && typeof group.startedAt === "string" &&
+    processStartTime(group.pgid) === group.startedAt,
+  );
+}
+
+// Stops what a dead supervisor left running and removes its state file.
+// Returns the number of process groups stopped.
+async function stopOrphanedProcesses() {
+  const orphans = orphanedProcessGroups();
+  if (orphans.length > 0) {
+    console.log(`[supervisor] A previous supervisor exited without stopping ${orphans.map((group) => group.name).join(", ")}; stopping them.`);
+    await stopCommands(
+      orphans.map((group) => ({ name: group.name, child: { pid: group.pgid }, closed: false })),
+      { graceMs: 5_000, write: console.log },
+    );
+  }
+  const state = readSupervisorFile();
+  if (state && !isSupervisorProcess(state.pid)) clearSupervisorState(state.pid);
+  return orphans.length;
 }
 
 function isSupervisorProcess(pid) {
@@ -672,7 +739,7 @@ function isSupervisorProcess(pid) {
 async function stopSupervisor() {
   const supervisor = readSupervisorState();
   if (!supervisor) {
-    console.log("Host supervisor is not running.");
+    if (await stopOrphanedProcesses() === 0) console.log("Host supervisor is not running.");
     return;
   }
   console.log(
@@ -728,6 +795,7 @@ async function runChecked(name, command, args, env, options = {}) {
   console.log(`[${name}] ${displayCommand(command, args)}`);
   const record = launchCommand({ name, command, args, env, cwd: repoRoot }, options);
   children.push(record);
+  recordProcessGroup(name, record);
   return await record.done;
 }
 
@@ -736,6 +804,7 @@ function startProcess(processPlan) {
   console.log(`[${processPlan.name}] Starting ${displayCommand(processPlan.command, processPlan.args)}`);
   const record = launchCommand(processPlan);
   children.push(record);
+  recordProcessGroup(processPlan.name, record);
   record.done.then(() => {
     if (!stopping) return fail(commandFailure(processPlan, { code: 0, tail: record.tail() }));
   }, (error) => fail(error));
