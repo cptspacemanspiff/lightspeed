@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use async_trait::async_trait;
 use auth::{AuthGrantId, AuthProviderId, SecretId, SecretValue};
 pub use environment_protocol::control::targets::PowerState;
+pub use environment_protocol::shared::EnvironmentCapabilities;
 use environment_protocol::{
     control::targets::EnvironmentTemplate,
     shared::{EnvironmentTransport, ProviderTargetId},
@@ -528,6 +529,12 @@ pub struct EnvironmentIncarnationRecord {
     /// with the target, empty until first observation or when the provider
     /// offers no power control.
     pub power_states: Vec<PowerState>,
+    /// Capabilities the provider reported for this target, observed with
+    /// it. They decide which session tools are offered for the environment
+    /// without connecting to it; each call still checks what the live
+    /// endpoint negotiates. Default (none) until first observation.
+    #[serde(default)]
+    pub capabilities: EnvironmentCapabilities,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -961,6 +968,10 @@ pub struct ObserveRegisteredEnvironment {
     /// environment is closing or closed.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// Capabilities the daemon declared at this admission, replacing the
+    /// incarnation's. `None` for heartbeats and disconnects.
+    #[serde(default)]
+    pub capabilities: Option<EnvironmentCapabilities>,
 }
 
 /// Metadata keys the gateway writes about the daemon serving a registered
@@ -1066,6 +1077,8 @@ pub struct ObserveProvisionedEnvironment {
     pub status: EnvironmentStatus,
     /// Provider-reported supported power states for this target.
     pub power_states: Vec<PowerState>,
+    /// Provider-reported capabilities for this target.
+    pub capabilities: EnvironmentCapabilities,
     pub observed_at_ms: i64,
 }
 

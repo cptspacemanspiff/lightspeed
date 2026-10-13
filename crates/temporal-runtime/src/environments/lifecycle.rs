@@ -494,7 +494,7 @@ impl EnvironmentService {
     }
 
     /// Persist a provider observation when it changes the record: status,
-    /// target id, or the provider-reported power states.
+    /// target id, or the provider-reported power states or capabilities.
     async fn record_target_observation(
         &self,
         environment: &::environments::EnvironmentRecord,
@@ -503,7 +503,8 @@ impl EnvironmentService {
         let status = lifecycle_status_from_target(target.status);
         let changed = environment.status != status
             || environment.incarnation.provider_target_id.as_ref() != Some(&target.target_id)
-            || environment.incarnation.power_states != target.power_states;
+            || environment.incarnation.power_states != target.power_states
+            || environment.incarnation.capabilities != target.capabilities;
         if changed {
             EnvironmentStore::observe_provisioned_environment(
                 self.store.as_ref(),
@@ -512,6 +513,7 @@ impl EnvironmentService {
                     provider_target_id: target.target_id,
                     status,
                     power_states: target.power_states,
+                    capabilities: target.capabilities,
                     observed_at_ms: now_ms()?,
                 },
             )

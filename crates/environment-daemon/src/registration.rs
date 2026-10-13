@@ -146,6 +146,7 @@ async fn control_session(
         display_name: registration.display_name.clone(),
         metadata: registration.metadata.clone(),
         implementation: runtime.implementation(),
+        capabilities: runtime.capabilities(),
     });
     writer
         .send(Message::Text(serde_json::to_string(&register)?.into()))

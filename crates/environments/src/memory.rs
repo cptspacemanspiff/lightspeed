@@ -268,6 +268,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
                 template_id: Some(request.template_id),
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: EnvironmentCapabilities::default(),
                 created_at_ms: request.created_at_ms,
                 updated_at_ms: request.created_at_ms,
             },
@@ -341,6 +342,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
                 template_id: None,
                 adoption_source_target: Some(request.source_target),
                 power_states: Vec::new(),
+                capabilities: EnvironmentCapabilities::default(),
                 created_at_ms: request.created_at_ms,
                 updated_at_ms: request.created_at_ms,
             },
@@ -398,6 +400,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
                 template_id: None,
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: EnvironmentCapabilities::default(),
                 created_at_ms: request.created_at_ms,
                 updated_at_ms: request.created_at_ms,
             },
@@ -492,6 +495,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
                 template_id: None,
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: EnvironmentCapabilities::default(),
                 created_at_ms: request.created_at_ms,
                 updated_at_ms: request.created_at_ms,
             },
@@ -542,6 +546,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
             request.observation,
             request.observed_at_ms,
             request.metadata,
+            request.capabilities,
         )?;
         record.validate()?;
         Ok(record.clone())
@@ -682,6 +687,7 @@ impl EnvironmentStore for InMemoryEnvironmentRegistryStore {
         }
         record.incarnation.provider_target_id = Some(request.provider_target_id);
         record.incarnation.power_states = request.power_states;
+        record.incarnation.capabilities = request.capabilities;
         record.incarnation.updated_at_ms = request.observed_at_ms;
         record.updated_at_ms = request.observed_at_ms;
         record.status = request.status;
@@ -818,6 +824,7 @@ pub fn apply_registered_observation(
     observation: RegisteredConnectionObservation,
     observed_at_ms: i64,
     metadata: std::collections::BTreeMap<String, String>,
+    capabilities: Option<EnvironmentCapabilities>,
 ) -> Result<(), EnvironmentRegistryError> {
     if !record.is_registered() {
         return invalid("connection observations apply only to registered environments");
@@ -829,6 +836,9 @@ pub fn apply_registered_observation(
         return Ok(());
     }
     record.metadata.extend(metadata);
+    if let Some(capabilities) = capabilities {
+        record.incarnation.capabilities = capabilities;
+    }
     match observation {
         RegisteredConnectionObservation::Connected => {
             record.status = EnvironmentStatus::Ready;

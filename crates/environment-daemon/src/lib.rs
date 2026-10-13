@@ -197,6 +197,7 @@ fn environment_capabilities(config: &DaemonConfig) -> EnvironmentCapabilities {
         job_dependencies: true,
         job_queue_keys: true,
         network: true,
+        display: false,
     }
 }
 

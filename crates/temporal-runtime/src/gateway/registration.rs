@@ -679,9 +679,11 @@ async fn control_session(
     let observe = |observation: RegisteredConnectionObservation| {
         let store = store.clone();
         let environment_id = environment.environment_id.clone();
-        let metadata = match observation {
-            RegisteredConnectionObservation::Connected => daemon_build.metadata(),
-            _ => std::collections::BTreeMap::new(),
+        let (metadata, capabilities) = match observation {
+            RegisteredConnectionObservation::Connected => {
+                (daemon_build.metadata(), Some(register.capabilities.clone()))
+            }
+            _ => (std::collections::BTreeMap::new(), None),
         };
         async move {
             let result = EnvironmentStore::observe_registered_environment(
@@ -691,6 +693,7 @@ async fn control_session(
                     observation,
                     observed_at_ms: now_ms(),
                     metadata,
+                    capabilities,
                 },
             )
             .await;
@@ -877,7 +880,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use ed25519_dalek::{Signer as _, SigningKey};
-    use environment_protocol::shared::{ImplementationInfo, SecretString};
+    use environment_protocol::shared::{EnvironmentCapabilities, ImplementationInfo, SecretString};
     use environments::{
         BeginCloseEnvironment, CreateEnvironmentRegistrationKey, EnvironmentRegistrationKeyId,
         FinishCloseEnvironment, InMemoryEnvironmentRegistryStore, RegisteredIdentityMode,
@@ -904,6 +907,7 @@ mod tests {
                 git_sha: Some("1111111111111111111111111111111111111111".to_owned()),
                 target: Some("x86_64-unknown-linux-musl".to_owned()),
             },
+            capabilities: EnvironmentCapabilities::default().with_display(),
         }
     }
 
