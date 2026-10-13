@@ -123,6 +123,16 @@ pub enum EnvironmentPowerStateView {
     Stopped,
 }
 
+/// A capability an environment offers beyond files, commands, and jobs.
+/// Recorded from the provider's or daemon's report, so it is known without
+/// connecting; calls still check what the live environment negotiates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentCapabilityView {
+    /// A graphical session that can be observed and driven.
+    Display,
+}
+
 /// Staged idle policy. Thresholds are milliseconds of daemon-reported idle
 /// time and must be non-decreasing in the order pause, suspend, stop, close.
 /// Stages whose power state the provider does not support are skipped.
@@ -385,6 +395,10 @@ pub struct EnvironmentIncarnationView {
     /// observed or when the provider offers no power control.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub power_states: Vec<EnvironmentPowerStateView>,
+    /// Capabilities reported for this incarnation; empty until reported or
+    /// when the environment offers none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<EnvironmentCapabilityView>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }

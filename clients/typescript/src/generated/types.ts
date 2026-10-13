@@ -1375,6 +1375,15 @@ export type MethodGroup =
  */
 export type EnvironmentPowerStateView = "running" | "paused" | "suspended" | "stopped";
 /**
+ * A capability an environment offers beyond files, commands, and jobs.
+ * Recorded from the provider's or daemon's report, so it is known without
+ * connecting; calls still check what the live environment negotiates.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "EnvironmentCapabilityView".
+ */
+export type EnvironmentCapabilityView = "display";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "EnvironmentSourceView".
  */
@@ -4765,6 +4774,11 @@ export interface EnvironmentIdlePolicyView {
  * via the `definition` "EnvironmentIncarnationView".
  */
 export interface EnvironmentIncarnationView {
+  /**
+   * Capabilities reported for this incarnation; empty until reported or
+   * when the environment offers none.
+   */
+  capabilities?: EnvironmentCapabilityView[];
   createdAtMs: number;
   incarnationId: string;
   /**
