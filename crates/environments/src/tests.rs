@@ -224,11 +224,13 @@ async fn provider_observation_populates_only_the_current_incarnation() {
             provider_target_id: target_id.clone(),
             status: EnvironmentStatus::Ready,
             power_states: vec![PowerState::Running, PowerState::Paused],
+            capabilities: EnvironmentCapabilities::default().with_display(),
             observed_at_ms: 3_000,
         })
         .await
         .expect("observe");
     assert_eq!(observed.status, EnvironmentStatus::Ready);
+    assert!(observed.incarnation.capabilities.display);
     assert_eq!(observed.incarnation.provider_target_id, Some(target_id));
     assert_eq!(
         observed.incarnation.power_states,
@@ -455,6 +457,7 @@ async fn power_intent_and_idle_policy_are_provisioned_only_and_drive_reconcile_l
             provider_target_id: ProviderTargetId::new("target-1"),
             status: EnvironmentStatus::Ready,
             power_states: vec![PowerState::Running, PowerState::Paused],
+            capabilities: Default::default(),
             observed_at_ms: 3_000,
         })
         .await
@@ -487,6 +490,7 @@ async fn power_intent_and_idle_policy_are_provisioned_only_and_drive_reconcile_l
             provider_target_id: ProviderTargetId::new("target-1"),
             status: EnvironmentStatus::Paused,
             power_states: vec![PowerState::Running, PowerState::Paused],
+            capabilities: Default::default(),
             observed_at_ms: 5_000,
         })
         .await
@@ -525,6 +529,7 @@ async fn power_intent_and_idle_policy_are_provisioned_only_and_drive_reconcile_l
             provider_target_id: ProviderTargetId::new("target-1"),
             status: EnvironmentStatus::Ready,
             power_states: vec![PowerState::Running, PowerState::Paused],
+            capabilities: Default::default(),
             observed_at_ms: 7_000,
         })
         .await
@@ -738,6 +743,7 @@ async fn registered_admission_is_keyed_by_daemon_identity() {
             observation: RegisteredConnectionObservation::Disconnected,
             observed_at_ms: 3_000,
             metadata: BTreeMap::new(),
+            capabilities: None,
         })
         .await
         .expect("disconnect");
@@ -758,10 +764,12 @@ async fn registered_admission_is_keyed_by_daemon_identity() {
                 protocol_version: 3,
             }
             .metadata(),
+            capabilities: Some(EnvironmentCapabilities::default().with_display()),
         })
         .await
         .expect("reconnect");
     assert_eq!(back.status, EnvironmentStatus::Ready);
+    assert!(back.incarnation.capabilities.display);
     assert_eq!(back.last_seen_at_ms, Some(4_000));
     assert_eq!(
         back.metadata
@@ -806,6 +814,7 @@ async fn registered_admission_is_keyed_by_daemon_identity() {
             observation: RegisteredConnectionObservation::Connected,
             observed_at_ms: 5_200,
             metadata: BTreeMap::from([(ENVD_GIT_SHA_METADATA_KEY.to_owned(), "cccc".to_owned())]),
+            capabilities: Some(EnvironmentCapabilities::default()),
         })
         .await
         .expect("late heartbeat");
@@ -924,6 +933,7 @@ async fn registration_key_policy_gates_admission_without_touching_reconnects() {
             observation: RegisteredConnectionObservation::Connected,
             observed_at_ms: 5_500,
             metadata: BTreeMap::new(),
+            capabilities: None,
         })
         .await
         .expect("reconnect after revoke");

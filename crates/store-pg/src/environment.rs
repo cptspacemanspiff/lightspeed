@@ -4,14 +4,15 @@ use auth::{AuthGrantId, AuthProviderId, SecretId};
 use environment_protocol::shared::ProviderTargetId;
 use environments::{
     AdoptEnvironment, BeginCloseEnvironment, CreateEnvironment, CreateExternalEnvironment,
-    CreateRegisteredEnvironment, EnvironmentCredentialRecord, EnvironmentCredentialSource,
-    EnvironmentCredentialStore, EnvironmentDaemonId, EnvironmentId, EnvironmentIncarnationId,
-    EnvironmentIncarnationRecord, EnvironmentProviderBindingId, EnvironmentProviderBindingRecord,
-    EnvironmentProviderBindingStatus, EnvironmentProviderBindingStore, EnvironmentProviderId,
-    EnvironmentProviderRecord, EnvironmentProviderStore, EnvironmentProvisionRequestId,
-    EnvironmentRecord, EnvironmentRegistrationKeyId, EnvironmentRegistryError, EnvironmentSource,
-    EnvironmentStatus, EnvironmentStore, EnvironmentTemplateId, FailEnvironmentLifecycle,
-    FinishCloseEnvironment, ListEnvironmentCredentials, ListEnvironmentProviders, ListEnvironments,
+    CreateRegisteredEnvironment, EnvironmentCapabilities, EnvironmentCredentialRecord,
+    EnvironmentCredentialSource, EnvironmentCredentialStore, EnvironmentDaemonId, EnvironmentId,
+    EnvironmentIncarnationId, EnvironmentIncarnationRecord, EnvironmentProviderBindingId,
+    EnvironmentProviderBindingRecord, EnvironmentProviderBindingStatus,
+    EnvironmentProviderBindingStore, EnvironmentProviderId, EnvironmentProviderRecord,
+    EnvironmentProviderStore, EnvironmentProvisionRequestId, EnvironmentRecord,
+    EnvironmentRegistrationKeyId, EnvironmentRegistryError, EnvironmentSource, EnvironmentStatus,
+    EnvironmentStore, EnvironmentTemplateId, FailEnvironmentLifecycle, FinishCloseEnvironment,
+    ListEnvironmentCredentials, ListEnvironmentProviders, ListEnvironments,
     ObserveProvisionedEnvironment, ObserveRegisteredEnvironment, PowerState,
     PutEnvironmentCredential, PutEnvironmentProvider, PutEnvironmentProviderBinding,
     RegisteredConnectionObservation, RegisteredIdentityMode, SetEnvironmentIdlePolicy,
@@ -39,7 +40,7 @@ const ENVIRONMENT_COLUMNS: &str = r#"
     e.public_ingress_enabled, e.public_endpoint, e.metadata_json,
     e.created_at_ms, e.updated_at_ms,
     i.incarnation_id, i.provision_request_id, i.provider_target_id,
-    i.template_id, i.adoption_source_target, i.power_states_json,
+    i.template_id, i.adoption_source_target, i.power_states_json, i.capabilities_json,
     i.created_at_ms AS incarnation_created_at_ms,
     i.updated_at_ms AS incarnation_updated_at_ms
 "#;
@@ -521,6 +522,7 @@ impl EnvironmentStore for PgStore {
                 template_id: None,
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: EnvironmentCapabilities::default(),
                 created_at_ms: request.created_at_ms,
                 updated_at_ms: request.created_at_ms,
             },
@@ -738,6 +740,7 @@ impl EnvironmentStore for PgStore {
         };
         sqlx::query(
             r#"
+            WITH observed AS (
             UPDATE environments SET
                 status = CASE
                     WHEN status IN ('closing', 'closed') THEN status
@@ -755,6 +758,15 @@ impl EnvironmentStore for PgStore {
                     WHEN status IN ('closing', 'closed') THEN updated_at_ms
                     ELSE GREATEST(updated_at_ms, $4) END
             WHERE universe_id = $1 AND environment_id = $2 AND source_kind = 'registered'
+            RETURNING universe_id, environment_id, current_incarnation_id, status
+            )
+            UPDATE environment_incarnations i SET capabilities_json = $6::jsonb
+            FROM observed o
+            WHERE $6::jsonb IS NOT NULL
+              AND o.status NOT IN ('closing', 'closed')
+              AND i.universe_id = o.universe_id
+              AND i.environment_id = o.environment_id
+              AND i.incarnation_id = o.current_incarnation_id
             "#,
         )
         .bind(self.config.universe_id)
@@ -765,6 +777,13 @@ impl EnvironmentStore for PgStore {
             "encode daemon build metadata",
             &request.metadata,
         )?)
+        .bind(
+            request
+                .capabilities
+                .as_ref()
+                .map(|capabilities| json_value("encode capabilities", capabilities))
+                .transpose()?,
+        )
         .execute(&self.pool)
         .await
         .map_err(|error| sql_error("observe registered environment", error))?;
@@ -908,10 +927,11 @@ impl EnvironmentStore for PgStore {
         {
             return invalid("provider target conflicts with current incarnation");
         }
-        sqlx::query("UPDATE environment_incarnations SET provider_target_id=$4, power_states_json=$5, updated_at_ms=$6 WHERE universe_id=$1 AND environment_id=$2 AND incarnation_id=$3")
+        sqlx::query("UPDATE environment_incarnations SET provider_target_id=$4, power_states_json=$5, capabilities_json=$6, updated_at_ms=$7 WHERE universe_id=$1 AND environment_id=$2 AND incarnation_id=$3")
             .bind(self.config.universe_id).bind(request.environment_id.as_str()).bind(current.incarnation.incarnation_id.as_str())
             .bind(request.provider_target_id.as_str())
             .bind(json_value("encode power states", &request.power_states)?)
+            .bind(json_value("encode capabilities", &request.capabilities)?)
             .bind(request.observed_at_ms)
             .execute(&self.pool).await.map_err(|error| sql_error("observe environment incarnation", error))?;
         sqlx::query("UPDATE environments SET status=$3, updated_at_ms=$4 WHERE universe_id=$1 AND environment_id=$2")
@@ -1254,6 +1274,7 @@ fn environment_from_row(
                 .try_get("adoption_source_target")
                 .map_err(|e| sql_error("decode adoption source target", e))?,
             power_states: json_column(row, "power_states_json")?,
+            capabilities: json_column(row, "capabilities_json")?,
             created_at_ms: scalar(row, "incarnation_created_at_ms")?,
             updated_at_ms: scalar(row, "incarnation_updated_at_ms")?,
         },

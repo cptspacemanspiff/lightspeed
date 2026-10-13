@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::{CURRENT_PROTOCOL_VERSION, ImplementationInfo, SecretString};
+use crate::shared::{
+    CURRENT_PROTOCOL_VERSION, EnvironmentCapabilities, ImplementationInfo, SecretString,
+};
 
 /// Public route an `envd` dials to register and hold its control connection.
 pub const CONNECT_PATH: &str = "/environment-gateway/connect";
@@ -98,6 +100,11 @@ pub struct RegisterParams {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
     pub implementation: ImplementationInfo,
+    /// What the daemon will negotiate on its data connections, recorded so
+    /// the gateway can decide which session tools apply to this environment
+    /// before connecting. Absent on older daemons, which record none.
+    #[serde(default)]
+    pub capabilities: EnvironmentCapabilities,
 }
 
 /// What the daemon learns about the environment it serves. Written to the

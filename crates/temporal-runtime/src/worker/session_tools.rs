@@ -4275,6 +4275,7 @@ mod tests {
                 template_id: Some(EnvironmentTemplateId::new("test-template")),
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 created_at_ms: 1,
                 updated_at_ms: 1,
             },
@@ -4565,6 +4566,7 @@ mod tests {
                 provider_target_id: target_id,
                 status: EnvironmentStatus::Offline,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 observed_at_ms,
             })
             .await
@@ -4622,6 +4624,7 @@ mod tests {
                     provider_target_id: ProviderTargetId::new("target-environment-allowed-1"),
                     status,
                     power_states,
+                    capabilities: Default::default(),
                     observed_at_ms: 11,
                 })
                 .await
@@ -4904,6 +4907,7 @@ mod tests {
                 provider_target_id: ProviderTargetId::new("target-pending"),
                 status: EnvironmentStatus::Ready,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 observed_at_ms: 20,
             })
             .await

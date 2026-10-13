@@ -282,6 +282,7 @@ mod tests {
                 provider_target_id: target_id.clone(),
                 status: EnvironmentStatus::Offline,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 observed_at_ms: 10,
             })
             .await
@@ -476,6 +477,7 @@ mod tests {
                 provider_target_id: ProviderTargetId::new("target-1"),
                 status: EnvironmentStatus::Ready,
                 power_states: vec![PowerState::Running, PowerState::Paused],
+                capabilities: Default::default(),
                 observed_at_ms: 20,
             })
             .await
@@ -796,6 +798,7 @@ mod tests {
                     provider_target_id: ProviderTargetId::new("target-1"),
                     status,
                     power_states: vec![PowerState::Running, PowerState::Paused],
+                    capabilities: Default::default(),
                     observed_at_ms: 30,
                 })
                 .await
@@ -861,6 +864,7 @@ mod tests {
                 provider_target_id: ProviderTargetId::new("target-1"),
                 status: EnvironmentStatus::Ready,
                 power_states: vec![PowerState::Running, PowerState::Paused],
+                capabilities: Default::default(),
                 observed_at_ms: 20,
             })
             .await
@@ -901,6 +905,7 @@ mod tests {
                         provider_target_id: ProviderTargetId::new("target-1"),
                         status,
                         power_states: vec![PowerState::Running, PowerState::Paused],
+                        capabilities: Default::default(),
                         observed_at_ms: at,
                     })
                     .await
@@ -953,6 +958,7 @@ mod tests {
                 provider_target_id: ProviderTargetId::new("target-1"),
                 status: EnvironmentStatus::Offline,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 observed_at_ms: 60,
             })
             .await
@@ -985,6 +991,7 @@ mod tests {
                         provider_target_id: ProviderTargetId::new("target-1"),
                         status,
                         power_states: Vec::new(),
+                        capabilities: Default::default(),
                         observed_at_ms: 20,
                     })
                     .await

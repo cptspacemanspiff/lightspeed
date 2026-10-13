@@ -2079,13 +2079,18 @@ async fn pg_live_universe_environments_are_independent_of_sessions() {
                 environments::PowerState::Paused,
                 environments::PowerState::Stopped,
             ],
+            capabilities: environments::EnvironmentCapabilities::default().with_display(),
             observed_at_ms: 30,
         })
         .await
         .expect("upsert target");
-    // Power intent, observed power states, and idle policy round-trip
-    // and feed the reconcile/reaper queries.
+    // Power intent, observed power states and capabilities, and idle policy
+    // round-trip and feed the reconcile/reaper queries.
     assert_eq!(instance.desired_power, environments::PowerState::Running);
+    assert_eq!(
+        instance.incarnation.capabilities,
+        environments::EnvironmentCapabilities::default().with_display()
+    );
     assert_eq!(
         instance.incarnation.power_states,
         vec![
@@ -2144,6 +2149,7 @@ async fn pg_live_universe_environments_are_independent_of_sessions() {
             provider_target_id: target_id.clone(),
             status: EnvironmentStatus::Ready,
             power_states: vec![environments::PowerState::Running],
+            capabilities: Default::default(),
             observed_at_ms: 32,
         })
         .await
@@ -2178,6 +2184,7 @@ async fn pg_live_universe_environments_are_independent_of_sessions() {
             provider_target_id: target_id.clone(),
             status: EnvironmentStatus::Offline,
             power_states: vec![environments::PowerState::Running],
+            capabilities: Default::default(),
             observed_at_ms: 35,
         })
         .await
@@ -2783,6 +2790,90 @@ fn create_oauth_client_record(client_id: &OAuthClientId) -> CreateOAuthClientRec
         authorization_server_scopes_supported: vec!["contacts.read".to_owned()],
         created_at_ms: 10,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ./dev.sh infra or compatible Postgres + MinIO env"]
+async fn pg_live_registered_admission_records_daemon_capabilities() {
+    use environments::{
+        CreateEnvironmentRegistrationKey, CreateRegisteredEnvironment, EnvironmentCapabilities,
+        EnvironmentIncarnationId, EnvironmentRegistrationKeyId, EnvironmentRegistrationKeyStore,
+        ObserveRegisteredEnvironment, RegisteredConnectionObservation, RegisteredIdentityMode,
+        RegistrationKeyPolicy, mint_registration_key,
+    };
+
+    let store = live_store("registered-capabilities", 1024).await;
+    let minted = mint_registration_key(
+        EnvironmentRegistrationKeyId::new("rk-caps"),
+        RegistrationKeyPolicy {
+            display_name: "desktops".to_owned(),
+            identity_mode: RegisteredIdentityMode::Persistent,
+            max_active_environments: None,
+            ephemeral_disconnect_grace_ms: None,
+            expires_at_ms: None,
+        },
+        1_000,
+    )
+    .expect("mint");
+    store
+        .create_registration_key(CreateEnvironmentRegistrationKey {
+            secret_hash: minted.secret_hash.clone(),
+            record: minted.record.clone(),
+        })
+        .await
+        .expect("create key");
+    let environment_id = EnvironmentId::new("env-caps");
+    let created = store
+        .create_registered_environment(CreateRegisteredEnvironment {
+            registration_key_id: EnvironmentRegistrationKeyId::new("rk-caps"),
+            environment_id: environment_id.clone(),
+            incarnation_id: EnvironmentIncarnationId::new("env-caps-inc"),
+            daemon_public_key: "31".repeat(32),
+            display_name: None,
+            metadata: Default::default(),
+            created_at_ms: 2_000,
+        })
+        .await
+        .expect("register");
+    assert_eq!(
+        created.incarnation.capabilities,
+        EnvironmentCapabilities::default()
+    );
+
+    let observe = |observation, at, capabilities| {
+        store.observe_registered_environment(ObserveRegisteredEnvironment {
+            environment_id: environment_id.clone(),
+            observation,
+            observed_at_ms: at,
+            metadata: Default::default(),
+            capabilities,
+        })
+    };
+    let display = EnvironmentCapabilities::default().with_display();
+    let connected = observe(
+        RegisteredConnectionObservation::Connected,
+        3_000,
+        Some(display.clone()),
+    )
+    .await
+    .expect("connect");
+    assert_eq!(connected.incarnation.capabilities, display);
+
+    // Heartbeats and disconnects carry no declaration and keep the last one.
+    let offline = observe(RegisteredConnectionObservation::Disconnected, 4_000, None)
+        .await
+        .expect("disconnect");
+    assert_eq!(offline.incarnation.capabilities, display);
+
+    // A replacement daemon's declaration replaces the previous one.
+    let headless = observe(
+        RegisteredConnectionObservation::Connected,
+        5_000,
+        Some(EnvironmentCapabilities::default()),
+    )
+    .await
+    .expect("reconnect");
+    assert!(!headless.incarnation.capabilities.display);
 }
 
 #[tokio::test(flavor = "current_thread")]

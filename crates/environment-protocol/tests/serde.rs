@@ -412,5 +412,6 @@ fn remote_environment_capabilities() -> EnvironmentCapabilities {
         job_dependencies: true,
         job_queue_keys: true,
         network: true,
+        display: false,
     }
 }

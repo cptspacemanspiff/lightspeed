@@ -174,6 +174,7 @@ mod tests {
                 template_id: Some(EnvironmentTemplateId::new("template-a")),
                 adoption_source_target: None,
                 power_states: Vec::new(),
+                capabilities: Default::default(),
                 created_at_ms: 1,
                 updated_at_ms: 1,
             },

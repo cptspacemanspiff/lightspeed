@@ -145,6 +145,11 @@ pub struct EnvironmentCapabilities {
     pub job_dependencies: bool,
     #[serde(default)]
     pub job_queue_keys: bool,
+    /// The environment has a graphical session the endpoint can observe and
+    /// drive (screenshots, pointer and keyboard input). Most environments are
+    /// headless; absent on older endpoints.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub display: bool,
 }
 
 impl EnvironmentCapabilities {
@@ -178,6 +183,11 @@ impl EnvironmentCapabilities {
         self.job_wait_hint = false;
         self.job_dependencies = true;
         self.job_queue_keys = true;
+        self
+    }
+
+    pub fn with_display(mut self) -> Self {
+        self.display = true;
         self
     }
 }
