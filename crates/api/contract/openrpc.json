@@ -9317,6 +9317,16 @@
         ],
         "type": "object"
       },
+      "EnvironmentCapabilityView": {
+        "description": "A capability an environment offers beyond files, commands, and jobs.\nRecorded from the provider's or daemon's report, so it is known without\nconnecting; calls still check what the live environment negotiates.",
+        "oneOf": [
+          {
+            "const": "display",
+            "description": "A graphical session that can be observed and driven.",
+            "type": "string"
+          }
+        ]
+      },
       "EnvironmentCloseParams": {
         "properties": {
           "environmentId": {
@@ -9764,6 +9774,13 @@
       },
       "EnvironmentIncarnationView": {
         "properties": {
+          "capabilities": {
+            "description": "Capabilities reported for this incarnation; empty until reported or\nwhen the environment offers none.",
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentCapabilityView"
+            },
+            "type": "array"
+          },
           "createdAtMs": {
             "format": "int64",
             "type": "integer"

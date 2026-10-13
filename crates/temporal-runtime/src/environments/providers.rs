@@ -264,6 +264,7 @@ pub(crate) fn environment_view(record: &EnvironmentRecord) -> EnvironmentView {
                 .copied()
                 .map(power_state_view)
                 .collect(),
+            capabilities: capability_views(&record.incarnation.capabilities),
             created_at_ms: record.incarnation.created_at_ms,
             updated_at_ms: record.incarnation.updated_at_ms,
         },
@@ -300,6 +301,16 @@ pub(crate) fn registry_identity_mode(
             ::environments::RegisteredIdentityMode::Ephemeral
         }
     }
+}
+
+fn capability_views(
+    capabilities: &::environments::EnvironmentCapabilities,
+) -> Vec<EnvironmentCapabilityView> {
+    let mut views = Vec::new();
+    if capabilities.display {
+        views.push(EnvironmentCapabilityView::Display);
+    }
+    views
 }
 
 pub(crate) fn power_state_view(value: ::environments::PowerState) -> EnvironmentPowerStateView {
