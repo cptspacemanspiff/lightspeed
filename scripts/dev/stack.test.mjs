@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -158,3 +158,71 @@ esac
     assert.ok(!existsSync(path.join(directory, ".lightspeed/dev-supervisor.json")));
   });
 }
+
+// Starts the runtime profile with a runtime that never becomes ready, and
+// returns once it runs. The runtime is its process group's leader (the
+// supervisor starts each child in a group of its own), so its pid is the group.
+async function startSupervisedRuntime(t) {
+  const directory = launcherFixture(t);
+  const pidPath = path.join(directory, "runtime.pid");
+  writeFileSync(path.join(directory, "bin/cargo"), `#!/bin/sh
+case "$*" in
+  *universe*|*migrate*) exit 0 ;;
+  *) echo $$ > "${pidPath}"; exec sleep 300 ;;
+esac
+`, { mode: 0o755 });
+  const reservation = createServer();
+  reservation.listen(0, "127.0.0.1");
+  await once(reservation, "listening");
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  const env = { ...process.env, PATH: `${directory}/bin:${process.env.PATH}`, LIGHTSPEED_GATEWAY_BIND: `127.0.0.1:${port}`, LIGHTSPEED_CHANNELS_CONNECTORS: "", LIGHTSPEED_AUTH_MODE: "single", LIGHTSPEED_PG_UNIVERSE_ID: "00000000-0000-0000-0000-000000000001" };
+  const supervisor = spawn(process.execPath, ["scripts/dev/stack.mjs", "runtime", "--no-envd"], { cwd: directory, env, stdio: "ignore" });
+  let runtimeGroup;
+  t.after(() => {
+    supervisor.kill("SIGKILL");
+    if (runtimeGroup) try { process.kill(-runtimeGroup, "SIGKILL"); } catch {}
+  });
+  const deadline = Date.now() + 5_000;
+  while (!runtimeGroup && Date.now() < deadline) {
+    try { runtimeGroup = Number(readFileSync(pidPath, "utf8")) || undefined; }
+    catch {}
+    if (!runtimeGroup) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(runtimeGroup, "the runtime started");
+  return { directory, env, supervisor, runtimeGroup, statePath: path.join(directory, ".lightspeed/dev-supervisor.json") };
+}
+
+function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    assert.equal(error.code, "ESRCH");
+    return false;
+  }
+}
+
+test("a closed terminal (SIGHUP) stops the supervisor's processes", { timeout: 10_000 }, async (t) => {
+  const { supervisor, runtimeGroup, statePath } = await startSupervisedRuntime(t);
+  const exited = once(supervisor, "exit");
+  supervisor.kill("SIGHUP");
+  await exited;
+  assert.ok(!groupAlive(runtimeGroup), "runtime stopped with the supervisor");
+  assert.ok(!existsSync(statePath));
+});
+
+test("stop finds processes a killed supervisor left running", { timeout: 15_000 }, async (t) => {
+  const { directory, env, supervisor, runtimeGroup, statePath } = await startSupervisedRuntime(t);
+  const exited = once(supervisor, "exit");
+  supervisor.kill("SIGKILL");
+  await exited;
+  assert.ok(groupAlive(runtimeGroup), "a killed supervisor cannot stop its children");
+  const recorded = JSON.parse(readFileSync(statePath, "utf8")).processGroups.map((group) => group.pgid);
+  assert.ok(recorded.includes(runtimeGroup), "the supervisor recorded the runtime's group");
+  const result = spawnSync(process.execPath, ["scripts/dev/stack.mjs", "stop"], { cwd: directory, encoding: "utf8", env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /exited without stopping runtime/);
+  assert.ok(!groupAlive(runtimeGroup), "stop ended the orphaned runtime");
+  assert.ok(!existsSync(statePath));
+});
