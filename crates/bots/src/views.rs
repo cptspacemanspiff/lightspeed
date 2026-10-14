@@ -649,6 +649,33 @@ pub fn delivery_input_items(events: &[BotEvent]) -> Vec<InputItem> {
     items
 }
 
+/// A program run's input for a delivery: each event's stored envelope,
+/// with its per-bot sequence number and media, in delivery order.
+/// `documents[i]` is the envelope stored at `events[i].document_ref`.
+///
+/// ```json
+/// { "events": [ { "id": "…", "seq": 7, "event": { "kind": "…", … }, "media": [] } ] }
+/// ```
+///
+/// A program reads the machine envelope, not the model's rendering: the
+/// rendering prunes by shape for a model's budget, and a program wants
+/// every field.
+pub fn program_delivery_input(events: &[BotEvent], documents: Vec<Value>) -> Value {
+    let events = events
+        .iter()
+        .zip(documents)
+        .map(|(event, document)| {
+            json!({
+                "id": event.id,
+                "seq": event.seq,
+                "event": document,
+                "media": event.media,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({ "events": events })
+}
+
 /// Steering input for events folded into a running run.
 pub fn steer_input_items(events: &[BotEvent]) -> Vec<InputItem> {
     let mut items = vec![InputItem::Text {
@@ -1474,6 +1501,33 @@ mod tests {
             tools_ref: None,
             notify: false,
         }
+    }
+
+    #[test]
+    fn program_input_carries_each_envelope_with_its_seq_and_media() {
+        let mut first = signal_event("sha256:a", Some("sha256:p"));
+        first.media.push(api::BotEventMedia {
+            text_ref: None,
+            blob_ref: "sha256:m".to_owned(),
+            kind: BotEventMediaKind::Image,
+            mime: "image/png".to_owned(),
+            name: None,
+        });
+        let mut second = signal_event("sha256:b", None);
+        second.id = "evt-2".to_owned();
+        second.seq = 2;
+        let input = program_delivery_input(
+            &[first, second],
+            vec![json!({"kind": "push"}), json!({"kind": "issue"})],
+        );
+        assert_eq!(
+            input,
+            json!({"events": [
+                {"id": "evt", "seq": 1, "event": {"kind": "push"},
+                 "media": [{"blobRef": "sha256:m", "kind": "image", "mime": "image/png"}]},
+                {"id": "evt-2", "seq": 2, "event": {"kind": "issue"}, "media": []},
+            ]})
+        );
     }
 
     #[test]

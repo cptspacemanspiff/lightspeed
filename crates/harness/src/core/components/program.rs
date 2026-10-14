@@ -79,6 +79,17 @@ pub struct PinnedProgram {
 }
 
 impl PinnedProgram {
+    /// Whether two pins run the same program: the same source, engine,
+    /// schemas and limits. Where a pin came from does not change what it
+    /// runs, so the named profile's identity and revision are ignored.
+    pub fn runs_same_program_as(&self, other: &PinnedProgram) -> bool {
+        self.source_ref == other.source_ref
+            && self.engine == other.engine
+            && self.input_schema == other.input_schema
+            && self.output_schema == other.output_schema
+            && self.limits == other.limits
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         if let Some(program_id) = &self.program_id {
             crate::validate_general_string_id("program_id", program_id)

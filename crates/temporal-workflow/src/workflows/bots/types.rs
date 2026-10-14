@@ -53,6 +53,11 @@ pub enum BotEnsureSessionResult {
         profile_revision: u64,
         #[serde(default)]
         carried_tool_ids: Vec<String>,
+        /// The bot's profile has a program, so its sessions are program
+        /// sessions: they take events as program runs and cannot be
+        /// steered or have context appended.
+        #[serde(default)]
+        program: bool,
     },
     /// The session exists under another tool declaration; declarations are
     /// immutable per session, so the controller rotates to a successor.

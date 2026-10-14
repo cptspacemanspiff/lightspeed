@@ -90,8 +90,11 @@ impl GatewayAgentApi {
         let session_id = SessionId::try_new(params.session_id).map_err(|error| {
             AgentApiError::invalid_request(format!("invalid session id: {error}"))
         })?;
-        let resolved = self.resolve_profile_source(params.profile).await?;
+        let resolved = self.resolve_profile(params.profile).await?;
         let loaded = self.load_session_state(&session_id).await?;
+        self.check_profile_driver(&loaded.state.lifecycle.driver, &resolved)
+            .await?;
+        let resolved = resolved.document;
         let revision = loaded.state.lifecycle.config_revision;
         if let Some(expected) = params.expected_config_revision
             && expected != revision
@@ -118,11 +121,34 @@ impl GatewayAgentApi {
         Ok(ProfileApplyResponse { session, applied })
     }
 
-    pub(super) async fn resolve_profile_source(
+    /// A session's driver is fixed at creation, so a profile applies only
+    /// when it describes the same driver: no program for an agent session,
+    /// and for a program session a program that pins to exactly what the
+    /// session runs. Anything else needs a new session.
+    async fn check_profile_driver(
         &self,
-        source: ProfileSource,
-    ) -> Result<ProfileDocument, AgentApiError> {
-        Ok(self.resolve_profile(source).await?.document)
+        driver: &harness::SessionDriver,
+        resolved: &ResolvedProfile,
+    ) -> Result<(), AgentApiError> {
+        match (driver, resolved.document.program.as_ref()) {
+            (harness::SessionDriver::Agent, None) => Ok(()),
+            (harness::SessionDriver::Agent, Some(_)) => Err(AgentApiError::invalid_request(
+                "the profile has a program, but the session is an agent session; start a new session from the profile",
+            )),
+            (harness::SessionDriver::Program { .. }, None) => Err(AgentApiError::invalid_request(
+                "the profile has no program, but the session is a program session; start a new session from the profile",
+            )),
+            (harness::SessionDriver::Program { program }, Some(spec)) => {
+                let proposed = self.pin_program(spec, resolved.named.as_ref()).await?;
+                if program.runs_same_program_as(&proposed) {
+                    Ok(())
+                } else {
+                    Err(AgentApiError::invalid_request(
+                        "the profile's program differs from the one the session pinned at creation; start a new session from the profile",
+                    ))
+                }
+            }
+        }
     }
 
     /// Resolve a profile source, keeping the named profile's identity and

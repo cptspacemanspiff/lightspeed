@@ -320,6 +320,9 @@ pub struct ControllerState {
     pub applied_profile_id: Option<ProfileId>,
     pub applied_profile_revision: Option<u64>,
     pub session_ready: bool,
+    /// The bot's profile has a program: its sessions take each delivery as
+    /// a program run and cannot be steered or appended to.
+    pub program_sessions: bool,
     pub events_processed: u64,
     pub duplicate_events: u64,
     pub duplicate_emissions: u64,
@@ -383,6 +386,7 @@ impl ControllerState {
             applied_profile_id: carry.applied_profile_id,
             applied_profile_revision: carry.applied_profile_revision,
             session_ready: carry.session_ready,
+            program_sessions: carry.program_sessions,
             events_processed: carry.events_processed,
             duplicate_events: carry.duplicate_events,
             duplicate_emissions: carry.duplicate_emissions,
@@ -419,6 +423,7 @@ impl ControllerState {
             applied_profile_id: self.applied_profile_id.clone(),
             applied_profile_revision: self.applied_profile_revision,
             session_ready: self.session_ready,
+            program_sessions: self.program_sessions,
             events_processed: 0,
             duplicate_events: self.duplicate_events,
             duplicate_emissions: self.duplicate_emissions,
@@ -701,8 +706,9 @@ impl ControllerState {
         }
     }
 
-    pub fn mark_session_ready(&mut self, profile_revision: u64) {
+    pub fn mark_session_ready(&mut self, profile_revision: u64, program: bool) {
         self.session_ready = true;
+        self.program_sessions = program;
         self.applied_profile_id = Some(self.config.profile_id.clone());
         self.applied_profile_revision = Some(profile_revision);
         self.tools_revision = Some(BOT_TOOLS_REVISION);
@@ -825,7 +831,7 @@ impl ControllerState {
                 None => true,
                 Some(active) => {
                     active.run_id.is_some()
-                        && delivery.when_busy != BotWhenBusy::Queue
+                        && self.when_busy_of(delivery) != BotWhenBusy::Queue
                         && !self.sidecar_by_session.contains(&target)
                 }
             }
@@ -850,7 +856,7 @@ impl ControllerState {
             if let Some(occupied) = self.active_by_session.get(&target) {
                 let delivery = &self.pending_deliveries[index];
                 if occupied.run_id.is_some()
-                    && delivery.when_busy != BotWhenBusy::Queue
+                    && self.when_busy_of(delivery) != BotWhenBusy::Queue
                     && !self.sidecar_by_session.contains(&target)
                 {
                     let delivery = self.pending_deliveries.remove(index);
@@ -861,7 +867,8 @@ impl ControllerState {
                 index += 1;
                 continue;
             }
-            let delivery = self.pending_deliveries.remove(index);
+            let mut delivery = self.pending_deliveries.remove(index);
+            delivery.when_busy = self.when_busy_of(&delivery);
             self.active_by_session.insert(
                 target.clone(),
                 ActiveLane {
@@ -876,6 +883,16 @@ impl ControllerState {
             actions.push(DispatchAction::Lane { delivery, target });
         }
         actions
+    }
+
+    /// How a delivery treats a busy session. A program session can only
+    /// queue: it takes no steering and no appended context.
+    pub fn when_busy_of(&self, delivery: &BotDelivery) -> BotWhenBusy {
+        if self.program_sessions {
+            BotWhenBusy::Queue
+        } else {
+            delivery.when_busy
+        }
     }
 
     /// Put a delivery back at the front of the queue (a lost start race, a
@@ -1433,7 +1450,7 @@ mod tests {
     }
 
     fn ready(mut state: ControllerState) -> ControllerState {
-        state.mark_session_ready(3);
+        state.mark_session_ready(3, false);
         state
     }
 
@@ -1796,6 +1813,37 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], DispatchAction::Sidecar { delivery, .. } if delivery.id == "e4")
+        );
+    }
+
+    #[test]
+    fn program_sessions_queue_steer_and_append_deliveries() {
+        let mut state = ready(fresh());
+        state.program_sessions = true;
+        state.accept_event(event("e1", 1), NOW).unwrap();
+        let mut append = event("e2", 2);
+        append.when_busy = Some(BotWhenBusy::Append);
+        let mut steer = event("e3", 3);
+        steer.when_busy = Some(BotWhenBusy::Steer);
+        state.accept_event(append, NOW).unwrap();
+        state.accept_event(steer, NOW).unwrap();
+        assert_eq!(state.dispatch(NOW).len(), 1);
+        state.mark_lane_started("bot:v1:triage", "run_1", NOW);
+        assert!(
+            !state.dispatchable(NOW),
+            "a program run takes no steering or appended context"
+        );
+        assert!(state.dispatch(NOW).is_empty());
+        state.active_by_session.clear();
+        let actions = state.dispatch(NOW);
+        let [DispatchAction::Lane { delivery, .. }] = actions.as_slice() else {
+            panic!("expected one lane, got {actions:?}");
+        };
+        assert_eq!(delivery.id, "e2");
+        assert_eq!(
+            delivery.when_busy,
+            BotWhenBusy::Queue,
+            "the lane runs the delivery as a program run"
         );
     }
 
@@ -2303,7 +2351,7 @@ mod tests {
         assert_eq!(state.main_session_id(), "bot:v1:triage");
         assert_eq!(state.setup_status, BotSetupStatus::Initializing);
         assert!(state.config_dirty);
-        state.mark_session_ready(4);
+        state.mark_session_ready(4, false);
         assert!(state.session_ready);
         assert_eq!(state.applied_revision_for_ensure(), Some(4));
         assert_eq!(state.tools_revision, Some(BOT_TOOLS_REVISION));

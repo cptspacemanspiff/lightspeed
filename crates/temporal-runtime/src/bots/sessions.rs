@@ -27,7 +27,7 @@ use bots::{
         bot_instructions, bot_tool_description, bot_tool_schema, bot_workflow_tool_declarations,
         compose_instructions,
     },
-    views::{delivery_input_items, steer_input_items},
+    views::{delivery_input_items, program_delivery_input, steer_input_items},
 };
 use harness::{
     BlobRef,
@@ -434,6 +434,22 @@ pub async fn ensure_session(
         ),
     );
     let resolved = resolve_bot_profile(&profile, instructions);
+    // A program session has no model to read instructions, and its program
+    // is pinned from the named profile so the pin records where it came
+    // from. An agent session takes the inline profile with the bot's
+    // instructions composed in.
+    let program = profile.document.program.is_some();
+    let profile_source = || {
+        if program {
+            ProfileSource::Named {
+                profile_id: request.profile_id.clone(),
+            }
+        } else {
+            ProfileSource::Inline {
+                profile: Box::new(resolved.clone()),
+            }
+        }
+    };
 
     let controller = WorkflowEndpointInput {
         workflow_id: request.controller.workflow_id.clone(),
@@ -467,9 +483,7 @@ pub async fn ensure_session(
             display_name: request.display_name.clone(),
             metadata: bot_session_metadata(&request.bot_id),
             config: None,
-            profile: Some(ProfileSource::Inline {
-                profile: Box::new(resolved.clone()),
-            }),
+            profile: Some(profile_source()),
             delete_after_close_ms: Some(None),
             workflow_tools: ManagedSessionWorkflowToolsInput {
                 version: MANAGED_TOOLS_VERSION,
@@ -499,7 +513,7 @@ pub async fn ensure_session(
         // but not for this one: report that as unapplicable so the
         // controller rotates, rather than retrying into a degraded bot.
         // Checked structurally first; the harness's rejection is the backstop.
-        if let Some(proposed) = proposed_provider_route(&resolved) {
+        if !program && let Some(proposed) = proposed_provider_route(&resolved) {
             let current = read_session_view(api, &request.session_id)
                 .await
                 .map_err(|error| activity_error("read session", error))?;
@@ -517,9 +531,7 @@ pub async fn ensure_session(
         if let Err(error) = api
             .apply_profile(ProfileApplyParams {
                 session_id: request.session_id.clone(),
-                profile: ProfileSource::Inline {
-                    profile: Box::new(resolved),
-                },
+                profile: profile_source(),
                 expected_config_revision: None,
                 expected_tools_revision: None,
             })
@@ -542,6 +554,7 @@ pub async fn ensure_session(
     Ok(BotEnsureSessionResult::Ready {
         profile_revision: profile.revision,
         carried_tool_ids,
+        program,
     })
 }
 
@@ -598,12 +611,21 @@ pub async fn start_run(
     // The terminal notification's destination is derived by the gateway
     // from the session's immutable lifecycle controller — the controller
     // itself — exactly as for a public `session/runs/start`.
+    let session = read_session_view(api, &request.session_id)
+        .await
+        .map_err(|error| activity_error("read session", error))?;
+    let source = match session.driver {
+        api::SessionDriverView::Agent => RunStartSource::Input {
+            items: delivery_input_items(&request.events),
+        },
+        api::SessionDriverView::Program { .. } => RunStartSource::Program {
+            input: program_input(api, &request.events).await?,
+        },
+    };
     match api
         .start_run(RunStartParams {
             session_id: request.session_id,
-            source: RunStartSource::Input {
-                items: delivery_input_items(&request.events),
-            },
+            source,
             submission_id: Some(request.submission_id),
             config: None,
             notify_on_terminal: Some(RunTerminalNotificationInput {
@@ -627,6 +649,24 @@ pub async fn start_run(
         }
         Err(error) => Err(activity_error("start run", error)),
     }
+}
+
+/// The delivery's events as a program run's input, read from their stored
+/// envelopes.
+async fn program_input(
+    api: &GatewayAgentApi,
+    events: &[bots::BotEvent],
+) -> Result<serde_json::Value, ActivityError> {
+    let store = api.store();
+    let blobs: &dyn BlobStore = store.as_ref();
+    let mut documents = Vec::with_capacity(events.len());
+    for event in events {
+        let bytes = read_blob(blobs, &event.document_ref).await?;
+        documents.push(serde_json::from_slice(&bytes).map_err(|error| {
+            non_retryable(format!("event {} envelope is malformed: {error}", event.id))
+        })?);
+    }
+    Ok(program_delivery_input(events, documents))
 }
 
 pub async fn steer_run(

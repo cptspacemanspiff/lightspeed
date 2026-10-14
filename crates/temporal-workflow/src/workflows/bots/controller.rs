@@ -79,6 +79,8 @@ pub struct BotControllerCarry {
     pub applied_profile_id: Option<ProfileId>,
     pub applied_profile_revision: Option<u64>,
     pub session_ready: bool,
+    /// The bot's sessions are program sessions.
+    pub program_sessions: bool,
     /// Always 0: the continue-as-new threshold counts per execution.
     pub events_processed: u64,
     pub duplicate_events: u64,
@@ -570,9 +572,11 @@ pub(super) async fn reconcile_session(ctx: &Ctx) -> bool {
         });
         match activity(ctx, BotActivities::ensure_session, request).await {
             Ok(BotEnsureSessionResult::Ready {
-                profile_revision, ..
+                profile_revision,
+                program,
+                ..
             }) => {
-                ctx.state_mut(|state| state.mark_session_ready(profile_revision));
+                ctx.state_mut(|state| state.mark_session_ready(profile_revision, program));
                 return true;
             }
             Ok(
