@@ -3,7 +3,6 @@ mod admissions;
 mod awaits;
 mod bootstrap;
 mod clock;
-mod code_tools;
 mod control;
 mod drive;
 mod errors;
@@ -11,6 +10,7 @@ mod observability;
 mod preparation;
 mod preparation_candidate;
 mod promise_sources;
+mod scoped_calls;
 use preparation::SessionAdmission;
 mod session_state;
 #[cfg(test)]
@@ -93,7 +93,7 @@ pub struct AgentSessionWorkflow {
     rollover_delay_logged: bool,
     last_error: Option<String>,
     bootstrap_failed: bool,
-    code_tools: code_tools::CodeToolExecutionState,
+    code_tools: scoped_calls::CodeToolExecutionState,
 }
 
 impl Default for AgentSessionWorkflow {
@@ -145,7 +145,7 @@ impl AgentSessionWorkflow {
 
         let preparation_ctx = ctx.clone();
         let preparation = preparation::run_preparation_loop(preparation_ctx).fuse();
-        let code_tool_dispatch = code_tools::run_dispatch_loop(ctx.clone()).fuse();
+        let code_tool_dispatch = scoped_calls::run_dispatch_loop(ctx.clone()).fuse();
         let session = async {
             loop {
                 preparation::prepare_initial_session(ctx, &args)
@@ -157,7 +157,7 @@ impl AgentSessionWorkflow {
                 reconcile_cancelling_watchdog(ctx);
                 promise_sources::reconcile_polls(ctx);
                 wait_for_workflow_work(ctx).await;
-                code_tools::process_pending(ctx)
+                scoped_calls::process_pending(ctx)
                     .await
                     .map_err(temporalio_sdk::ApplicationFailure::new)?;
                 if let Err(error) = flush_pending_emissions(ctx).await {
@@ -357,7 +357,7 @@ impl AgentSessionWorkflow {
         ctx: &mut WorkflowContext<Self>,
         request: crate::OpenCodeToolScopeRequest,
     ) -> crate::CodeToolScopeResult {
-        code_tools::open(ctx, request).await
+        scoped_calls::open(ctx, request).await
     }
 
     #[update(name = "invoke_code_tool")]
@@ -365,7 +365,7 @@ impl AgentSessionWorkflow {
         ctx: &mut WorkflowContext<Self>,
         request: crate::InvokeCodeToolRequest,
     ) -> crate::CodeToolInvocationResult {
-        code_tools::invoke(ctx, request).await
+        scoped_calls::invoke(ctx, request).await
     }
 
     #[update(name = "close_code_tool_scope")]
@@ -373,7 +373,7 @@ impl AgentSessionWorkflow {
         ctx: &mut WorkflowContext<Self>,
         request: crate::CloseCodeToolScopeRequest,
     ) -> crate::CodeToolScopeResult {
-        code_tools::close(ctx, request).await
+        scoped_calls::close(ctx, request).await
     }
 
     #[query(name = "code_tool_scope_report")]
@@ -382,7 +382,7 @@ impl AgentSessionWorkflow {
         _ctx: &WorkflowContextView,
         request: crate::CodeToolScopeReportRequest,
     ) -> crate::CodeToolScopeResult {
-        code_tools::report(self, &request.execution_id)
+        scoped_calls::report(self, &request.execution_id)
     }
 }
 

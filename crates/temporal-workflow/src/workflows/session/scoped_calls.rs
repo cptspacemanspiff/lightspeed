@@ -1,6 +1,10 @@
-//! Session-owned admission and independent dispatch of code tool effects.
-//! Update handlers and the dispatcher only queue work. This module's main-loop
-//! drain is the sole writer of code tool facts, through the ordinary event append.
+//! Session-owned admission and independent dispatch of scoped calls: tool
+//! calls made as the session by code running outside it. Update handlers and
+//! the dispatcher only queue work. This module's main-loop drain is the sole
+//! writer of scoped-call facts, through the ordinary event append.
+//!
+//! The Update and query names stay `*_code_tool_*` for the code executions
+//! that hold them; every scope owner and policy shares these handlers.
 
 use super::*;
 use crate::workflows::WorkflowContextExt as _;
@@ -98,12 +102,25 @@ pub(super) async fn invoke(
     let result = if let Err(error) = admitted {
         Err(error)
     } else {
-        let wanted = origin.clone();
-        ctx.wait_for_state(move |state| {
-            harness::code_tool_call(&state.core_state, &wanted)
-                .is_some_and(|call| call.status.is_terminal())
-        })
-        .await;
+        // The scope's completion policy decides what the reply carries: the
+        // terminal outcome, or only the admission with the outcome left to
+        // the scope report.
+        let completion = ctx.state(|state| {
+            state
+                .core_state
+                .code_tools
+                .scopes
+                .get(&origin.execution_id)
+                .map(|scope| scope.spec.policy.completion)
+        });
+        if completion == Some(harness::Completion::Blocking) {
+            let wanted = origin.clone();
+            ctx.wait_for_state(move |state| {
+                harness::code_tool_call(&state.core_state, &wanted)
+                    .is_some_and(|call| call.status.is_terminal())
+            })
+            .await;
+        }
         ctx.state(|state| {
             harness::code_tool_call(&state.core_state, &origin)
                 .map(crate::CodeToolCallOutcome::from)
@@ -295,13 +312,14 @@ fn invocation_command(
                 "code tool execution scope is closed",
             ));
         }
-        if scope.calls.len() >= scope.spec.max_calls as usize
+        let limits = scope.spec.policy.limits;
+        if scope.calls.len() >= limits.max_calls as usize
             || scope
                 .calls
                 .values()
                 .filter(|call| !call.status.is_terminal())
                 .count()
-                >= scope.spec.max_in_flight as usize
+                >= limits.max_in_flight as usize
         {
             return Err(rejected(
                 Rejection::LimitExceeded,
@@ -352,9 +370,8 @@ async fn admit_open(
             .map(|binding| binding.tool_id.clone())
             .collect::<BTreeSet<_>>();
         return Ok(
-            if existing.spec.parent_invocation_id == request.parent_invocation_id
-                && existing.spec.max_calls == request.max_calls
-                && existing.spec.max_in_flight == request.max_in_flight
+            if existing.spec.owner == code_mode_owner(&request)
+                && existing.spec.policy == code_mode_policy(&request)
                 && request
                     .allowed_tools
                     .as_ref()
@@ -477,19 +494,28 @@ async fn admit_open(
             "requested tools lack callable bindings",
         )));
     }
-    apply(
-        ctx,
-        CoreAgentCommand::OpenCodeToolScope {
-            scope: harness::CodeToolScopeSpec {
-                execution_id: request.execution_id,
-                parent_invocation_id: request.parent_invocation_id,
-                bindings,
-                max_calls: request.max_calls,
-                max_in_flight: request.max_in_flight,
-            },
-        },
-    )
-    .await
+    let scope = harness::CodeToolScopeSpec {
+        execution_id: request.execution_id.clone(),
+        owner: code_mode_owner(&request),
+        policy: code_mode_policy(&request),
+        bindings,
+    };
+    apply(ctx, CoreAgentCommand::OpenCodeToolScope { scope }).await
+}
+
+/// A code execution's scope is owned by its parked parent call and runs under
+/// the code-mode policy with the limits the execution host requested.
+fn code_mode_owner(request: &crate::OpenCodeToolScopeRequest) -> harness::ScopeOwner {
+    harness::ScopeOwner::ModelInvocation {
+        parent_invocation_id: request.parent_invocation_id.clone(),
+    }
+}
+
+fn code_mode_policy(request: &crate::OpenCodeToolScopeRequest) -> harness::ScopePolicy {
+    harness::ScopePolicy::code_mode(harness::ScopeLimits {
+        max_calls: request.max_calls,
+        max_in_flight: request.max_in_flight,
+    })
 }
 
 fn select_code_tools(
@@ -1078,13 +1104,17 @@ mod tests {
                 toolset_revision: 0,
                 spec: harness::CodeToolScopeSpec {
                     execution_id: "scope".into(),
-                    parent_invocation_id: harness::WorkflowToolInvocationId::new(format!(
-                        "wti:sha256:{}",
-                        "0".repeat(64)
-                    )),
+                    owner: harness::ScopeOwner::ModelInvocation {
+                        parent_invocation_id: harness::WorkflowToolInvocationId::new(format!(
+                            "wti:sha256:{}",
+                            "0".repeat(64)
+                        )),
+                    },
+                    policy: harness::ScopePolicy::code_mode(harness::ScopeLimits {
+                        max_calls: 10,
+                        max_in_flight: 3,
+                    }),
                     bindings,
-                    max_calls: 10,
-                    max_in_flight: 3,
                 },
                 closed: false,
                 cancel_requested: false,

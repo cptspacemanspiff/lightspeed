@@ -1,0 +1,34 @@
+{
+  "kind": "lightspeed.core.code_tool.scope_opened",
+  "version": 1,
+  "payload": {
+    "code_tool": {
+      "scope_opened": {
+        "scope": {
+          "execution_id": "execution-1",
+          "owner": {
+            "kind": "model_invocation",
+            "parent_invocation_id": "wti:sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "policy": {
+            "binding_mode": "presentation",
+            "revalidation": "toolset_revision",
+            "completion": "blocking",
+            "limits": {
+              "max_calls": 16,
+              "max_in_flight": 8
+            },
+            "retention": "full_in_state",
+            "approvals": "reject"
+          },
+          "bindings": {
+            "echo": {
+              "tool_id": "local_echo",
+              "tool_name": "local_echo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -328,6 +328,58 @@ mod tests {
     }
 
     #[test]
+    fn core_agent_code_tool_scope_fixture_matches_codec() {
+        assert_fixture_round_trip(
+            include_str!("../../fixtures/core_code_tool_scope_opened_stored_event.json"),
+            code_tool_scope_opened(),
+        );
+    }
+
+    /// Scope records written before owners and policies were recorded decode
+    /// as code-mode scopes and re-encode in the current shape.
+    #[test]
+    fn legacy_code_tool_scope_fixture_decodes_as_code_mode_scope() {
+        let codec = CoreAgentCodec;
+        let legacy = serde_json::from_str::<StoredEvent>(include_str!(
+            "../../fixtures/core_code_tool_scope_opened_legacy_stored_event.json"
+        ))
+        .expect("fixture is a stored event");
+        let current = serde_json::from_str::<StoredEvent>(include_str!(
+            "../../fixtures/core_code_tool_scope_opened_stored_event.json"
+        ))
+        .expect("fixture is a stored event");
+        let event = codec.decode_event(&legacy).expect("decode legacy event");
+        assert_eq!(event, code_tool_scope_opened());
+        assert_eq!(codec.encode_event(&event).expect("encode event"), current);
+    }
+
+    fn code_tool_scope_opened() -> CoreAgentEvent {
+        CoreAgentEvent::CodeTool(crate::CodeToolEvent::ScopeOpened {
+            scope: crate::CodeToolScopeSpec {
+                execution_id: "execution-1".into(),
+                owner: crate::ScopeOwner::ModelInvocation {
+                    parent_invocation_id: crate::WorkflowToolInvocationId::new(format!(
+                        "wti:sha256:{}",
+                        "0".repeat(64)
+                    )),
+                },
+                policy: crate::ScopePolicy::code_mode(crate::ScopeLimits {
+                    max_calls: 16,
+                    max_in_flight: 8,
+                }),
+                bindings: [(
+                    "echo".to_owned(),
+                    crate::CodeToolBinding {
+                        tool_id: crate::ToolName::new("local_echo"),
+                        tool_name: crate::ToolName::new("local_echo"),
+                    },
+                )]
+                .into(),
+            },
+        })
+    }
+
+    #[test]
     fn core_agent_stored_entry_fixture_matches_codec() {
         let codec = CoreAgentCodec;
         let fixture_entry = serde_json::from_str::<StoredSessionEntry>(include_str!(

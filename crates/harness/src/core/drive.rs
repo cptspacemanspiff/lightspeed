@@ -1328,8 +1328,11 @@ pub fn resume_tool_batch_proposals(
         return Ok(Vec::new());
     }
     if state.code_tools.scopes.values().any(|scope| {
-        crate::code_tool_parent(state, &scope.spec).is_ok_and(|parent| {
-            parent.run_id == command.run_id && parent.tool_batch_id == command.batch_id
+        crate::scope_owner(state, &scope.spec).is_ok_and(|owner| {
+            owner.run_id == command.run_id
+                && owner
+                    .model_batch
+                    .is_some_and(|batch| batch.tool_batch_id == command.batch_id)
         }) && scope.calls.values().any(|call| !call.status.is_terminal())
     }) {
         return Err(DomainError::InvariantViolation(
@@ -10380,7 +10383,13 @@ mod tests {
     ) -> crate::CodeToolScopeSpec {
         crate::CodeToolScopeSpec {
             execution_id: "execution-1".into(),
-            parent_invocation_id,
+            owner: crate::ScopeOwner::ModelInvocation {
+                parent_invocation_id,
+            },
+            policy: crate::ScopePolicy::code_mode(crate::ScopeLimits {
+                max_calls: 16,
+                max_in_flight: 8,
+            }),
             bindings: ["agent_run", "job_submit", "local_echo", "timer", "await"]
                 .into_iter()
                 .map(|name| {
@@ -10393,8 +10402,6 @@ mod tests {
                     )
                 })
                 .collect(),
-            max_calls: 16,
-            max_in_flight: 8,
         }
     }
 
@@ -10972,11 +10979,17 @@ mod tests {
     fn code_tool_admission_enforces_binding_limits_staleness_and_parent_authority() {
         let (mut drive, parent) = code_tool_fixture();
         let mut scope = code_tool_scope(parent);
-        scope.max_calls = 1;
-        scope.max_in_flight = 1;
+        scope.policy.limits = crate::ScopeLimits {
+            max_calls: 1,
+            max_in_flight: 1,
+        };
         let mut invalid = scope.clone();
-        invalid.parent_invocation_id =
-            crate::WorkflowToolInvocationId::new(format!("wti:sha256:{}", "f".repeat(64)));
+        invalid.owner = crate::ScopeOwner::ModelInvocation {
+            parent_invocation_id: crate::WorkflowToolInvocationId::new(format!(
+                "wti:sha256:{}",
+                "f".repeat(64)
+            )),
+        };
         assert!(
             drive
                 .admit_command(CoreAgentCommand::OpenCodeToolScope { scope: invalid }, 100)
@@ -11039,8 +11052,8 @@ mod tests {
     fn code_tool_start_failure_reuses_promise_failure_and_parallel_emission_budget() {
         let (mut drive, parent) = code_tool_fixture();
         let mut scope = code_tool_scope(parent);
-        scope.max_calls = 64;
-        scope.max_in_flight = 64;
+        scope.policy.limits.max_calls = 64;
+        scope.policy.limits.max_in_flight = 64;
         code_tool_commit(&mut drive, CoreAgentCommand::OpenCodeToolScope { scope });
         let submit = code_tool_spec("submit", "job_submit");
         code_tool_commit(

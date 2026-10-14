@@ -1,6 +1,12 @@
-//! Durable calls made by a workflow-backed tool while its parent call is parked.
-//! The parent batch supplies causal joins only; code tool results never become a
-//! model turn or replace the parent batch's suspension.
+//! Scoped calls: durable tool calls made as the session by code running
+//! outside it. A scope records who owns it and the policy its calls follow;
+//! both are fixed when the scope opens. The code holds only the scope id and
+//! opaque binding handles, so every call is admitted against the session's
+//! grants and its outcome is recorded once per request id.
+//!
+//! Code mode is the first owner: a scope beneath a parked joined workflow-tool
+//! call. The parent batch supplies causal joins only; code tool results never
+//! become a model turn or replace the parent batch's suspension.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -8,10 +14,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AwaitMode, AwaitSpec, BlobRef, CoreAgentEvent, CoreAgentEventProposal, CoreAgentJoins,
-    CoreAgentState, DomainError, PromiseEvent, PromiseOwnership, PromiseStatus, RunStatus,
-    SessionId, ToolBatchSuspension, ToolCallId, ToolCallStatus, ToolInvocationBatchRequest,
-    ToolInvocationBatchResult, ToolInvocationResult, ToolName, WakeReason, WorkflowToolCompletion,
-    WorkflowToolInvocation, WorkflowToolInvocationId,
+    CoreAgentState, DomainError, PromiseEvent, PromiseOwnership, PromiseStatus, RunId, RunStatus,
+    SessionId, ToolBatchId, ToolBatchSuspension, ToolCallId, ToolCallStatus,
+    ToolInvocationBatchRequest, ToolInvocationBatchResult, ToolInvocationResult, ToolName, TurnId,
+    WakeReason, WorkflowToolCompletion, WorkflowToolInvocation, WorkflowToolInvocationId,
 };
 
 pub const MAX_CODE_TOOL_SCOPES_PER_RUN: usize = 32;
@@ -36,7 +42,7 @@ pub(crate) fn interrupt_code_tools_for_run(state: &mut CoreAgentState, run_id: c
         .scopes
         .iter()
         .filter(|(_, scope)| {
-            code_tool_parent(state, &scope.spec).is_ok_and(|parent| parent.run_id == run_id)
+            scope_owner(state, &scope.spec).is_ok_and(|owner| owner.run_id == run_id)
         })
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
@@ -78,13 +84,178 @@ pub struct CodeToolBinding {
     pub tool_name: ToolName,
 }
 
+/// Who holds a scope open. The owner decides what keeps the scope live, which
+/// run its calls join, and which model batch (if any) they are attributed to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeToolScopeSpec {
-    pub execution_id: String,
-    pub parent_invocation_id: WorkflowToolInvocationId,
-    pub bindings: BTreeMap<String, CodeToolBinding>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScopeOwner {
+    /// Code mode: a parked joined workflow-tool call. The scope is live while
+    /// that call's reply promise is pending in the parked batch, and every
+    /// call joins the parent's run, turn and batch.
+    ModelInvocation {
+        parent_invocation_id: WorkflowToolInvocationId,
+    },
+}
+
+/// How calls in a scope are admitted, completed and retained. Recorded at open
+/// and immutable afterwards, so replay applies the same rules as the live run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePolicy {
+    pub binding_mode: BindingMode,
+    pub revalidation: Revalidation,
+    pub completion: Completion,
+    pub limits: ScopeLimits,
+    pub retention: Retention,
+    pub approvals: ApprovalPolicy,
+}
+
+impl ScopePolicy {
+    /// The policy every code-mode scope runs under.
+    pub fn code_mode(limits: ScopeLimits) -> Self {
+        Self {
+            binding_mode: BindingMode::Presentation,
+            revalidation: Revalidation::ToolsetRevision,
+            completion: Completion::Blocking,
+            limits,
+            retention: Retention::FullInState,
+            approvals: ApprovalPolicy::Reject,
+        }
+    }
+}
+
+/// How binding handles resolve to tool identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingMode {
+    /// Tool names and arguments follow the model presentation of the run that
+    /// owns the scope, pinned when the scope opens.
+    Presentation,
+}
+
+/// What invalidates a scope's bindings after it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Revalidation {
+    /// Any toolset change rejects further calls.
+    ToolsetRevision,
+}
+
+/// When the caller's invoke request returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Completion {
+    /// Return once the call is terminal.
+    Blocking,
+    /// Return once the call is admitted or deduplicated. Outcomes are then
+    /// observed through the scope report, never through the invoke reply.
+    Ack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeLimits {
     pub max_calls: u32,
     pub max_in_flight: u32,
+}
+
+/// What state keeps for terminal calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retention {
+    /// Full records for the owning run; prior-run scopes are dropped when the
+    /// next run opens one.
+    FullInState,
+}
+
+/// What happens to a call whose tool needs an approval decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// The call fails; the scope cannot wait for a decision.
+    Reject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "CodeToolScopeSpecWire")]
+pub struct CodeToolScopeSpec {
+    pub execution_id: String,
+    pub owner: ScopeOwner,
+    pub policy: ScopePolicy,
+    pub bindings: BTreeMap<String, CodeToolBinding>,
+}
+
+/// Read scope records written before owners and policies were recorded. Those
+/// scopes were all code-mode scopes, so their parent invocation and limits
+/// decode as the code-mode owner and policy.
+#[derive(Deserialize)]
+struct CodeToolScopeSpecWire {
+    execution_id: String,
+    #[serde(default)]
+    owner: Option<ScopeOwner>,
+    #[serde(default)]
+    policy: Option<ScopePolicy>,
+    bindings: BTreeMap<String, CodeToolBinding>,
+    #[serde(default)]
+    parent_invocation_id: Option<WorkflowToolInvocationId>,
+    #[serde(default)]
+    max_calls: Option<u32>,
+    #[serde(default)]
+    max_in_flight: Option<u32>,
+}
+
+impl TryFrom<CodeToolScopeSpecWire> for CodeToolScopeSpec {
+    type Error = &'static str;
+
+    fn try_from(wire: CodeToolScopeSpecWire) -> Result<Self, Self::Error> {
+        let legacy_owner =
+            wire.parent_invocation_id
+                .map(|parent_invocation_id| ScopeOwner::ModelInvocation {
+                    parent_invocation_id,
+                });
+        let owner = match (wire.owner, legacy_owner) {
+            (Some(owner), Some(legacy)) if owner != legacy => {
+                return Err("code tool scope owner conflicts with its parent invocation");
+            }
+            (Some(owner), _) | (None, Some(owner)) => owner,
+            (None, None) => return Err("code tool scope has no owner"),
+        };
+        let legacy_policy =
+            wire.max_calls
+                .zip(wire.max_in_flight)
+                .map(|(max_calls, max_in_flight)| {
+                    ScopePolicy::code_mode(ScopeLimits {
+                        max_calls,
+                        max_in_flight,
+                    })
+                });
+        let policy = match (wire.policy, legacy_policy) {
+            (Some(policy), Some(legacy)) if policy.limits != legacy.limits => {
+                return Err("code tool scope policy conflicts with its legacy limits");
+            }
+            (Some(policy), _) | (None, Some(policy)) => policy,
+            (None, None) => return Err("code tool scope has no policy"),
+        };
+        Ok(Self {
+            execution_id: wire.execution_id,
+            owner,
+            policy,
+            bindings: wire.bindings,
+        })
+    }
+}
+
+/// The owner facts every scope has, whatever its owner kind: the run its
+/// calls belong to, and the model batch they are attributed to when the owner
+/// is a model call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerView {
+    pub run_id: RunId,
+    pub model_batch: Option<ModelBatch>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelBatch {
+    pub turn_id: TurnId,
+    pub tool_batch_id: ToolBatchId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,19 +429,43 @@ pub fn code_tool_call_id(origin: &CodeToolOrigin) -> ToolCallId {
     ToolCallId::new(format!("code-tool:{}", hex::encode(Sha256::digest(bytes))))
 }
 
+/// Resolve the owner facts shared by every scope kind.
+pub fn scope_owner(
+    state: &CoreAgentState,
+    scope: &CodeToolScopeSpec,
+) -> Result<OwnerView, DomainError> {
+    match &scope.owner {
+        ScopeOwner::ModelInvocation { .. } => {
+            let parent = code_tool_parent(state, scope)?;
+            Ok(OwnerView {
+                run_id: parent.run_id,
+                model_batch: Some(ModelBatch {
+                    turn_id: parent.turn_id,
+                    tool_batch_id: parent.tool_batch_id,
+                }),
+            })
+        }
+    }
+}
+
+/// The parked workflow-tool call that owns a model-invocation scope. Use
+/// [`scope_owner`] unless the parent invocation itself is needed.
 pub fn code_tool_parent<'a>(
     state: &'a CoreAgentState,
     scope: &CodeToolScopeSpec,
 ) -> Result<&'a WorkflowToolInvocation, DomainError> {
+    let ScopeOwner::ModelInvocation {
+        parent_invocation_id,
+    } = &scope.owner;
     state
         .workflow_tools
         .emissions
-        .get(&scope.parent_invocation_id)
+        .get(parent_invocation_id)
         .or_else(|| {
             state
                 .workflow_tools
                 .start_requests
-                .get(&scope.parent_invocation_id)
+                .get(parent_invocation_id)
         })
         .ok_or_else(|| invalid("code tool scope references unknown parent workflow invocation"))
 }
@@ -301,9 +496,21 @@ pub(crate) fn code_tool_call_for_id<'a>(
 }
 
 pub fn code_tool_scope_is_live(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> bool {
-    validate_live_parent(state, scope).is_ok()
+    validate_live_owner(state, scope).is_ok()
 }
 
+/// Each owner kind defines its own liveness.
+fn validate_live_owner(
+    state: &CoreAgentState,
+    scope: &CodeToolScopeSpec,
+) -> Result<(), DomainError> {
+    match &scope.owner {
+        ScopeOwner::ModelInvocation { .. } => validate_live_parent(state, scope),
+    }
+}
+
+/// A model-invocation scope lives while its parent joined call is pending in
+/// the parked batch.
 fn validate_live_parent(
     state: &CoreAgentState,
     scope: &CodeToolScopeSpec,
@@ -342,24 +549,33 @@ fn validate_live_parent(
 
 fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(), DomainError> {
     validate_id("execution_id", &scope.execution_id)?;
-    validate_live_parent(state, scope)?;
-    if scope.max_calls == 0
-        || scope.max_calls > MAX_CODE_TOOL_CALLS_PER_SCOPE
-        || scope.max_in_flight == 0
-        || scope.max_in_flight > MAX_CODE_TOOL_IN_FLIGHT
-        || scope.max_in_flight > scope.max_calls
+    validate_live_owner(state, scope)?;
+    let limits = scope.policy.limits;
+    if limits.max_calls == 0
+        || limits.max_calls > MAX_CODE_TOOL_CALLS_PER_SCOPE
+        || limits.max_in_flight == 0
+        || limits.max_in_flight > MAX_CODE_TOOL_IN_FLIGHT
+        || limits.max_in_flight > limits.max_calls
         || scope.bindings.len() > 4096
     {
         return Err(invalid(
             "code tool scope limits are outside their bounded ranges",
         ));
     }
-    let parent = code_tool_parent(state, scope)?;
-    let parent_tool = state
-        .workflow_tools
-        .bindings
-        .get(&parent.tool_id)
-        .ok_or_else(|| invalid("code tool parent binding is missing"))?;
+    // A scope may not call the operation that owns it.
+    let owner_tool = match &scope.owner {
+        ScopeOwner::ModelInvocation { .. } => {
+            let parent = code_tool_parent(state, scope)?;
+            &state
+                .workflow_tools
+                .bindings
+                .get(&parent.tool_id)
+                .ok_or_else(|| invalid("code tool parent binding is missing"))?
+                .definition
+                .tool
+                .name
+        }
+    };
     for (binding_id, binding) in &scope.bindings {
         validate_id("binding_id", binding_id)?;
         let tool_id = &binding.tool_id;
@@ -368,19 +584,19 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
             .tools
             .get(tool_id)
             .ok_or_else(|| invalid(format!("code tool {tool_id} is not granted")))?;
-        if !tool.invokes_client_effect() || tool_id == &parent_tool.definition.tool.name {
+        if !tool.invokes_client_effect() || tool_id == owner_tool {
             return Err(invalid(format!(
                 "tool {tool_id} is not available for code tool execution"
             )));
         }
     }
+    let run_id = scope_owner(state, scope)?.run_id;
     let count = state
         .code_tools
         .scopes
         .values()
         .filter(|existing| {
-            code_tool_parent(state, &existing.spec)
-                .is_ok_and(|existing| existing.run_id == parent.run_id)
+            scope_owner(state, &existing.spec).is_ok_and(|existing| existing.run_id == run_id)
         })
         .count();
     if count >= MAX_CODE_TOOL_SCOPES_PER_RUN {
@@ -390,11 +606,9 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
         .code_tools
         .scopes
         .values()
-        .any(|existing| existing.spec.parent_invocation_id == scope.parent_invocation_id)
+        .any(|existing| existing.spec.owner == scope.owner)
     {
-        return Err(invalid(
-            "parent workflow invocation already owns a code tool scope",
-        ));
+        return Err(invalid("scope owner already owns a code tool scope"));
     }
     Ok(())
 }
@@ -409,12 +623,8 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
     if scope.closed {
         return Err(invalid("code tool execution scope is closed"));
     }
-    validate_live_parent(state, &scope.spec)?;
-    if scope.toolset_revision != state.tooling.revision {
-        return Err(invalid(
-            "code tool scope catalog is stale after a toolset change",
-        ));
-    }
+    validate_live_owner(state, &scope.spec)?;
+    validate_bindings_current(state, scope)?;
     if !scope
         .spec
         .bindings
@@ -430,7 +640,8 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
     {
         return Err(invalid("code tool is outside the execution grant"));
     }
-    if scope.calls.len() >= scope.spec.max_calls as usize {
+    let limits = scope.spec.policy.limits;
+    if scope.calls.len() >= limits.max_calls as usize {
         return Err(invalid("code tool execution exhausted its call budget"));
     }
     if scope
@@ -438,19 +649,18 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
         .values()
         .filter(|call| !call.status.is_terminal())
         .count()
-        >= scope.spec.max_in_flight as usize
+        >= limits.max_in_flight as usize
     {
         return Err(invalid("code tool execution exceeded its in-flight limit"));
     }
     if let Some(binding) = state.workflow_tools.binding_for_tool_name(&call.tool_id) {
-        let parent = code_tool_parent(state, &scope.spec)?;
+        let run_id = scope_owner(state, &scope.spec)?.run_id;
         let pending = state
             .code_tools
             .scopes
             .values()
             .filter(|scope| {
-                code_tool_parent(state, &scope.spec)
-                    .is_ok_and(|owner| owner.run_id == parent.run_id)
+                scope_owner(state, &scope.spec).is_ok_and(|owner| owner.run_id == run_id)
             })
             .flat_map(|scope| scope.calls.values())
             .filter(|other| {
@@ -460,7 +670,7 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
             .count();
         if state
             .workflow_tools
-            .emission_count(parent.run_id, &binding.definition.tool_id) as usize
+            .emission_count(run_id, &binding.definition.tool_id) as usize
             + pending
             >= crate::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN as usize
         {
@@ -482,17 +692,31 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
     Ok(())
 }
 
+/// The policy's revalidation rule, applied before a call is admitted or
+/// dispatched.
+fn validate_bindings_current(
+    state: &CoreAgentState,
+    scope: &CodeToolScope,
+) -> Result<(), DomainError> {
+    match scope.spec.policy.revalidation {
+        Revalidation::ToolsetRevision if scope.toolset_revision != state.tooling.revision => Err(
+            invalid("code tool scope catalog is stale after a toolset change"),
+        ),
+        Revalidation::ToolsetRevision => Ok(()),
+    }
+}
+
 fn joins(state: &CoreAgentState, origin: &CodeToolOrigin) -> Result<CoreAgentJoins, DomainError> {
     let scope = state
         .code_tools
         .scopes
         .get(&origin.execution_id)
         .ok_or_else(|| invalid("unknown code tool execution scope"))?;
-    let parent = code_tool_parent(state, &scope.spec)?;
+    let owner = scope_owner(state, &scope.spec)?;
     Ok(CoreAgentJoins {
-        run_id: Some(parent.run_id),
-        turn_id: Some(parent.turn_id),
-        tool_batch_id: Some(parent.tool_batch_id),
+        run_id: Some(owner.run_id),
+        turn_id: owner.model_batch.map(|batch| batch.turn_id),
+        tool_batch_id: owner.model_batch.map(|batch| batch.tool_batch_id),
         tool_call_id: Some(code_tool_call_id(origin)),
         ..Default::default()
     })
@@ -672,8 +896,8 @@ pub fn defer_code_tool_call_proposals(
             "code tool await requires 1..=32 distinct promise ids",
         ));
     }
-    let parent = code_tool_parent(state, &state.code_tools.scopes[&origin.execution_id].spec)?;
-    crate::core::drive::validate_await_spec_for_active_run(state, parent.run_id, &spec)?;
+    let owner = scope_owner(state, &state.code_tools.scopes[&origin.execution_id].spec)?;
+    crate::core::drive::validate_await_spec_for_active_run(state, owner.run_id, &spec)?;
     let suspension = ToolBatchSuspension::AwaitTool {
         call_id: call.call_id.clone(),
         spec,
@@ -707,7 +931,7 @@ pub fn code_tool_wake(
     let CodeToolCallStatus::Waiting { suspension } = &call.status else {
         return None;
     };
-    if scope.cancel_requested || validate_live_parent(state, &scope.spec).is_err() {
+    if scope.cancel_requested || validate_live_owner(state, &scope.spec).is_err() {
         return Some(WakeReason::Cancelled);
     }
     let spec = suspension.spec();
@@ -943,12 +1167,8 @@ pub fn code_tool_request(
     if scope.cancel_requested {
         return Err(invalid("code tool scope is cancelling"));
     }
-    validate_live_parent(state, &scope.spec)?;
-    if scope.toolset_revision != state.tooling.revision {
-        return Err(invalid(
-            "code tool scope catalog is stale after a toolset change",
-        ));
-    }
+    validate_live_owner(state, &scope.spec)?;
+    validate_bindings_current(state, scope)?;
     let parent = code_tool_parent(state, &scope.spec)?;
     if &parent.session_id != session_id {
         return Err(invalid(
@@ -994,20 +1214,25 @@ pub(crate) fn apply_code_tool_event(
                 return Err(invalid("duplicate code tool scope event"));
             }
             validate_scope(state, scope)?;
-            // Retain closed outcomes for the current run, and drop prior-run
-            // scope indexes. The immutable log remains the outcome archive.
-            let run_id = code_tool_parent(state, scope)?.run_id;
-            let retain: BTreeSet<_> = state
-                .code_tools
-                .scopes
-                .iter()
-                .filter(|(_, existing)| {
-                    code_tool_parent(state, &existing.spec)
-                        .is_ok_and(|parent| parent.run_id == run_id)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            state.code_tools.scopes.retain(|id, _| retain.contains(id));
+            match scope.policy.retention {
+                // Retain closed outcomes for the current run, and drop
+                // prior-run scope indexes. The immutable log remains the
+                // outcome archive.
+                Retention::FullInState => {
+                    let run_id = scope_owner(state, scope)?.run_id;
+                    let retain: BTreeSet<_> = state
+                        .code_tools
+                        .scopes
+                        .iter()
+                        .filter(|(_, existing)| {
+                            scope_owner(state, &existing.spec)
+                                .is_ok_and(|owner| owner.run_id == run_id)
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    state.code_tools.scopes.retain(|id, _| retain.contains(id));
+                }
+            }
             state.code_tools.scopes.insert(
                 scope.execution_id.clone(),
                 CodeToolScope {
@@ -1167,4 +1392,55 @@ pub(crate) fn apply_code_tool_event(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invocation_id(fill: char) -> String {
+        format!("wti:sha256:{}", fill.to_string().repeat(64))
+    }
+
+    #[test]
+    fn scope_spec_rejects_records_whose_legacy_fields_disagree_with_owner_or_policy() {
+        let base = serde_json::json!({
+            "execution_id": "execution-1",
+            "bindings": {},
+            "owner": { "kind": "model_invocation", "parent_invocation_id": invocation_id('0') },
+            "policy": {
+                "binding_mode": "presentation",
+                "revalidation": "toolset_revision",
+                "completion": "blocking",
+                "limits": { "max_calls": 4, "max_in_flight": 2 },
+                "retention": "full_in_state",
+                "approvals": "reject"
+            }
+        });
+        let decode = |patch: serde_json::Value| {
+            let mut record = base.clone();
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            serde_json::from_value::<CodeToolScopeSpec>(record)
+        };
+        let spec = decode(serde_json::json!({})).expect("current shape decodes");
+        assert_eq!(spec.policy.completion, Completion::Blocking);
+        let redundant = decode(serde_json::json!({
+            "parent_invocation_id": invocation_id('0'),
+            "max_calls": 4,
+            "max_in_flight": 2
+        }))
+        .expect("matching legacy fields are accepted");
+        assert_eq!(redundant, spec);
+        assert!(decode(serde_json::json!({ "parent_invocation_id": invocation_id('f') })).is_err());
+        assert!(decode(serde_json::json!({ "max_calls": 5, "max_in_flight": 2 })).is_err());
+        let mut no_owner = base.clone();
+        no_owner.as_object_mut().unwrap().remove("owner");
+        assert!(serde_json::from_value::<CodeToolScopeSpec>(no_owner).is_err());
+        let mut no_policy = base;
+        no_policy.as_object_mut().unwrap().remove("policy");
+        assert!(serde_json::from_value::<CodeToolScopeSpec>(no_policy).is_err());
+    }
 }
