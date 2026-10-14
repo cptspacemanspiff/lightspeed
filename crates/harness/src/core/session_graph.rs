@@ -210,6 +210,31 @@ mod tests {
     }
 
     #[test]
+    fn clone_opening_events_reject_program_sessions() {
+        let mut state = CoreAgentState::new();
+        state.lifecycle.config = Some(config());
+        state.lifecycle.driver = crate::SessionDriver::Program {
+            program: crate::PinnedProgram {
+                program_id: None,
+                revision: None,
+                source_ref: crate::BlobRef::from_bytes(b"return input;"),
+                engine: crate::ProgramEngine {
+                    kind: crate::ProgramEngineKind::Js,
+                    semantics_version: 1,
+                },
+                input_schema: None,
+                output_schema: None,
+                limits: Default::default(),
+            },
+        };
+
+        let error = core_agent_clone_opening_events(&state, 10)
+            .expect_err("a program session cannot be cloned");
+
+        assert!(matches!(error, CoreAgentCloneError::ProgramSession));
+    }
+
+    #[test]
     fn clone_opening_events_reject_lifecycle_managed_sessions() {
         let universe_id = Uuid::from_u128(7);
         let admitted = ManagedSessionWorkflowTools::v1(

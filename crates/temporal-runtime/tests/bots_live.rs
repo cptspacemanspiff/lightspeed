@@ -38,8 +38,8 @@ use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     worker::{
-        ActivityState, BotWorkerActivities, FakeLlm, FakeTools, WorkerActivities, bots_worker,
-        sessions_worker, worker_runtime,
+        ActivityState, BotWorkerActivities, CodeWorkerActivities, FakeLlm, FakeTools, SessionTools,
+        WorkerActivities, bots_worker, code_worker, sessions_worker, worker_runtime,
     },
 };
 use temporal_workflow::{DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, connect_temporal};
@@ -50,6 +50,9 @@ const WAIT: Duration = Duration::from_secs(90);
 enum Llm {
     Fake,
     Real,
+    /// No model: the bot's profile has a program, which runs on the code
+    /// worker started beside the others.
+    Program,
 }
 
 /// Run the sessions worker (fake or real LLM), the bots worker, and the
@@ -78,7 +81,8 @@ where
     let builder = GatewayAgentApi::builder(client.clone(), store.clone())
         .with_task_queue(queues.sessions.clone())
         .with_bot_task_queue(queues.bots.clone())
-        .with_channel_task_queue(queues.channels.clone());
+        .with_channel_task_queue(queues.channels.clone())
+        .with_code_task_queue(queues.code.clone());
     let activity_state = match llm {
         Llm::Fake => {
             let blobs: Arc<dyn BlobStore> = store.clone();
@@ -88,7 +92,17 @@ where
             ActivityState::from_pg_store(store.clone(), llm, tools)
         }
         Llm::Real => ActivityState::from_pg_store_with_default_runtime(store.clone())?,
+        Llm::Program => {
+            let blobs: Arc<dyn BlobStore> = store.clone();
+            let llm = Arc::new(FakeLlm::new(blobs)) as Arc<dyn CoreAgentLlm>;
+            let tools = Arc::new(SessionTools::from_pg_store(store.clone()));
+            ActivityState::from_pg_store(store.clone(), llm, tools.clone())
+                .with_hosted_tools(tools)
+                .with_workflow_tool_executions(client.clone())
+                .with_code_task_queue(queues.code.clone())
+        }
     };
+    let program = matches!(llm, Llm::Program);
     let api = Arc::new(builder.build());
 
     let mut sessions_worker = sessions_worker(
@@ -103,10 +117,27 @@ where
         queues.bots.clone(),
         BotWorkerActivities::for_universe(universe, api.clone()),
     )?;
+    let mut code = if program {
+        Some(code_worker(
+            &runtime,
+            client.clone(),
+            queues.code.clone(),
+            CodeWorkerActivities::for_universe(universe, api.clone(), 2)?,
+        )?)
+    } else {
+        None
+    };
     let shutdown_sessions = sessions_worker.shutdown_handle();
     let shutdown_bots = bots.shutdown_handle();
+    let shutdown_code = code.as_ref().map(|worker| worker.shutdown_handle());
     let workers = async {
-        tokio::try_join!(sessions_worker.run(), bots.run())
+        let code = async {
+            match code.as_mut() {
+                Some(worker) => worker.run().await,
+                None => Ok(()),
+            }
+        };
+        tokio::try_join!(sessions_worker.run(), bots.run(), code)
             .map(|_| ())
             .map_err(anyhow::Error::from)
     };
@@ -122,6 +153,9 @@ where
     };
     shutdown_sessions();
     shutdown_bots();
+    if let Some(shutdown_code) = shutdown_code {
+        shutdown_code();
+    }
     let shutdown_result = support::live::bounded_live_test(
         "worker shutdown",
         Duration::from_secs(10),
@@ -383,6 +417,140 @@ async fn bots_live_manual_event_runs_and_records_outcome() -> anyhow::Result<()>
             .result;
         assert!(duplicate.duplicate);
         assert_eq!(duplicate.event.seq, 1);
+        Ok(())
+    })
+    .await
+}
+
+/// A program profile whose program reports which version ran and what it
+/// was given.
+fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileInput {
+    AgentProfileInput {
+        profile_id: profile_id.clone(),
+        display_name: Some("bots live program".to_owned()),
+        description: None,
+        document: ProfileDocument {
+            program: Some(api::ProgramSpec {
+                source: api::ProgramSource::Text {
+                    text: format!(
+                        "return {{ version: {version}, seqs: input.events.map(e => e.seq), \
+                         kinds: input.events.map(e => e.event.kind), \
+                         notes: input.events.map(e => e.event.data.note) }};"
+                    ),
+                },
+                semantics_version: 1,
+                input_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["events"],
+                    "properties": {"events": {"type": "array", "minItems": 1}},
+                })),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["version", "seqs"],
+                })),
+                limits: None,
+            }),
+            ..ProfileDocument::default()
+        },
+    }
+}
+
+/// The program output of a bot event's run on `session_id`.
+async fn event_program_output(
+    api: &GatewayAgentApi,
+    store: &store_pg::PgStore,
+    session_id: &str,
+    event: &BotEventView,
+) -> anyhow::Result<serde_json::Value> {
+    let run_id = event.run_id.as_deref().expect("event ran");
+    let run = support::live::wait_for_terminal_run(
+        api,
+        &harness::SessionId::new(session_id.to_owned()),
+        run_id,
+    )
+    .await?;
+    assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+    assert!(matches!(run.source, api::RunViewSource::Program { .. }));
+    let output = run.output.expect("program output");
+    Ok(serde_json::from_slice(
+        &store
+            .read_bytes(&harness::BlobRef::parse(&output.content_ref)?)
+            .await?,
+    )?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, client| async move {
+        let store = pg_store_from_env().await?;
+        let profile_id = ProfileId::new(unique("bots-live-program"));
+        api.create_profile(ProfileCreateParams {
+            profile: program_profile_input(&profile_id, 1),
+        })
+        .await?;
+        let bot_id = create_bot(&api, &profile_id, |_| {}, Vec::new()).await?;
+
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("first ping"),
+        })
+        .await?;
+        let events = wait_for_outcomes(&api, &bot_id, 1).await?;
+        // The program never resolves the delivery, so it ends unresolved
+        // with its run recorded, as for a model that does not resolve.
+        assert_eq!(events[0].outcome, Some(BotEventOutcome::Unresolved));
+        let main = bot_main_session_id(&bot_id, 1);
+        let session = api
+            .read_session(SessionReadParams {
+                session_id: main.clone(),
+                run_limit: None,
+            })
+            .await?
+            .result
+            .session;
+        assert_eq!(
+            session.driver,
+            api::SessionDriverView::Program {
+                program_id: Some(profile_id.as_str().to_owned()),
+                revision: Some(1),
+                semantics_version: 1,
+            }
+        );
+        assert_eq!(
+            event_program_output(&api, &store, &main, &events[0]).await?,
+            serde_json::json!({
+                "version": 1, "seqs": [1], "kinds": ["test.ping"], "notes": ["first ping"],
+            })
+        );
+
+        // A new program revision cannot apply to the pinned session, so the
+        // bot rotates its main session and the next event runs the new one.
+        api.put_profile(api::ProfilePutParams {
+            profile: program_profile_input(&profile_id, 2),
+            expected_revision: Some(1),
+        })
+        .await?;
+        wait_for_controller_settled(&api, &client, &bot_id, |snapshot| {
+            snapshot.applied_profile_revision == Some(2)
+        })
+        .await?;
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("second ping"),
+        })
+        .await?;
+        let events = wait_for_outcomes(&api, &bot_id, 2).await?;
+        let second = events
+            .iter()
+            .find(|event| event.seq == 2)
+            .expect("second event");
+        assert_eq!(
+            event_program_output(&api, &store, &bot_main_session_id(&bot_id, 2), second).await?,
+            serde_json::json!({
+                "version": 2, "seqs": [2], "kinds": ["test.ping"], "notes": ["second ping"],
+            })
+        );
         Ok(())
     })
     .await

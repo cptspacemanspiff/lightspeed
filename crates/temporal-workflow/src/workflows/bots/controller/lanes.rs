@@ -108,7 +108,8 @@ async fn run_delivery_inner(
         }
     }
 
-    match delivery.when_busy {
+    // A routed session's kind is known only once it is ensured above.
+    match ctx.state(|state| state.when_busy_of(delivery)) {
         api::BotWhenBusy::Append => {
             activity(
                 ctx,
@@ -321,11 +322,14 @@ async fn ensure_routed_session(
         });
         match activity(ctx, BotActivities::ensure_session, request).await {
             Ok(BotEnsureSessionResult::Ready {
-                carried_tool_ids, ..
+                carried_tool_ids,
+                program,
+                ..
             }) => {
                 let now = now_ms(ctx);
                 let kind = ids::bot_session_kind(&session_id);
                 ctx.state_mut(|state| {
+                    state.program_sessions = program;
                     state.extra_sessions.push(ManagedSession {
                         session_id: session_id.clone(),
                         label: session.label.clone(),
@@ -419,7 +423,7 @@ async fn run_busy_sidecar_inner(
         return Ok(None);
     }
     let universe_id = ctx.state(|state| state.config.universe_id);
-    if delivery.when_busy == api::BotWhenBusy::Append {
+    if ctx.state(|state| state.when_busy_of(delivery)) == api::BotWhenBusy::Append {
         activity(
             ctx,
             BotActivities::append_context,
