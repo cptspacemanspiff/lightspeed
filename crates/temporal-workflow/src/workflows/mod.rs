@@ -3,6 +3,7 @@ mod cancellation;
 pub mod channels;
 mod code_execution;
 mod environment_job;
+mod program_run;
 mod session;
 mod subagent_execution;
 mod transcriptions;
@@ -13,6 +14,7 @@ pub use bots::{BotControllerWorkflow, BotTriggerFireWorkflow};
 pub use channels::ChannelConversationWorkflow;
 pub use code_execution::CodeExecutionWorkflow;
 pub use environment_job::EnvironmentJobWorkflow;
+pub use program_run::ProgramRunWorkflow;
 pub use session::AgentSessionWorkflow;
 pub use subagent_execution::SubagentExecutionWorkflow;
 

@@ -6,6 +6,7 @@ mod channels;
 mod code;
 mod fake;
 pub(crate) mod mcp;
+mod program;
 mod reaper;
 mod secrets;
 mod session_content;
@@ -125,6 +126,7 @@ pub fn code_worker(
 ) -> anyhow::Result<Worker> {
     let worker_options = WorkerOptions::new(task_queue)
         .register_workflow::<temporal_workflow::CodeExecutionWorkflow>()?
+        .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
         .register_activities(activities)
         .build();
     Ok(Worker::new(runtime, client, worker_options)?)

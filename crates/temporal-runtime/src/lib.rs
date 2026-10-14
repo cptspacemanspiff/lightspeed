@@ -11,6 +11,7 @@ pub mod config;
 pub(crate) mod credential_injection;
 pub mod environments;
 pub mod gateway;
+pub mod program;
 pub mod roles;
 pub(crate) mod session_deletion;
 pub mod subagents;

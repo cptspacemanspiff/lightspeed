@@ -959,6 +959,33 @@ impl GatewayAgentApi {
                 input: run_input_from_api(self.store.as_ref(), &items).await?,
             },
             RunStartSource::Program { input } => {
+                // The pinned program's input schema is the run's contract;
+                // a violation is a request error, not a failed run.
+                if let Some(schema_ref) = loaded
+                    .state
+                    .lifecycle
+                    .driver
+                    .program()
+                    .and_then(|program| program.input_schema.as_ref())
+                {
+                    let schema: serde_json::Value = serde_json::from_slice(
+                        &self
+                            .store
+                            .read_bytes(schema_ref)
+                            .await
+                            .map_err(map_input_blob_store_error)?,
+                    )
+                    .map_err(|error| {
+                        AgentApiError::internal(format!(
+                            "program input schema is not JSON: {error}"
+                        ))
+                    })?;
+                    jsonschema::validate(&schema, &input).map_err(|error| {
+                        AgentApiError::invalid_request(format!(
+                            "program input does not satisfy the program's input schema: {error}"
+                        ))
+                    })?;
+                }
                 let bytes = serde_json::to_vec(&input).map_err(|error| {
                     AgentApiError::invalid_request(format!("invalid program input: {error}"))
                 })?;
@@ -1024,7 +1051,7 @@ impl GatewayAgentApi {
         CoreAgentProjector::new(self.store.as_ref())
     }
 
-    async fn load_session_state(
+    pub(crate) async fn load_session_state(
         &self,
         session_id: &SessionId,
     ) -> Result<LoadedSession, AgentApiError> {
@@ -1240,9 +1267,9 @@ impl GatewayAgentApi {
     }
 }
 
-pub(super) struct LoadedSession {
-    pub(super) record: harness::storage::SessionRecord,
-    pub(super) state: harness::CoreAgentState,
+pub(crate) struct LoadedSession {
+    pub(crate) record: harness::storage::SessionRecord,
+    pub(crate) state: harness::CoreAgentState,
 }
 
 struct RunProjectionMetadata<'a> {

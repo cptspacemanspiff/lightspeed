@@ -3,6 +3,7 @@
 mod activities;
 mod code_execution;
 mod code_tools;
+mod program_execution;
 pub use code_tools::*;
 mod config;
 mod rehydrate;
@@ -25,7 +26,8 @@ pub use activities::{
     ACTIVITY_CREATE_OR_LOAD_SESSION, ACTIVITY_ENVIRONMENT_JOB_CANCEL,
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
     ACTIVITY_ENVIRONMENT_JOB_START, ACTIVITY_LLM_GENERATE, ACTIVITY_MATERIALIZE_AWAIT_RESULT,
-    ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PUT_BLOB, ACTIVITY_READ_BLOB,
+    ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PROGRAM_ATTEMPT, ACTIVITY_PROGRAM_FINALIZE,
+    ACTIVITY_PROGRAM_PREPARE, ACTIVITY_PUT_BLOB, ACTIVITY_READ_BLOB,
     ACTIVITY_RUNTIME_PROJECTION_REFRESH, ACTIVITY_START_WORKFLOW_TOOL_EXECUTION,
     ACTIVITY_SUBAGENT_CLOSE, ACTIVITY_SUBAGENT_PREPARE, ACTIVITY_SUBAGENT_RESOLVE,
     ACTIVITY_TOOL_INVOKE_BATCH, ACTIVITY_TOOL_INVOKE_CALL, ACTIVITY_TOOL_PREPARE_PROMISE_CONTROLS,
@@ -49,6 +51,12 @@ pub use config::{
     boundary_error_blob_activity_options, default_instructions, default_run_config,
     default_session_config, environment_ready_activity_options, llm_activity_options,
     tool_batch_activity_options, tool_call_activity_options, tool_call_operation_timeout,
+};
+pub use program_execution::{
+    DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, PROGRAM_RUN_WORKFLOW_TYPE, ProgramAttemptActivityRequest,
+    ProgramAttemptActivityResult, ProgramAttemptOutcome, ProgramFinalizeActivityRequest,
+    ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
+    ProgramRunInterruption, ProgramRunPhase, ProgramRunSnapshot, ProgramRunTerminal,
 };
 pub use rehydrate::{
     ReducedSession, RehydrateError, accumulate_session_entry, reduce_session_entries,
@@ -89,7 +97,7 @@ pub use workflows::bots;
 pub use workflows::channels;
 pub use workflows::{
     AgentSessionWorkflow, BotControllerWorkflow, BotTriggerFireWorkflow,
-    ChannelConversationWorkflow, CodeExecutionWorkflow, EnvironmentJobWorkflow,
+    ChannelConversationWorkflow, CodeExecutionWorkflow, EnvironmentJobWorkflow, ProgramRunWorkflow,
     SubagentExecutionWorkflow, TranscriptionActivityResult, TranscriptionSnapshot,
     TranscriptionWorkflow, TranscriptionWorkflowArgs, transcription_id, transcription_workflow_id,
 };
