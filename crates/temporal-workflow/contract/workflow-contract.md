@@ -73,8 +73,11 @@ fingerprinted over their exact raw bytes; canonical fingerprints begin with
 ## Code tool invocation scopes
 
 A trusted execution host calls the session's `open_code_tool_scope` Update with
-`OpenCodeToolScopeRequest`. The parent must be an admitted, pending joined
-workflow-tool invocation. The request's allowlist and budgets only narrow the
+`OpenCodeToolScopeRequest`, naming exactly one owner. A code execution names
+its parent, which must be an admitted, pending joined workflow-tool
+invocation. A program execution names the run it executes; the scope id must
+be that run's pending program execution and the budgets must fit the pinned
+program's limits. The request's allowlist and budgets only narrow the
 session's existing capabilities; the session resolves and pins callable bindings.
 
 `invoke_code_tool` accepts `InvokeCodeToolRequest`: the execution and request ids, an
@@ -89,6 +92,9 @@ completed effects. Dropping an Update client wait does not cancel the operation.
 Read `code_tool_scope_report` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
+Read `scope_recorded_outcomes` with `ScopeRecordedOutcomesRequest` for terminal
+outcomes in the order they were recorded, from a cursor; a replaying program
+execution feeds them to its guest as the journal.
 
 Scope operations return `Result<CodeToolScopeReport, CodeToolRejection>`;
 invocation returns `Result<CodeToolCallOutcome, CodeToolRejection>`. Serde
@@ -97,5 +103,5 @@ is distinct from a successfully admitted tool returning a failed outcome.
 
 ## Schema inventory
 
-The schema bundle contains 72 definitions. Its public roots
-are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CodeToolScopeReportRequest, CodeToolScopeReport, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.
+The schema bundle contains 74 definitions. Its public roots
+are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.

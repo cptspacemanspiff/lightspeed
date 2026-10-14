@@ -277,7 +277,8 @@ fn scope_request(
 ) -> OpenCodeToolScopeRequest {
     OpenCodeToolScopeRequest {
         execution_id: start.execution_id.clone(),
-        parent_invocation_id: start.invocation.invocation_id.clone(),
+        parent_invocation_id: Some(start.invocation.invocation_id.clone()),
+        run_id: None,
         allowed_tools: context.allowed_tools.clone(),
         max_calls: context.limits.max_tool_calls,
         max_in_flight: context.limits.max_outstanding_tool_calls,

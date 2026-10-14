@@ -539,7 +539,8 @@ where
             let execution_id = format!("execution-{}", uuid::Uuid::new_v4().simple());
             let open = OpenCodeToolScopeRequest {
                 execution_id: execution_id.clone(),
-                parent_invocation_id: outer.invocation_id.clone(),
+                parent_invocation_id: Some(outer.invocation_id.clone()),
+                run_id: None,
                 allowed_tools: Some(["concurrency.sleep", "concurrency.await", JOB, AGENT, SUBMIT]
                     .into_iter()
                     .map(ToolName::new)

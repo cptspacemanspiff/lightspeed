@@ -172,6 +172,34 @@ pub fn program_run_invocation(
         })
 }
 
+/// The execution id of the run's program workflow, while its reply is still
+/// pending. A run-owned scope must carry this id.
+pub fn program_run_execution_id(state: &CoreAgentState, run_id: RunId) -> Option<String> {
+    let invocation = program_run_invocation(state, run_id)?;
+    if reply_promise(state, invocation)?.status != PromiseStatus::Pending {
+        return None;
+    }
+    let binding = program_execute_binding(state)?;
+    let WorkflowToolTarget::Start { start } = &binding.target else {
+        return None;
+    };
+    Some(crate::workflow_tool_execution_id(
+        &invocation.invocation_id,
+        &start.recipe_fingerprint,
+    ))
+}
+
+/// Whether the run's scope still has calls that have not reached a terminal
+/// outcome.
+fn run_scope_has_pending_calls(state: &CoreAgentState, run_id: RunId) -> bool {
+    state
+        .code_tools
+        .scopes
+        .values()
+        .filter(|scope| scope.spec.owner == crate::ScopeOwner::Run { run_id })
+        .any(|scope| scope.calls.values().any(|call| !call.status.is_terminal()))
+}
+
 fn program_execute_binding(state: &CoreAgentState) -> Option<&WorkflowToolBinding> {
     state
         .workflow_tools
@@ -291,7 +319,9 @@ pub fn plan_next(
         },
         RunStatus::Cancelling => {
             // Withdrawing the reply promise tells the program workflow to
-            // stop; the run ends once nothing of its execution is pending.
+            // stop. The run's scope stops being live at the same moment, so
+            // the session closes it and drains its calls; the run ends once
+            // nothing of its execution is pending.
             if let Some(promise) =
                 invocation.and_then(|invocation| reply_promise(state, invocation))
                 && promise.status == PromiseStatus::Pending
@@ -301,6 +331,9 @@ pub fn plan_next(
                         promise_id: promise.promise_id.clone(),
                     },
                 ))]);
+            }
+            if run_scope_has_pending_calls(state, run.run_id) {
+                return Ok(Vec::new());
             }
             Ok(vec![proposal(CoreAgentEvent::Run(RunEvent::Cancelled {
                 run_id: run.run_id,

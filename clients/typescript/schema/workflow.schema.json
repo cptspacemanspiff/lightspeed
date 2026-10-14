@@ -1280,7 +1280,7 @@
     },
     "OpenCodeToolScopeRequest": {
       "additionalProperties": false,
-      "description": "Trusted host request to open a scope beneath an admitted joined invocation.\nThe session resolves bindings itself; this allowlist can only narrow grants.",
+      "description": "Trusted host request to open a scope. A code execution opens it beneath\nits admitted, pending joined invocation; a program execution opens the\nscope its run owns. The session resolves bindings itself; the allowlist\ncan only narrow grants.",
       "properties": {
         "allowed_tools": {
           "default": null,
@@ -1308,12 +1308,28 @@
           "type": "integer"
         },
         "parent_invocation_id": {
-          "$ref": "#/definitions/WorkflowToolInvocationId"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowToolInvocationId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The parked joined invocation that owns a code execution's scope.\nExactly one of this and `run_id` is set."
+        },
+        "run_id": {
+          "description": "The program run that owns a program execution's scope; the execution\nid must be the run's program execution.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
         "execution_id",
-        "parent_invocation_id",
         "max_calls",
         "max_in_flight"
       ],
@@ -1459,6 +1475,72 @@
         "cancelled"
       ],
       "type": "string"
+    },
+    "ScopeRecordedOutcomes": {
+      "properties": {
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "execution_id": {
+          "type": "string"
+        },
+        "next": {
+          "description": "The cursor for the next page: `after` plus the outcomes returned.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outcomes": {
+          "description": "Terminal outcomes in log order, starting after `after`.",
+          "items": {
+            "$ref": "#/definitions/CodeToolCallOutcome"
+          },
+          "type": "array"
+        },
+        "pending": {
+          "description": "Requests admitted but not yet terminal, so a replaying executor\nknows what it is still waiting on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "execution_id",
+        "closed",
+        "cancel_requested",
+        "outcomes",
+        "next"
+      ],
+      "type": "object"
+    },
+    "ScopeRecordedOutcomesRequest": {
+      "additionalProperties": false,
+      "description": "Read a scope's recorded outcomes in the order they were recorded, after\nthe first `after` of them. A replaying executor feeds these to the guest\nas its journal, so every attempt sees completions in the same order.",
+      "properties": {
+        "after": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_id": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "execution_id",
+        "limit"
+      ],
+      "type": "object"
     },
     "SessionId": {
       "type": "string"
