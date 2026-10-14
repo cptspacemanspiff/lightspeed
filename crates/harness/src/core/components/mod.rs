@@ -60,7 +60,7 @@ pub use program::{
     PROGRAM_EXECUTE_TOOL_NAME, PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE,
     PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram, ProgramEngine, ProgramEngineKind,
     ProgramLimits, SessionDriver, is_program_session, program_run_execution_id,
-    program_run_invocation,
+    program_run_invocation, program_run_is_waiting,
 };
 pub use promise::AwaitOutcome;
 pub use promise::{

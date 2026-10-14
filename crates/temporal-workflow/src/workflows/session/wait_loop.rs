@@ -74,6 +74,7 @@ pub(super) fn workflow_state_needs_core_drive_for_state(state: &AgentSessionWork
             || state.core_state.context.compaction.is_pending()
             || state.core_state.runs.active.as_ref().is_some_and(|run| {
                 awaits::parked_tool_batch(&state.core_state).is_none()
+                    && !harness::program_run_is_waiting(&state.core_state)
                     && !(run.status == harness::RunStatus::Parked
                         && run.pending_approvals().next().is_some())
             }))
