@@ -339,7 +339,23 @@ pub(super) async fn prepare_runtime_projection(
         .await?
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
-    Ok(result.commands)
+    // A program session has no model context: the runtime's catalog
+    // publications are not applied to it, only its tool registry.
+    let is_program = drive.state().lifecycle.driver.is_program();
+    Ok(result
+        .commands
+        .into_iter()
+        .filter(|command| {
+            !is_program
+                || !matches!(
+                    command,
+                    CoreAgentCommand::UpsertContext { .. }
+                        | CoreAgentCommand::ReplaceContextPrefix { .. }
+                        | CoreAgentCommand::ReplaceContextEntries { .. }
+                        | CoreAgentCommand::RemoveContext { .. }
+                )
+        })
+        .collect())
 }
 
 pub(super) fn active_instruction_inputs(

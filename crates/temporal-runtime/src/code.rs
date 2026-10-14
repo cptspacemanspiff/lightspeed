@@ -44,7 +44,7 @@ impl CodeToolCatalog {
         }
     }
 
-    fn validate(&self, scope: &CodeToolScopeReport) -> Result<(), CodeRunError> {
+    pub(crate) fn validate(&self, scope: &CodeToolScopeReport) -> Result<(), CodeRunError> {
         if self.version != 1 {
             return Err(CodeRunError::Catalog("unsupported catalog version".into()));
         }
@@ -463,7 +463,7 @@ impl CodeRunner {
     }
 }
 
-async fn cancellable_preparation<T>(
+pub(crate) async fn cancellable_preparation<T>(
     deadline: Instant,
     cancellation: &Cancellation,
     work: impl Future<Output = Result<T, CodeRunError>>,
@@ -483,7 +483,7 @@ async fn wait_for_cancellation(cancellation: &Cancellation) {
     }
 }
 
-fn engine_limits(limits: &CodeExecutionLimits) -> codemode::ExecutionLimits {
+pub(crate) fn engine_limits(limits: &CodeExecutionLimits) -> codemode::ExecutionLimits {
     codemode::ExecutionLimits {
         timeout_ms: limits.timeout_ms,
         max_memory_bytes: limits.max_memory_bytes,
@@ -498,7 +498,7 @@ fn engine_limits(limits: &CodeExecutionLimits) -> codemode::ExecutionLimits {
     }
 }
 
-fn host_error(kind: &str, message: impl Into<String>) -> HostError {
+pub(crate) fn host_error(kind: &str, message: impl Into<String>) -> HostError {
     HostError {
         kind: kind.into(),
         message: message.into(),
@@ -545,7 +545,7 @@ pub(crate) async fn read_bounded(
     Ok(bytes)
 }
 
-async fn materialize(
+pub(crate) async fn materialize(
     blobs: &dyn BlobStore,
     outcome: &CodeToolCallOutcome,
     limit: u64,

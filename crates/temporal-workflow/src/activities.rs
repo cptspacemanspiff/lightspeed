@@ -58,6 +58,9 @@ pub const ACTIVITY_SUBAGENT_CLOSE: &str = "WorkflowActivities::subagent_close";
 pub const ACTIVITY_CODE_PREPARE: &str = "WorkflowActivities::code_prepare";
 pub const ACTIVITY_CODE_RUN: &str = "WorkflowActivities::code_run";
 pub const ACTIVITY_CODE_FINALIZE: &str = "WorkflowActivities::code_finalize";
+pub const ACTIVITY_PROGRAM_PREPARE: &str = "WorkflowActivities::program_prepare";
+pub const ACTIVITY_PROGRAM_ATTEMPT: &str = "WorkflowActivities::program_attempt";
+pub const ACTIVITY_PROGRAM_FINALIZE: &str = "WorkflowActivities::program_finalize";
 
 pub struct WorkflowActivities;
 
@@ -83,6 +86,30 @@ impl WorkflowActivities {
     pub async fn code_finalize(
         _ctx: ActivityContext,
         _request: crate::CodeFinalizeActivityRequest,
+    ) -> Result<harness::PromiseResolution, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_PREPARE)]
+    pub async fn program_prepare(
+        _ctx: ActivityContext,
+        _request: crate::ProgramPrepareActivityRequest,
+    ) -> Result<crate::ProgramPrepareActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_ATTEMPT)]
+    pub async fn program_attempt(
+        _ctx: ActivityContext,
+        _request: crate::ProgramAttemptActivityRequest,
+    ) -> Result<crate::ProgramAttemptActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_FINALIZE)]
+    pub async fn program_finalize(
+        _ctx: ActivityContext,
+        _request: crate::ProgramFinalizeActivityRequest,
     ) -> Result<harness::PromiseResolution, ActivityError> {
         unimplemented!("workflow activity definition only")
     }

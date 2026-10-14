@@ -74,6 +74,14 @@ impl CodeWorkerActivities {
         })
     }
 
+    pub(super) fn universes(&self) -> &WorkerUniverses {
+        &self.universes
+    }
+
+    pub(super) fn capacity(&self) -> Arc<Semaphore> {
+        self.capacity.clone()
+    }
+
     fn runner(&self, api: &GatewayAgentApi) -> CodeRunner {
         CodeRunner::with_shared_capacity(
             api.temporal_client().clone(),
@@ -187,6 +195,33 @@ impl CodeWorkerActivities {
             result = &mut work => result,
             () = &mut heartbeats => unreachable!("heartbeats run until activity exits"),
         }
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_PREPARE)]
+    pub async fn program_prepare(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramPrepareActivityRequest,
+    ) -> Result<temporal_workflow::ProgramPrepareActivityResult, ActivityError> {
+        super::program::prepare_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ATTEMPT)]
+    pub async fn program_attempt(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramAttemptActivityRequest,
+    ) -> Result<temporal_workflow::ProgramAttemptActivityResult, ActivityError> {
+        super::program::attempt_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_FINALIZE)]
+    pub async fn program_finalize(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramFinalizeActivityRequest,
+    ) -> Result<PromiseResolution, ActivityError> {
+        super::program::finalize_activity(&self, ctx, request).await
     }
 }
 
@@ -822,14 +857,17 @@ fn model_report(report: &DetailedCodeReport, report_ref: &BlobRef) -> Value {
     })
 }
 
-fn require_activity_owner(ctx: &ActivityContext, execution_id: &str) -> Result<(), ActivityError> {
+pub(super) fn require_activity_owner(
+    ctx: &ActivityContext,
+    execution_id: &str,
+) -> Result<(), ActivityError> {
     if ctx.info().workflow_id.as_deref() != Some(execution_id) {
         return Err(non_retryable("code activity workflow identity mismatch"));
     }
     Ok(())
 }
 
-fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
+pub(super) fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
     if attempt != 1 {
         return Err(non_retryable(
             "JavaScript execution cannot be retried; prior effect outcomes may be unknown",
@@ -838,7 +876,7 @@ fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
     Ok(())
 }
 
-async fn heartbeat(ctx: &ActivityContext) {
+pub(super) async fn heartbeat(ctx: &ActivityContext) {
     let mut ticks =
         tokio::time::interval(temporal_workflow::ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL);
     loop {
@@ -849,11 +887,11 @@ async fn heartbeat(ctx: &ActivityContext) {
     }
 }
 
-fn retryable(error: impl std::fmt::Display) -> ActivityError {
+pub(super) fn retryable(error: impl std::fmt::Display) -> ActivityError {
     ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(error.to_string())))
 }
 
-fn non_retryable(error: impl std::fmt::Display) -> ActivityError {
+pub(super) fn non_retryable(error: impl std::fmt::Display) -> ActivityError {
     ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
         error.to_string()
     )))
