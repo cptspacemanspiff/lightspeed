@@ -1,0 +1,886 @@
+# Program sessions: implementation plan
+
+Working plan, not yet a roadmap document. It covers adding **program sessions** to
+the Lightspeed backend. A program session is a session type whose runs are
+executed by a pinned, deterministic, durable program instead of a model. The
+first executors are JavaScript. The program calls ordinary tools, agent sessions
+(sub-agents), and other program sessions (subprograms). Complex work therefore
+breaks down into a tree of small units, each of which is as deterministic as it
+can be:
+
+```
+bot ──▶ program session ──┬─▶ tools (VFS, web, env, MCP…)
+                          ├─▶ agent session      (non-deterministic step)
+                          └─▶ program session ─┬─▶ tools
+                                               └─▶ agent session
+```
+
+Every node is a durable session with its own log and trace. A parent records each
+child's result as a call outcome, so the parent's replay never re-runs a child.
+
+File references are from a survey of `main` at `20f994bd`, re-verified against
+that commit on 2026-10-13. workerd references are to `cloudflare/workerd` at
+`7d452ca` (release 2026-10-14). Cloudflare code mode references are to
+`@cloudflare/codemode` in `cloudflare/agents` at `b1e3614`, under
+`packages/codemode/src` unless a `docs/` path is given.
+
+**Prior art.** Two Cloudflare designs cover the two halves of this seam and are
+used as references throughout. workerd defines how authority reaches untrusted
+code and what a call looks like: capabilities arrive only through `env`, calls
+are methods on stubs, the standard globals stay but the host owns them. The
+`@cloudflare/codemode` durable runtime defines recording and replay: a per-call
+log, replay-or-execute decisions, divergence as data, approval as pause and
+resume. The plan departs from the second in two places where Lightspeed's
+session-owned effects are stronger, called out in D7 and D8.
+
+## Goals
+
+- A bot (or client) creates a **program session** from a named, versioned program
+  and submits runs to it with JSON input. Nothing else is needed: no model, no
+  instructions.
+- **Composability.** Programs call subprograms and sub-agents with typed input and
+  output, using the same delegation machinery and tree limits as sub-agents today.
+  Agents can call programs too.
+- **Same authority model as agent sessions.** Every effect is an admitted tool call
+  under the session's grants, with recorded outcomes. A program child's grants
+  are a subset of its parent's. That subset check is new work (D13): delegation
+  today only narrows numeric limits, and extending the check to sub-agents is a
+  separate, behaviour-changing step.
+- **A tool API made for programs.** Programs call canonical, versioned tool
+  contracts. Model provider presentation never affects them, and session tooling
+  refreshes don't break them.
+- **Durable.** Losing a worker or interpreter re-executes the program. Completed
+  calls, including whole child sessions, return their recorded outcomes. Long
+  waits hold no interpreter.
+- **Observable.** Narration, spans, and every call with its args, result, reason
+  and source location appear in the session event stream and web transcript.
+- **Repairable.** A separate agent session with an inspect grant can read a failed
+  program session's trace, dry-replay patched source, publish a new program
+  revision, and resume the work without repeating completed calls.
+- **Executor-independent.** Executors speak a language-neutral protocol.
+  In-process QuickJS (the `codemode` engine) is the first executor and stays a
+  supported target, because it is the only one that runs on macOS and Windows.
+  workerd in a smolvm microVM follows once the protocol is stable (Phase 8) and
+  gives the higher trust level on Linux. Neither choice changes anything above.
+
+## Non-goals (for now)
+
+- A separate reducer or storage backend. The session *type* is new, but the core
+  is shared (D1). External harness sessions are a different problem: see
+  `docs/roadmap/p185-external-harness-sessions.md`.
+- Mixing model runs and program runs in one session. Handoff is between sessions
+  (D10).
+- Building program sessions *on* code mode. Program sessions and code mode become
+  two clients of a shared scoped-call core (D3). Code mode's behaviour is
+  unchanged.
+- Checkpointing interpreter heaps. Durability comes from re-execution.
+- Direct network egress from program code. All I/O goes through tools.
+- Re-executing recorded reads on replay to keep the log small, as Cloudflare's
+  `replay: "reexecute"` does (`connectors/base.ts`). Results live in CAS by
+  reference, so the journal stays small without giving up determinism.
+
+## Key decisions
+
+### D1. A session type at the edges, the shared harness in the middle
+
+**The session kind** is fixed when the session is created and recorded in the
+session's lifecycle events:
+
+```rust
+enum SessionDriver {
+    Agent,                                 // today's sessions (default; absent = Agent)
+    Program { program: PinnedProgram },
+}
+
+struct PinnedProgram {
+    program_id: Option<ProgramName>,  // named program, if any
+    revision: Option<u64>,            // resolved revision at creation
+    source_ref: BlobRef,              // module bundle (modules map + main module); retained via contains edge
+    engine: ProgramEngine,            // { kind: Js, semantics_version }
+    requires: BTreeMap<LogicalToolId, ContractPin>, // D4: schema digest now, named version later
+    input_schema: Option<BlobRef>,    // JSON Schema, validated at run admission
+    output_schema: Option<BlobRef>,   // validated at completion
+    limits: ProgramLimits,            // calls, in-flight, wall-clock, memory
+}
+```
+
+- The pin is **resolved and frozen at creation**: a later revision of a named
+  program never changes a running session. This is what makes replay valid.
+- **Runs stay.** Bots, `notify_on_terminal`, run views and idempotent
+  `submissionId` all work in terms of runs. A program session's run is one
+  invocation of its program:
+  - input JSON in, output JSON out
+  - `RunRequestSource` (`crates/harness/src/core/components/run.rs:328-341`) is a
+    tagged enum with a single `Input` variant whose encoding is documented as
+    stable for future source kinds, so add `Program { input_ref }` (and mirror
+    it in `RunSource`)
+  - admission rejects `Input` runs on program sessions and `Program` runs on
+    agent sessions.
+- A **subprogram** child session normally gets one run and is closed afterwards,
+  like a sub-agent child. A **bot lane** may keep a long-lived program session and
+  submit one run per event.
+
+**Why not a separate backend:** a program needs everything the native core does:
+
+- tool admission against grants and effect application
+- run-scoped promises
+- sub-agent delegation
+- VFS and environment state
+- run terminal side effects, fork safety, projections
+
+An external harness owns its tools, which is why p185 needs its own reducer. A
+program owns none; all its effects are Lightspeed tool calls. The session-type
+abstraction is therefore `driver` on a shared core: Agent (model planner) and
+Program (program workflow) here, with External (own reducer) possible later.
+
+### D2. Programs are a profile kind, not a new registry
+
+Named programs need what profiles already have: a store, names, revisions,
+validation, `Named | Inline` sources, and `SessionConfig` grants.
+`ProfileDocument` is `{config, instructions, metadata, retention}`
+(`crates/api/src/profiles.rs:179`). Add a `program` field: a profile with
+`program` set describes a program session, and its `config` carries the grants
+(features, tools, environments) the program may use. No model or instructions are
+required.
+
+Bots and delegation reuse profile resolution unchanged. For example,
+`ensure_session` (`temporal-runtime/src/bots/sessions.rs:410-546`) already reads a
+profile and starts a managed session. Pinning (D1) snapshots the resolved
+revision into the session.
+
+**Revision history is new, but only repair needs it.** The profile store keeps
+one row per profile holding the latest document and a bumped `revision` counter
+(`store-pg/src/profile.rs`, table `agent_profiles`, migration
+`006_agent_profiles.sql`). A pinned session is safe because it retains
+`source_ref`, and a subprogram call records the resolved revision and source
+ref in its arguments (D13), so neither needs past revisions. Only
+`program_source(program@rev)`, explicit `name@rev` pinning and resume from an
+older revision (D10) do. Add an append-only `program_revisions` table keyed by
+`(profile_id, revision)` holding the program spec, written on every put of a
+program profile, in Phase 7. This is the main argument for a sibling document
+type rather than a field on `ProfileDocument`; either shape works as long as
+revisions are retained.
+
+### D3. Extract a scoped-call core; code mode and programs are its two clients
+
+**What a code-tool scope is today.** It is the session-side permission and
+bookkeeping record that lets code running *outside* the session make tool calls
+*as* the session. The code holds no authority of its own.
+
+Its mechanism is exactly what programs need:
+
+- **Session-held authority.** The script holds only an execution id and opaque
+  binding handles, and every call is checked against grants.
+- **A non-model admission path.** It runs while the model batch is parked.
+- **One effect per request.** Calls are deduped by `(execution_id, request_id)`.
+  Identical redelivery, even on a closed scope, is admitted as a no-op by the
+  core (`code_tool.rs:525-533`) and the workflow handler serves the recorded
+  outcome (`workflows/session/code_tools.rs:282-297`).
+- **A single record of outcomes**, kept in the session.
+- **The normal effect path** for VFS, environment selection and promise effects,
+  with promise ids reserved per call.
+- **A dispatcher** with concurrency and exclusivity barriers and environment
+  readiness checks.
+- **Close semantics:** stop admission, optionally cancel pending calls, report.
+
+Its **policies** are specific to code mode and wrong for programs:
+
+| Code-mode policy | Where | Why it's wrong for programs |
+|---|---|---|
+| Owned by a parked `code_execute` invocation; liveness = parent batch parked | `CodeToolScopeSpec.parent_invocation_id`, `validate_live_parent` (`code_tool.rs:303-341`) | A program run has no model call |
+| Tool names and arguments follow the model's provider presentation (Claude-style `Bash`, Codex-style, canonical), pinned per execution | p191 "Model-facing specification and execution binding" | Program source outlives providers and presentations |
+| Calls rejected when the session's toolset revision changes | `validate_call` (`code_tool.rs:402-483`) | Long-lived programs would die on every tooling refresh |
+| Short-script budgets: 1024 calls, 64 in flight, 4096 bindings, 32 scopes/run, 256 waiters/session | `code_tool.rs:17-19` (4096 is an inline literal at `:351`), `session/code_tools.rs:14` | Programs are long and wide |
+| Workflow-tool emissions capped at 32 per run, with pending code-tool workflow calls counted against the cap | `MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN` (`workflow_tool.rs:16`), counted in `validate_call` (`code_tool.rs:445-471`) | A citation pass over 100 sources issues more than 32 `agent.run` calls in one run (D13) |
+| Completed call results held in `CoreAgentState` for the current run; prior-run scopes pruned only when the next run opens a scope | `CodeToolState{scopes}`, `code_tool.rs:999-1010` | Bounded by 32×1024 today, but one long program run would carry every result in state |
+| `invoke_code_tool` blocks until the call is terminal, including while `Waiting` on a joined child | `session/code_tools.rs:85-112`, `is_terminal` at `code_tool.rs:201-203` | The open Update keeps `waiters > 0` and blocks continue-as-new (`wait_loop.rs:108-148`) for a child's whole lifetime; dropping the activity does not close the handler |
+| Approval-required calls rejected | `approval_decision` cleared in `code_tool_request` (`code_tool.rs:974-983`); the rejection itself is in the per-call activity (`temporal-runtime/src/worker/activities/tools.rs:556-599`) | Pipelines will want "wait for a human" |
+
+**Extraction.** Move the mechanism into a generic harness component, called
+`scoped_call` here, with a per-scope **owner** and **policy**, both recorded at
+open and immutable afterwards:
+
+```rust
+struct CallScopeSpec {
+    scope_id: String,                 // today's execution_id
+    owner: ScopeOwner,
+    policy: ScopePolicy,
+    bindings: BTreeMap<BindingId, ScopeBinding>,
+}
+
+enum ScopeOwner {
+    ModelInvocation { parent_invocation_id: WorkflowToolInvocationId }, // code mode
+    Run { run_id: RunId },                                             // program run
+}
+
+struct ScopePolicy {
+    binding_mode: BindingMode,        // Presentation { variant } | Canonical (D4)
+    revalidation: Revalidation,       // ToolsetRevision (code mode) | PerBindingGrant (programs)
+    completion: Completion,           // Blocking (code mode) | Ack (programs)
+    limits: ScopeLimits,              // max_calls, max_in_flight
+    retention: Retention,             // FullInState (code mode) | Indexed (programs)
+    approvals: ApprovalPolicy,        // Reject (both, initially) | Park (programs, later)
+}
+```
+
+Code mode opens scopes with exactly today's behaviour:
+`ModelInvocation` + `Presentation` + `ToolsetRevision` + `Blocking` + current
+limits + `FullInState` + `Reject`. Programs open them with
+`Run` + `Canonical` + `PerBindingGrant` + `Ack` + program limits + `Indexed`.
+
+What goes where:
+
+- **Owner view.** One helper, `scope_owner(state, spec) -> OwnerView { run_id, model_batch: Option<(TurnId, ToolBatchId)> }`,
+  replaces the direct calls to `code_tool_parent` (`code_tool.rs:261-276`) in:
+  - `interrupt_code_tools_for_run`
+  - scope retention on open (`code_tool.rs:999-1010`)
+  - per-run budgets
+  - `joins()` (`code_tool.rs:485-499`)
+  - `CallDeferred` validation (`code_tool.rs:1109-1121`)
+  - `validate_emit_effect` and `validate_code_tool_invocation`
+    (`workflow_tool.rs:1576-1668`, `1968-1993`).
+
+  A `Run` owner stamps `run_id` in joins, with no turn or batch.
+- **Liveness.** `ModelInvocation`: today's parked-parent check. `Run`: the run is
+  Active, Parked or Cancelling, the session is a program session, and the scope
+  id matches the run's execution.
+- **Calls outside a model turn need a call context.** This is needed for any
+  non-model caller, not just this design. Starting `agent_run` or `program_run`
+  creates a `WorkflowToolInvocation`, and `ToolInvocationBatchRequest`
+  (`core/io.rs:95-99`) requires `turn_id`/`batch_id`. Introduce
+  `CallContext = ModelBatch { turn_id, batch_id } | Scope { scope_id } | Run`.
+  `Run` is the context of the program run's own invocation (D6); `Scope` is a
+  call made from inside a run-owned scope. Make the stored join fields `Option`
+  with `serde(default)`, and replace
+  `WorkflowToolInvocationId::for_call(..., turn_id, batch_id, ...)` derivations
+  with one that takes a `CallContext`. Do not fabricate synthetic turns. Code
+  mode never uses the new variants, so this lands in Phase 2, not Phase 1.
+- **Completion `Ack`.** The invoke Update returns as soon as the call is admitted
+  or deduped, carrying the recorded outcome only if the call is already
+  terminal. Outcomes are then observed only through `scope_recorded_outcomes`
+  (D7), never through an invoke Update's return value, so every attempt sees
+  completions in the same order. `Blocking` keeps today's wait-for-terminal
+  behaviour for code mode. `Ack` is what lets a program attempt drop its
+  interpreter while calls are pending; without it, D7's suspension cannot
+  release the session.
+- **Approvals.** The approval policy must reach the per-call activity
+  (`activities/tools.rs:556-599`), which is where approval-required calls are
+  rejected today; clearing `approval_decision` in the core is not the gate.
+  `Park` follows Cloudflare's durable runtime (`runtime.ts` `decide`,
+  `proxy-tool.ts` `resumeCodemode`): an approval-required call is admitted as
+  a recorded `Pending` entry awaiting a decision, the attempt returns
+  `Suspended` on it (D7), an approval completes the call through the ordinary
+  per-call activity and wakes the run, a rejection completes it as a typed
+  failed outcome the program can catch, and an unanswered pause expires after
+  a configurable TTL (Cloudflare's default is 24 hours) as a rejection. The
+  decision is a promise the session owns, so the executor needs nothing new:
+  a parked call is just a slow call.
+- **Retention `Indexed`.** State keeps full records only for non-terminal calls.
+  Terminal calls shrink to a compact index entry:
+  `request_id → { spec_digest, status, output_ref | error_ref }`. Admission dedup
+  needs only the digest. Full specs and results stay in events and CAS, and the
+  replaying executor fetches them through a batched
+  `scope_recorded_outcomes(scope_id, after_request, limit)` query instead of one
+  Update per recorded call.
+- **Wire compatibility.**
+  - Keep the stored kind strings `lightspeed.core.code_tool.*` and the existing
+    field names. `CallScopeSpec` decodes legacy events (no `owner`/`policy`) as
+    code-mode defaults, using the `CodeToolCallResultWire` shim pattern
+    (`code_tool.rs:163-190`).
+  - On the workflow side, `session/code_tools.rs` becomes `session/scoped_calls.rs`.
+    Keep the existing Update names (`open_code_tool_scope`, `invoke_code_tool`,
+    `close_code_tool_scope`, `code_tool_scope_report`) registered for code
+    executions in flight during an upgrade. Program scopes use the same handlers
+    with an owner/policy-bearing open request.
+- **Invariant.** The extraction lands **before** any program behaviour, and the
+  existing code-tool unit, replay and live suites pass unchanged
+  (`core/drive.rs` code-tool tests, `code_tools_live.rs`, `code_workflow_live.rs`).
+  Code mode is the regression gate for the refactor.
+
+### D4. Canonical, versioned tool contracts for programs
+
+Programs must not call `tools.Bash`, a name that exists only because a Claude-style
+presentation was active. Add a program-facing contract layer in `crates/tools`:
+
+- **Built-in tools.** Each logical operation (`vfs.read`, `env.run_process`,
+  `web.fetch`, `agent.run`, `program.run`, `promise.await`, `time.sleep`, …)
+  publishes a **contract**: a canonical argument schema, a result schema, and an
+  adapter to the logical operation. The owned result schemas built for code mode
+  (`FunctionDefinition.output_schema`, `tools/src/runtime/mod.rs:21-30`, filled
+  in `tools::callable`) are the starting point. The first contract pin is the
+  digest of the argument and result schemas: a program records the digest it was
+  written against, and a changed schema fails that binding with a typed
+  `ContractChanged` error. Named contract versions, with old versions kept alive
+  while pinned programs use them, come when the first incompatible change to a
+  built-in schema is actually needed, not before.
+- **MCP tools.** Exposed as `mcp.<server>.<tool>`, with the contract pinned to the
+  tool's input schema hash at session creation. A changed upstream schema fails
+  that binding with a typed `ContractChanged` error, not silent drift.
+- **Admission up front.** `PinnedProgram.requires` lists the contracts the program
+  uses. Session creation fails if any required contract is ungranted or
+  unsupported, instead of a program failing at call 400. Every attempt
+  re-checks `requires` before it starts, as Cloudflare's resume refuses a run
+  whose connectors are no longer configured (`proxy-tool.ts`
+  `resumeCodemode`), so a revoked binding fails the run with a typed error at
+  the next attempt rather than at the next call. Each call is still checked
+  against current grants (`PerBindingGrant`). Unrelated tooling changes don't
+  invalidate bindings.
+- **Waiting is a tool.** `time.sleep` is a durable wait that completes through
+  the session's promise deadline machinery; it is an ordinary call with a
+  recorded outcome, so replay returns the same value. The guest's `setTimeout`
+  lowers to it (D8). Reading the clock is not a tool: `Date.now()` is a host
+  channel fed by recorded timestamps (D8), the way workerd feeds it from its
+  I/O context. Pipelines need deadlines, and this is the only way to express
+  them under D8.
+- **Guest surface, the workerd way.** A program is a module with a handler, not
+  a script body with a global `tools`:
+
+  ```js
+  export default {
+    async run(input, env, ctx) {
+      const page = await env.web.fetch({ url: input.doi }, { why: "¶3 cites this" });
+      return await env.agent.run({ agent: "verifier", input: { page, claim: input.claim } });
+    }
+  };
+  ```
+
+  workerd hands a worker its capabilities only through `env`, and Cloudflare's
+  code mode exposes each tool namespace in the sandbox as a `Proxy` whose
+  property access yields a function that makes one host call (`executor.ts`
+  `proxyInits`). Here `env` is built by the host from the pinned bindings in
+  `PinnedProgram.requires`, one namespace per contract family (`env.vfs.read`,
+  `env.web.fetch`, `env.agent.run`, `env.program.run`, `env.mcp.<server>.<tool>`,
+  `env.time.sleep`). Each entry wraps an opaque binding handle from the scope
+  (D3); the guest holds no names it can forge. `ctx` carries `say`, `step` and
+  the run's `startedAt` (D11). Calls are methods only, arguments by value as
+  JSON, no property reads across the boundary. The host never rejects across
+  the bridge: a pause, a failed outcome or a host error come back as a control
+  value and the generated wrapper throws locally, so the program's own
+  `try/catch` sees an ordinary exception (`executor.ts`
+  `CONNECTOR_CONTROL_KEY`). Argument and result schemas generate the
+  TypeScript declaration of `env` for authors and models writing programs.
+- **Rollback, later.** Cloudflare tool contracts may carry a `revert`
+  (`connectors/base.ts`) and its runtime can roll back applied actions. A
+  contract-level `revert` would make D10's orphaned-effects report
+  actionable. Reserve the field; do not implement it in these phases.
+
+### D5. Gate model-only behaviour on the session driver
+
+Most gates become one check: `state.driver.is_program()`.
+
+| Place | Program session behaviour |
+|---|---|
+| `turn::plan_next` (`turn.rs:50-92`) | never start a turn |
+| `context::plan_next` / `missing_run_input_entries` (`context.rs:897-965`, `1143-1171`) | no model context at all |
+| compaction and the context-failure terminal arm (`run.rs:473-499`) | never planned, never reached |
+| `validate_run_config_for_state` (`config.rs:793-803`; callers `admit.rs:282`, `config.rs:1632`, `1662`) and `validate_recorded_run_config` (`config.rs:807-821`, `run.rs:655`) | skip model validation; validate input against `input_schema` |
+| session config validation | a model is not required |
+| `tool_invocation_request` `.expect("active run has a configured model")` (`drive.rs:947-958`) | `Canonical` bindings need no presentation variant |
+| `terminal_run_proposal` (`run.rs:465-597`) | program runs complete only through D6 |
+| Cancelling → Cancelled (`run.rs:802-806`) | also wait for the run-owned scope's calls to be terminal |
+| steering, context edits, compaction controls, model changes | typed `UnsupportedForSessionDriver` errors |
+
+### D6. Starting and finishing a program run
+
+A program run is a **workflow-tool invocation owned by the run** rather than a
+new session command. The generic workflow-tool protocol already provides
+starts, replies, holder cancellation, recovery queries and idempotent promise
+resolution, and AGENTS.md asks that workflow-backed work use it instead of a
+feature-specific transport into the session worker. The invocation's call
+context is `CallContext::Run` (D3).
+
+- **Start.** When a run on a program session is Accepted/Started, the harness
+  emits a start request for a `ProgramRunWorkflow` invocation on the existing
+  `code` task queue (`Role::Code`, `DEFAULT_CODE_TASK_QUEUE` at
+  `temporal-runtime/src/config.rs:188`) with the deterministic execution id
+  `program:{session}:{run}`. `start_execution`
+  (`worker/activities/workflow_tools.rs:28-105`, policy in
+  `execution_start_options` at `:107-112`) uses `RejectDuplicate` because a
+  code execution must never run twice. A program run must be restartable if
+  its workflow fails before it completes the run, so the start policy becomes
+  a per-kind option and program runs use `AllowDuplicateFailedOnly`, treating
+  `AlreadyStarted` as success. The workflow never exits without replying: its
+  top level catches every error and replies `Failed`.
+- **Finish.** The workflow resolves the invocation's reply completion promise
+  with `Completed { output } | Failed { report_ref }` through the ordinary
+  `deliver_emission` path. The harness, on resolving a run-owned invocation's
+  reply, validates `output` against `output_schema` and produces
+  `Run::Completed`/`Failed`, reusing `with_run_terminal_side_effects`
+  (`drive.rs:428-458`) and `notify_on_terminal`. Promise resolution is already
+  idempotent, so a redelivered reply is a no-op and a differing one is a
+  conflict. A schema failure is a `Failed` run with a program failure report.
+- **Cancel.** `CancelRun` sends the existing holder cancellation
+  (`InvocationCancellation` through `deliver_emission`) to the program
+  workflow. The workflow closes the scope with `cancel_pending`, waits for
+  terminal outcomes, and replies cancelled. Today `cancel_pending` reaches only
+  `Waiting` joined calls whose promise is runtime-owned, by a best-effort signal
+  (`code_tool.rs:876-924`, `promise_sources.rs:198-243`); `Pending` calls with a
+  per-call activity in flight are not cancelled, so the drain could wait on a
+  long `env.run_process`. For run-owned scopes, close-with-cancel must also
+  request cancellation of pending per-call activities, and the drain gets a
+  bounded deadline after which remaining calls are force-completed as
+  interrupted, as `interrupt_code_tools_for_run` already does at run end
+  (`code_tool.rs:30-75`, called from `run.rs:1041`).
+- **Failure with work in flight.** When an attempt returns `Threw` while calls
+  are still pending (for example a child session still running), the workflow
+  closes the scope with cancel and drains exactly as for cancel before it
+  replies `Failed`. A program that throws must not leave orphaned children.
+- **Recovery.** The existing `workflow_tool_recovery` query applies unchanged.
+- **Retention.** Record contains edges session → `source_ref`/schemas and
+  run → `input_ref`, following the pattern in `session_tools.rs:780-822`.
+
+### D7. Durability by re-execution
+
+Session-side dedup (D3) already returns recorded outcomes for re-issued requests.
+This deliberately reverses p191's "Keep JavaScript ephemeral" rule for program
+sessions only; code mode keeps `maximum_attempts = 1`. The reversal is safe only
+under the determinism contract (D8) and the `Ack` completion policy (D3). The
+code-mode host's single-attempt rules don't apply, because programs get their
+own host:
+
+- **`ProgramRunWorkflow`** (new, `code` role) owns the run's scope for the run's
+  lifetime. It never closes the scope on interruption, only on a real terminal or
+  a cancel.
+- The **`program_attempt` activity** opens or reattaches to the run's scope,
+  prefetches recorded outcomes (`scope_recorded_outcomes`), and drives an executor
+  (D9) with them as the replay journal. Retries are allowed.
+
+```
+loop {
+  outcome = program_attempt(descriptor, attempt_no)   // activity, retryable
+  match outcome {
+    Returned(output)  => reply Completed(output), break
+    Threw(report)     => reply Failed(report),    break
+    Suspended(waits)  => wait for wake emission or deadline; continue
+    Interrupted       => backoff; continue               // worker/VM loss
+  }
+}
+```
+
+- **Observing completions.** A running activity cannot receive a signal, and
+  with `Ack` completion (D3) an invoke Update returns nothing to wait on. The
+  attempt therefore learns outcomes only by polling
+  `scope_recorded_outcomes(scope_id, after_request, limit)` on the session
+  workflow. While it has calls in flight and no runnable work it polls at a
+  short interval (on the order of 100–250 ms, heartbeating) for a bounded
+  **hold window**, on the order of tens of seconds, sized so that short tool
+  calls complete inside one attempt. The query answers from the session
+  workflow's in-memory state, so the cost is one workflow query per poll, not a
+  history event. Delivery takes completions in the order the query returns
+  them, which is log order (D8).
+- **Suspension.** When the hold window expires, or as soon as the attempt is
+  waiting only on a child session, a joined workflow tool, `await` or
+  `time.sleep`, the attempt returns `Suspended` with the ids it waits on and
+  drops the interpreter. The session sends a wake emission to
+  `program:{session}:{run}` when a call in that scope reaches a terminal state,
+  and the workflow starts the next attempt. No invoke Update is outstanding
+  during an attempt, let alone while suspended, so the session can
+  continue-as-new. Today `invoke_code_tool` blocks until the call is terminal
+  and keeps `waiters > 0` (`session/code_tools.rs:85-112`,
+  `wait_loop.rs:108-148`).
+- **Workflow history budget.** Each attempt costs the program workflow a few
+  history events, and each wake is a signal. A run that suspends on every one
+  of a thousand sequential child calls therefore needs `ProgramRunWorkflow` to
+  continue-as-new on the same history threshold the session uses. Its state is
+  small (descriptor, attempt counter, last known scope status) and the scope
+  itself lives in the session, so continue-as-new is cheap. Replay cost is
+  bounded too: re-executing a journal of N recorded outcomes is in-memory JS
+  with no effects, so even N attempts over N calls stay well inside the
+  budgets in D13.
+- **Reattach.** On a new attempt, a re-issued `call-N` whose outcome is still
+  pending is deduped to a no-op and the attempt keeps waiting on it. Nothing is
+  re-executed and no effect is re-applied. This is the strongest reason for
+  D3: Cloudflare's durable runtime records a call as `executing` before the
+  effect runs and re-executes it on replay if the result was never recorded
+  (`runtime.ts` `decide`, the `executing` arm), so a crash between effect and
+  record applies the effect twice. Here the effect belongs to the session and
+  the request id is the dedup key, so that window does not exist.
+- A parent waiting on ten child sessions for a day holds no interpreter. Each
+  child is a separate session workflow.
+
+### D8. Determinism contract
+
+This is part of the executor protocol (D9) and binds every executor:
+
+1. **Quiescent delivery.** Completions are delivered only when the guest has no
+   runnable work, one completion per quiescent point. This is a behaviour
+   change for the QuickJS engine: today its loop deliberately calls `try_recv`
+   before every job so that a self-scheduling microtask chain cannot starve the
+   bridge (`engine.rs:522-556`), which delivers completions while jobs are
+   still runnable. Durable mode must deliver only when `execute_pending_job`
+   finds nothing to run, and rely on the elapsed-time check for starvation. In
+   V8/workerd it means one completion per macrotask over a single ordered
+   channel.
+2. **Log-order delivery.** Completions are delivered in the order their
+   `CallCompleted` events were appended to the session log, which is what
+   `scope_recorded_outcomes` returns (D7). Execution is then a pure function of
+   the source, the input and the journal, with no extra log events, and
+   `Promise.race`, process-as-completed loops and `Promise.allSettled` all
+   work. The live attempt must deliver only from that ordered feed, never from
+   an individual Update's return value. Replay is well defined because a
+   completion is logged only after its request was admitted: by the time a
+   replaying guest reaches a quiescent point it has issued every request the
+   live run had issued before that point, so the next completion in log order
+   always names a request the guest already holds. Issuance order is not
+   required.
+3. **Host-owned globals, the workerd way.** workerd keeps the standard globals
+   and makes the host own them instead of removing them
+   (`src/workerd/server/v8-platform-impl.{h,c++}`, `src/workerd/io/io-util.c++`,
+   `src/workerd/io/io-context.c++`, `src/workerd/jsg/resource.h`). Programs do
+   the same:
+   - **Clock.** workerd routes `Date.now()` through its V8 platform's
+     `CurrentClockTimeMillis` override to `IoContext::now()`: a per-context time
+     that is constant between ticks, monotonic across reads, and clamped to a
+     fired timer's own deadline when its callback runs, so a timer sees exactly
+     its scheduled time. Outside any I/O context it returns 0. Here `Date.now()`
+     reads a host channel set to the run's recorded `started_at` at `Start` and
+     to the recorded timestamp carried by each delivered `Complete` (D9), and
+     never goes backwards. Between delivery points it does not move. The
+     QuickJS prelude replaces `Date.now` and the zero-argument `Date`
+     constructor; the workerd wrapper module (D12) does the same in module
+     scope. There is no `time.now` tool.
+   - **Timers.** workerd schedules `setTimeout` relative to `Date.now()` so the
+     delay appears exact. Here `setTimeout(cb, ms)` and `setInterval` lower to
+     `time.sleep` calls, so a timer is a recorded durable wait with a request
+     id, and the clock is clamped to the deadline on delivery exactly as in
+     workerd. `queueMicrotask` and promise jobs are untouched.
+   - **Randomness.** workerd leaves `Math.random` on V8's own generator; it
+     mitigates timing attacks, not replay. Programs need replay, so the prelude
+     and wrapper replace `Math.random` with a PRNG seeded from the execution id
+     and route `crypto.getRandomValues` and `crypto.randomUUID` through the
+     same source.
+   - **Dynamic code.** workerd disables `eval` and `new Function` with
+     `AllowCodeGenerationFromStrings(false)`. Executors do the same. This is a
+     sandboxing rule rather than a determinism one, but it is cheap and the
+     program source is already pinned.
+   - **Temporal.** workerd installs a constant-zero host clock for the Temporal
+     API so the requirement is not forgotten when it is enabled. An executor
+     that exposes Temporal must feed it the same channel as `Date.now()`.
+4. **Request ids** are sequential per execution and assigned by the guest at
+   issuance (`call-N`, as today at `engine.rs:324`). Narration uses a separate
+   sequence (D11). This is deliberate: Cloudflare's durable runtime assigns the
+   sequence on the host when a call arrives (`proxy-tool.ts` `createCursor`),
+   so two calls issued by `Promise.all` can be numbered in either order, and
+   its documentation tells authors to await connector calls one at a time in
+   any run that might pause (`docs/codemode/runtime.md`). Guest-side issuance
+   order is a function of the program alone, so fan-out is replay-safe here.
+5. **Divergence.** A re-issued `call-N` whose binding or argument digest differs is
+   a typed `Nondeterminism` failure, returned to the program workflow as data
+   and recorded in the failure report (D10), never thrown across the bridge.
+   Today this surfaces as `Conflict` from the workflow and reaches the script
+   as `admission_rejected`; argument refs are CAS hashes of
+   `serde_json::to_vec` (`temporal-runtime/src/code.rs:372-392`), which ties
+   the journal to one serialiser's key order and number formatting.
+   Cloudflare compares canonical JSON with recursively sorted keys
+   (`runtime.ts` `stableStringify`). Program scopes digest a canonical form
+   (sorted keys, no insignificant whitespace, fixed number formatting) so a
+   journal written under QuickJS replays under workerd (D9). The stored
+   argument blob itself stays as sent.
+6. **Semantics version.** `ProgramEngine.semantics_version` pins the prelude and
+   guest API. An executor refuses to resume an unsupported version.
+
+Executor conformance tests: run a script live with randomised completion timing,
+then replay it against the recorded outcomes. Both runs must make identical calls
+and produce identical output. Every executor (QuickJS and workerd) must pass the
+same suite, since they implement quiescent delivery differently.
+
+### D9. Language-neutral executor protocol
+
+Executors are interchangeable behind a `ProgramExecutor` trait used by
+`program_attempt`. The wire contract is JSON messages, independent of codemode's
+Rust types:
+
+| Direction | Message | Contents |
+|---|---|---|
+| host → executor | `Start` | execution id, attempt, module bundle ref (a modules map plus a main module, the shape the Worker Loader takes), semantics version, input, recorded `started_at`, contract manifest (canonical names and schemas: the shape of `env`), limits, replay journal (recorded outcomes with their timestamps, in log order) |
+| host → executor | `Complete` | request id, outcome (result or error ref and inline JSON), recorded completion timestamp (feeds the clock, D8) |
+| host → executor | `Cancel` | reason |
+| executor → host | `Request` | request id, binding, args, annotation `{why, span_path, source_location}` |
+| executor → host | `Notes` | narration and span records with their sequence numbers |
+| executor → host | `Suspend` | the request ids it is waiting on |
+| executor → host | `Finish` | `Returned { output }` or `Threw { error, stack, span_path }` |
+
+- **Direction of authority.** The `program_attempt` activity holds the stream and
+  forwards requests to the session through the scoped-call Updates. Executors
+  never get Temporal clients, keys or tenant identity.
+- **Executors:**
+  - **In-process QuickJS.** Reuse the `codemode` engine with a durable mode
+    implementing D8. It is the first executor (Phases 2–7) and stays supported
+    as the only executor on macOS and Windows, with an explicit lower trust level
+    than workerd in smolvm. Code mode keeps using the same engine in its
+    ephemeral mode.
+  - **workerd in smolvm.** The higher-trust Linux target, Phase 8. Details in
+    D12.
+  - **Remote SDK (optional, later).** The same protocol over the public API, so a
+    non-JS program (for example a Python pipeline) can drive a program session
+    with the same dedup and replay guarantees. Whether this is first-class is an
+    open question.
+
+### D10. Repair through a separate agent session
+
+- **Failure report.** A failed run records a `report_ref` containing:
+  - the error and stack
+  - the span path
+  - the last N calls
+  - the attempts
+  - nondeterminism, limit, schema or contract details
+
+  Add `RunFailureKind::Program`. A failed child is a failed call outcome in the
+  parent: the parent can catch it or fail in turn. The report points at the
+  failing leaf session. Every terminal outcome, including divergence and limit
+  failures, is returned as a value to the caller and never raised across a
+  bridge, the rule Cloudflare's runtime applies so that an agent loop is never
+  broken by a sandbox exception (`docs/codemode/approvals.md`).
+- **Inspect grant.** A repair agent is an ordinary agent session with a `programs`
+  feature grant scoped to sessions or program names. It gets these trace tools:
+  - `program_trace(session, run, span|range)`
+  - `program_call(session, run, request_id)`
+  - `program_source(session | program@rev)` (the `@rev` form needs the
+    revision history from D2)
+  - `program_dry_replay(source, session, run)`
+- **Dry replay.** Run an executor with a journal-only host. Completions come from
+  the recorded outcomes. The first call with no matching record stops execution
+  and is reported. There are no effects. Instrumentation is free, because notes
+  don't shift `call-N`.
+- **Publish.** `program_publish(name, source)` creates a new program profile
+  revision, gated by policy: auto-publish or human approval.
+- **Resume.** Create a new program session from the new revision with
+  `resume_from: { session, run }`. Its host matches calls against the old journal
+  by `(binding, args digest, occurrence count)`.
+  - A match is admitted with `reuse: Some(prior_origin)`, copying result refs
+    without re-executing or re-applying effects.
+  - Matched child-session calls reuse the child's result.
+  - Earlier effects the new run never reaches are reported as **orphaned effects**.
+
+  This is a research item.
+
+### D11. Observability
+
+**Guest API:**
+
+```js
+await ctx.say("Found 132 citations; checking each");      // narration
+await ctx.step("citation 14", async () => { ... });       // span
+await env.web.fetch(args, { why: "¶3 cites this DOI" });  // per-call annotation
+```
+
+`ctx` plays the role of workerd's `ExecutionContext`: the handler's handle on
+the host for things that are not tool calls. `ctx.step` is a span only. It
+does not record its return value, unlike Cloudflare's `codemode.step`, which
+records a closure's result as a log entry so nondeterministic local work
+replays (`proxy-tool.ts` `STEP_PRELUDE`). With host-owned globals (D8) there is
+no nondeterministic local work to capture, and a recorded step would shift
+`call-N`, which D10's free instrumentation depends on.
+
+**Harness:**
+- Add a new `CoreAgentEvent::Program(ProgramEvent)` family with these variants:
+  - `Narration { execution_id, seq, span_path, text_ref }`
+  - `SpanOpened` / `SpanClosed { execution_id, seq, name, parent }`
+  - `AttemptStarted { execution_id, attempt, replayed_calls }`
+- Narration and spans use their own sequence (`note-N`), flushed as `Notes`
+  batches. Admission dedups by `(execution_id, seq)`.
+- The scoped-call spec gains an optional `annotation`, **excluded from the dedup
+  digest**, so a changed reason or line number isn't divergence.
+- Run-owned scopes stamp `run_id` in joins, which supplies the run join that
+  code-tool events lack today.
+- Register new kinds in `core/codec.rs:105-211`. Use `serde(default)` for new state
+  fields and add fixtures in `crates/harness/fixtures/`.
+
+**Projection, API and web:**
+- For run-owned scopes, project full call views: canonical tool name, args
+  preview, output from `output_ref`, annotation, duration and attachments. This
+  replaces the payload-free `CodeToolProgress` (`api-projection/src/lib.rs:675-709`)
+  for those scopes. Code mode's projection is unchanged.
+- Child-session calls link to the child session id, so the UI can drill down
+  through the tree.
+- Add `RunView.program: Option<ProgramRunView { spans, calls, narration, attempts }>`.
+- Web: add the new kinds in `transcript.ts` (the `codeToolProgress` no-op is at :285)
+  and in `tool-trace.tsx`, with spans as collapsible groups and narration as
+  assistant text.
+
+### D12. workerd runner in smolvm
+
+- **Reuse** the provider controller plane:
+  - target lifecycle and power (`environment-protocol/src/control/*`)
+  - the `ProviderBindingContext` per universe
+  - the `ProviderController` connector (`temporal-runtime/src/environments/provider_controllers.rs`)
+  - the gateway relay pattern.
+- **New:**
+  - a `program/*` data plane carrying the D9 messages
+  - a "system runner" machine class that sessions can never select as an
+    environment
+  - a vsock/AF_UNIX relay: the Incus relay dials ws over a private IPv4
+    (`environment-provider-incus/src/relay.rs:22`).
+- **workerd:**
+  - one isolate per execution, ideally through the Worker Loader binding (check
+    its status)
+  - `globalOutbound` set to none, and no `--net` on the VM
+  - D8 delivery and the global overrides (`Date`, timers, `Math.random`,
+    `crypto` randomness) in a wrapper module that runs before program source.
+    Standalone workerd cannot host a custom V8 platform, so the clock override
+    lives in the wrapper rather than in `CurrentClockTimeMillis` as it does
+    inside workerd itself.
+
+### D13. Composition: subprograms and sub-agents
+
+- **New workflow tools** `program.run` (joined) and `program.spawn` (promises) sit
+  beside `agent.run`/`agent.spawn`. Arguments are
+  `{ program: name | inline, input, env? }`; the result is the child's validated
+  output. The latest revision is resolved at admission and the resolved
+  revision and `source_ref` are recorded in the call arguments, so parent
+  replay is stable without reading past revisions. Explicit `name@rev` pinning
+  arrives with revision history in Phase 7 (D2).
+- **Capability passing.** The Worker Loader lets a parent decide a child's
+  `env` (`worker-loader.h` `WorkerCode.env`), so attenuation is structural: a
+  child can only hold what the parent put there. `env` in `program.run` and
+  `agent.run` is the same idea at the session boundary: a list of the parent's
+  own binding handles the child may use, recorded in the call arguments as the
+  canonical contract ids they resolve to. The child's effective grants are its
+  profile's grants intersected with that list; an omitted `env` means the full
+  profile grant. Because the handles come from the parent's scope, a parent
+  cannot name a capability it does not hold, so the common case of the subset
+  check below is enforced by construction. It also lets a program hand a
+  sub-agent a narrower toolset than the agent's profile allows, which is how a
+  "verify this one citation" child gets `web.fetch` and nothing else.
+- **Generalise `SubagentExecutionWorkflow` into a child-session execution
+  workflow** (`workflows/subagent_execution.rs:40-171`,
+  `temporal-runtime/src/subagents.rs:206-430`). The `subagent_prepare` activity
+  creates the child and starts its run with `notify_on_terminal`; the workflow
+  waits for `RunTerminal`, closes the child, then resolves the parent promise,
+  and handles cancel and deadline. A program child differs only in profile kind
+  and run source. One delegation tree means one set of depth, descendant and
+  concurrency limits.
+- **Grants.** A child's grants must be a subset of its parent's. This check does
+  not exist today: `delegated_session_authority`
+  (`gateway/service/authorization.rs:178-195`) only requires that the child's
+  access row has a parent, and the only narrowing is numeric
+  (`SubagentLimits::attenuated_by`, called at `subagents.rs:280-286`, defined
+  in `harness/src/core/components/config.rs:492-499`). A child runs its
+  profile's own config, applied inline at preparation
+  (`subagents.rs:365-396`), and that profile may legitimately hold grants the
+  parent lacks. Add a feature, tool and environment subset check at child
+  preparation and fail the call with a typed error when the named profile asks
+  for more than the parent holds. Apply it to program children from the start.
+  Applying it to sub-agents is a **breaking change** for existing delegation
+  configurations, so it ships separately behind its own decision and a
+  documented migration, not as a side effect of this plan.
+- **Fan-out budgets.** Two existing limits cap a program's fan-out well below
+  the motivating case. `MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN` is 32
+  (`workflow_tool.rs:16`), and code-tool admission already counts pending
+  workflow calls against it (`code_tool.rs:445-471`). The delegation defaults
+  are depth 2, 16 descendants and 4 concurrent children
+  (`api/src/sessions.rs:592-602`). A citation pass over 100 sources needs more
+  than 100 child calls in one run. For run-owned scopes the emission cap comes
+  from `ProgramLimits`, bounded by the `FeaturesConfig.program` ceiling, rather
+  than the constant, and program profiles set their own delegation limits
+  within the parent's attenuated grant. Whether program children get a
+  separate counter in the delegation tree stays an open question.
+- **Typed boundaries.** Input and output schemas make subprograms typed functions.
+  Agent children called from programs can be given an output schema too. A
+  child's failure is a failed call outcome carrying the child's report ref,
+  returned as a value; the parent's `env` wrapper throws locally (D4), so a
+  parent can catch it, retry with a different child, or fail in turn.
+- **Both directions.** Agent sessions can call `program.run`.
+
+## API surface
+
+- **Session creation:** `SessionStartParams` / `ManagedSessionStartParams`
+  (`crates/api/src/sessions.rs:28`, `:63`) accept a program profile. The session
+  view exposes `driver: agent | program { programId, revision, semanticsVersion }`.
+- **Profiles:** `ProfileDocument.program: Option<ProgramSpec { sourceRef, semanticsVersion, requires, inputSchema?, outputSchema?, limits? }>`
+  (`crates/api/src/profiles.rs:179`).
+- **Runs:** `RunStartSource::Program { input }` (`crates/api/src/runs.rs:76`).
+  Mirror it in `RunViewSource` (`views.rs:224`) and the run-summary projection
+  (`api-projection/src/lib.rs:209-290`).
+- **Tool contracts:** a read method listing the available canonical contracts and
+  versions, for authors and program-writing models.
+- **Grants:** `FeaturesConfig.program` (`sessions.rs:387`) sets ceilings and
+  supported semantics versions for program sessions. `FeaturesConfig.programs`
+  grants calling, inspecting and publishing programs.
+- **Regenerate:** `cargo run -p api --bin export-schema`, the SDK and
+  configurator-mcp generators, the config and method-role scripts, and
+  `cargo run -p temporal-workflow --bin export-workflow-contract`.
+- **Bots** need no new API. A bot with a program profile gets a program session
+  from `ensure_session`, and `start_run`
+  (`temporal-runtime/src/bots/sessions.rs:593-629`) sends `Program { input }`.
+
+## Phases
+
+Each phase lands green on its own (clippy with `-D warnings`, scoped tests,
+regenerated contracts).
+
+1. **Extract the scoped-call core** (D3). This is a pure refactor.
+   - Changes: owner and policy with code-mode defaults, including the
+     `Blocking | Ack` completion policy; the `scope_owner` helper; legacy
+     decode; `session/scoped_calls.rs` with the existing Update names. Nothing
+     that code mode does not exercise: `CallContext` and optional joins move to
+     Phase 2.
+   - Gate: every existing code-tool unit, replay and live test passes unchanged.
+     Add codec fixtures for legacy and new scope events.
+2. **Program session driver** (D1, D2, D5, D6).
+   - Changes: `SessionDriver`; program profiles and pinning;
+     `RunRequestSource::Program`; planner gating; `CallContext` and optional
+     joins; run-owned scopes with program policy (`Ack` completion) and the
+     `scope_recorded_outcomes` query; the run-owned workflow-tool invocation
+     and its reply handling; per-kind start policy; cancel and failure drain;
+     `ProgramRunWorkflow` with `AllowDuplicateFailedOnly` running one attempt
+     against the in-process QuickJS executor, polling for outcomes.
+   - Runs in this phase are **not durable**: a worker loss fails the run until
+     Phase 4 adds replay.
+   - Tests: harness replay tests for a program run with calls, including a joined
+     child and an `await`, plus fork rejection. Live Temporal suite, serialised.
+3. **Canonical contracts** (D4).
+   - Changes: digest-pinned contracts for built-ins, including `time.sleep`;
+     MCP schema pinning; `requires` admission at creation and at every attempt;
+     the `env`/`ctx` guest surface with the host-owned globals from D8.
+4. **Durable execution** (D7, D8, D9).
+   - Changes: indexed retention; canonical argument digests; retryable
+     attempts; the hold window, suspension and wake; `ProgramRunWorkflow`
+     continue-as-new; the executor protocol; QuickJS durable mode with
+     quiescent, log-order delivery.
+   - Tests: conformance tests, and a live kill-and-resume test.
+5. **Composition** (D13).
+   - Changes: the child-session workflow; `program.run`/`program.spawn`; schemas;
+     program-owned fan-out budgets; `env` capability passing; the grant subset
+     check for program children.
+   - Tests: a live test of bot → program → {program, agent}.
+6. **Observability** (D11).
+   - Changes: notes and spans; annotations; program events; projections; web.
+7. **Repair** (D10). First failure reports, inspect grants, program revision
+   history in the profile store, trace tools and dry replay; then publish, and
+   resume with journal matching (research).
+8. **workerd runner** (D12). It can start after Phase 4, once the protocol is
+   stable, and must pass the Phase 4 conformance suite. QuickJS remains the
+   executor on non-Linux hosts.
+
+Phases 1–6 cover the issue-pipeline bots. Phase 7 delivers "hand it to an AI to
+fix".
+
+## Open questions
+
+- **Non-JS executors.** Should the remote SDK (D9) be first-class from the start,
+  for example for Python pipelines? That decides whether the protocol is public
+  API or internal.
+- **Optional joins** (`CallContext`, D3): is that acceptable to the maintainer, or
+  should scoped calls get a separate request type?
+- **Contract versioning** (D4): digest pinning defers this, but once a built-in
+  schema must change incompatibly, how long are old contracts supported and who
+  owns the compatibility promise?
+- **Hold window** (D7): what poll interval and hold window keep short tool calls
+  inside one attempt without loading the session worker? Needs measurement.
+- **Profiles** (D2): should a program profile extend `ProfileDocument` or be a
+  sibling document type in the same store? The need for revision history leans
+  toward a sibling, pending the maintainer's view.
+- **Tool naming** (D13): should `program.run` and `agent.run` merge into
+  `session.run`, with the child kind taken from the profile?
+- **Budgets** (D13): what are the per-program call, emission and wall-time
+  ceilings, and do program children need separate counters in the delegation
+  tree?
+- **Sub-agent grant subsetting** (D13): when, and with what migration, does the
+  subset check extend to agent children?
+- **Env handles** (D13): is a child's `env` recorded as canonical contract ids,
+  or as the parent's binding handles resolved again at child admission?
+- **Approval parking** (D3): which phase gets `Park`, and does the TTL live on
+  the program profile or on `FeaturesConfig.program`?
+- **Inspect grants** (D10): scoped to the subtree, to bot-owned sessions, or to
+  explicit session ids?
