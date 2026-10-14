@@ -29,6 +29,15 @@ use super::*;
 /// stay bounded even for pathological error chains.
 const MAX_BOUNDARY_ERROR_BYTES: usize = 16 * 1024;
 
+/// Model tool batches are the only dispatches this module drives; scoped
+/// calls are dispatched by the scoped-call loop.
+fn model_batch_id(request: &ToolInvocationBatchRequest) -> anyhow::Result<harness::ToolBatchId> {
+    request
+        .context
+        .batch_id()
+        .ok_or_else(|| anyhow::anyhow!("tool batch dispatch requires a model batch"))
+}
+
 pub(super) async fn invoke_tool_batch(
     ctx: &mut WorkflowContext<AgentSessionWorkflow>,
     drive: &mut CoreAgentDrive,
@@ -37,8 +46,9 @@ pub(super) async fn invoke_tool_batch(
     if batch_requires_unit_execution(&request) {
         return invoke_tool_batch_as_unit(ctx, drive, request).await;
     }
+    let batch_id = model_batch_id(&request)?;
     for group in execution_groups(drive.state(), &request) {
-        if !control::tool_batch_still_wanted(drive.state(), request.run_id, request.batch_id) {
+        if !control::tool_batch_still_wanted(drive.state(), request.run_id, batch_id) {
             // A cancel landed while an earlier group ran; the harness has
             // resolved the rest of the batch itself.
             break;
@@ -68,7 +78,7 @@ async fn invoke_tool_batch_as_unit(
     request: ToolInvocationBatchRequest,
 ) -> anyhow::Result<CoreAgentAction> {
     let run_id = request.run_id;
-    let batch_id = request.batch_id;
+    let batch_id = model_batch_id(&request)?;
     let activity_ctx = ctx.clone();
     let activity = activity_ctx.execute_activity(
         WorkflowActivities::tool_invoke_batch,
@@ -105,8 +115,7 @@ async fn invoke_tool_batch_as_unit(
                 .resume_tool_batch(
                     harness::ToolInvocationBatchResult {
                         run_id: request.run_id,
-                        turn_id: request.turn_id,
-                        batch_id: request.batch_id,
+                        context: request.context.clone(),
                         results,
                     },
                     workflow_time_ms(ctx),
@@ -218,7 +227,7 @@ async fn execute_call_group(
                 if !control::tool_batch_still_wanted(
                     drive.state(),
                     request.run_id,
-                    request.batch_id,
+                    model_batch_id(request)?,
                 ) {
                     abandon_inflight_calls(inflight).await;
                     return Ok(());
@@ -283,7 +292,7 @@ async fn resume_call(
 ) -> anyhow::Result<()> {
     if let Ok(ToolInvokeCallActivityResult::NeedsApproval { subject }) = &outcome {
         let action = drive.request_native_mcp_approvals(
-            request.batch_id,
+            model_batch_id(request)?,
             vec![harness::NativeMcpApprovalRequest {
                 call_id: request.calls[index].call_id.clone(),
                 subject: subject.clone(),
@@ -343,7 +352,7 @@ async fn resume_call(
             boundary_call_result(scheduled_call_id.clone(), ToolCallStatus::Failed, error_ref)
         }
     };
-    let action = drive.resume_tool_call(request.batch_id, result, workflow_time_ms(ctx))?;
+    let action = drive.resume_tool_call(model_batch_id(request)?, result, workflow_time_ms(ctx))?;
     match action {
         CoreAgentAction::AppendEvents {
             expected_head,
@@ -378,7 +387,7 @@ async fn await_environment_then_redispatch(
     environment_id: String,
 ) -> anyhow::Result<Option<CallOutcome>> {
     let run_id = request.run_id;
-    let batch_id = request.batch_id;
+    let batch_id = model_batch_id(request)?;
     let still_wanted =
         |state: &CoreAgentState| control::tool_batch_still_wanted(state, run_id, batch_id);
     let activity_ctx = ctx.clone();
@@ -542,8 +551,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-a"),
             run_id: harness::RunId::new(1),
-            turn_id: harness::TurnId::new(1),
-            batch_id: harness::ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: harness::TurnId::new(1),
+                batch_id: harness::ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: None,

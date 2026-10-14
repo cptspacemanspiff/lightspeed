@@ -290,7 +290,12 @@ export type WorkflowToolInvocation = WorkflowToolInvocation1 & {
   session_universe_id: string;
   tool_id: WorkflowToolId;
 };
-export type WorkflowToolInvocation1 = ModelBatchCall | {};
+export type WorkflowToolInvocation1 =
+  | ModelBatchCall
+  | {
+      tool_call_id: ToolCallId;
+    }
+  | {};
 /**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "WorkflowToolInvocationId".

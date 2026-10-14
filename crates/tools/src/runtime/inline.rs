@@ -70,10 +70,17 @@ impl InlineToolRuntime {
 
     /// Provider call IDs can repeat in later turns; transfer receipts must not.
     pub fn with_call_scope(mut self, request: &ToolInvocationBatchRequest) -> Self {
-        self.call_scope = Some(format!(
-            "{}:{}:{}:{}",
-            request.session_id, request.run_id, request.turn_id, request.batch_id,
-        ));
+        // The model-batch form is unchanged so existing receipts stay valid.
+        self.call_scope = Some(match &request.context {
+            harness::DispatchContext::ModelBatch { turn_id, batch_id } => format!(
+                "{}:{}:{}:{}",
+                request.session_id, request.run_id, turn_id, batch_id,
+            ),
+            harness::DispatchContext::Scope { scope_id } => format!(
+                "{}:{}:scope:{}",
+                request.session_id, request.run_id, scope_id,
+            ),
+        });
         self
     }
 
@@ -559,8 +566,7 @@ impl CoreAgentTools for InlineToolRuntime {
         }
         Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            batch_id: request.batch_id,
+            context: request.context.clone(),
             results,
         }))
     }
@@ -744,8 +750,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-a"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             active_environment_id: None,
             environment_policy: None,
@@ -1063,8 +1071,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session-a"),
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,

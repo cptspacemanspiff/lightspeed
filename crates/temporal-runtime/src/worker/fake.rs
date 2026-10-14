@@ -474,8 +474,7 @@ impl CoreAgentTools for FakeTools {
         guard.complete();
         Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            batch_id: request.batch_id,
+            context: request.context.clone(),
             results,
         }))
     }

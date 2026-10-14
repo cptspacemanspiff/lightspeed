@@ -182,11 +182,10 @@ pub(super) async fn failed_tool_batch_result(
         let error_ref = write_error_blob(
             blobs,
             format!(
-                "{}\nrun_id={}\nturn_id={}\nbatch_id={}\ncall_id={}\ntool_name={}\n",
+                "{}\nrun_id={}\n{}\ncall_id={}\ntool_name={}\n",
                 error.as_ref(),
                 request.run_id,
-                request.turn_id,
-                request.batch_id,
+                request.context,
                 call.call_id,
                 call.tool_name
             ),
@@ -211,8 +210,7 @@ pub(super) async fn failed_tool_batch_result(
     }
     Ok(ToolInvocationBatchResult {
         run_id: request.run_id,
-        turn_id: request.turn_id,
-        batch_id: request.batch_id,
+        context: request.context.clone(),
         results,
     })
 }
@@ -225,11 +223,10 @@ pub(super) async fn failed_tool_call_result(
     let error_ref = write_error_blob(
         blobs,
         format!(
-            "{}\nrun_id={}\nturn_id={}\nbatch_id={}\ncall_id={}\ntool_name={}\n",
+            "{}\nrun_id={}\n{}\ncall_id={}\ntool_name={}\n",
             error.as_ref(),
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context,
             request.call.call_id,
             request.call.tool_name
         ),

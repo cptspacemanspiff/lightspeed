@@ -342,8 +342,10 @@ mod tests {
                     vfs_working_directory: None,
                     session_id: SessionId::new("session-test"),
                     run_id: RunId::new(1),
-                    turn_id: TurnId::new(1),
-                    batch_id: ToolBatchId::new(1),
+                    context: harness::DispatchContext::ModelBatch {
+                        turn_id: TurnId::new(1),
+                        batch_id: ToolBatchId::new(1),
+                    },
                     promise_id_base: 1,
                     active_environment_id: None,
                     environment_policy: None,

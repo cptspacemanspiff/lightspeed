@@ -147,8 +147,7 @@ pub(super) async fn invoke_batch(
         if runtime_request.calls.is_empty() {
             return Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results: Vec::new(),
             }));
         }
@@ -204,7 +203,7 @@ pub(super) async fn invoke_batch(
             }
         };
         return Ok(ToolBatchOutcome::AwaitingApproval {
-            batch_id: request.batch_id,
+            context: request.context.clone(),
             completed_results: merge(runtime_results),
             approvals,
         });
@@ -217,12 +216,12 @@ pub(super) async fn invoke_batch(
             },
         },
         ToolBatchOutcome::Deferred {
-            batch_id,
+            context,
             call_id,
             completed_results,
             spec,
         } => ToolBatchOutcome::Deferred {
-            batch_id,
+            context,
             call_id,
             completed_results: merge(completed_results),
             spec,
@@ -807,8 +806,7 @@ mod tests {
                 RuntimeScript::Complete => {
                     Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                         run_id: request.run_id,
-                        turn_id: request.turn_id,
-                        batch_id: request.batch_id,
+                        context: request.context.clone(),
                         results: request.calls.iter().map(succeeded).collect(),
                     }))
                 }
@@ -818,7 +816,7 @@ mod tests {
                         .split_last()
                         .expect("deferring batch has calls");
                     Ok(ToolBatchOutcome::Deferred {
-                        batch_id: request.batch_id,
+                        context: request.context.clone(),
                         call_id: deferred.call_id.clone(),
                         completed_results: completed.iter().map(succeeded).collect(),
                         spec: AwaitSpec {
@@ -906,8 +904,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session-mixed"),
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 workspace_attachments: Vec::new(),
                 active_environment_id: None,
                 environment_policy: None,
@@ -1185,19 +1185,19 @@ mod tests {
         // The runtime saw one batch: the same dispatch minus its MCP calls.
         let received = tools.received.lock().expect("recording lock");
         assert_eq!(received.len(), 1);
-        assert_eq!(received[0].batch_id, request.request.batch_id);
+        assert_eq!(received[0].context, request.request.context);
         assert_eq!(received[0].promise_id_base, request.request.promise_id_base);
         assert_eq!(received[0].calls, vec![request.request.calls[0].clone()]);
         drop(received);
         let ToolBatchOutcome::AwaitingApproval {
-            batch_id,
+            context,
             completed_results,
             approvals,
         } = outcome
         else {
             panic!("expected an approval-gated batch, got {outcome:?}");
         };
-        assert_eq!(batch_id, request.request.batch_id);
+        assert_eq!(context, request.request.context);
         assert_eq!(call_ids(&completed_results), vec!["call_a"]);
         assert_eq!(
             approvals
