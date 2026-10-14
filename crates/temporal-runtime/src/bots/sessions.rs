@@ -294,6 +294,7 @@ fn resolve_bot_profile(profile: &AgentProfile, instructions: String) -> InlineAg
         display_name: profile.display_name.clone(),
         description: profile.description.clone(),
         document: ProfileDocument {
+            program: None,
             metadata: profile.document.metadata.clone(),
             retention: profile.document.retention.clone(),
             config: profile.document.config.clone(),

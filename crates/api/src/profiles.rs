@@ -191,6 +191,68 @@ pub struct ProfileDocument {
     /// change retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<ProfileSessionRetention>,
+    /// Makes sessions created from this profile program sessions: their
+    /// runs execute this program instead of a model, with `config` carrying
+    /// the grants the program may use. The program is resolved and pinned
+    /// when the session is created; a later revision never changes a
+    /// running session. Applying the profile to an existing session does
+    /// not change its program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
+}
+
+/// A deterministic JavaScript program: a module whose default export has a
+/// `run(input, env, ctx)` handler.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramSpec {
+    pub source: ProgramSource,
+    /// The guest API version the program was written against.
+    #[serde(default = "default_program_semantics_version")]
+    pub semantics_version: u32,
+    /// JSON Schema that run input must satisfy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// JSON Schema that run output must satisfy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ProgramLimitsInput>,
+}
+
+fn default_program_semantics_version() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ProgramSource {
+    Text {
+        text: String,
+    },
+    /// Borrowed CAS content: saving a profile does not retain the blob.
+    TextRef {
+        blob_ref: String,
+    },
+}
+
+/// Per-run budgets of a program; omitted fields take the runtime defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramLimitsInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_in_flight: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_wall_clock_ms: Option<u64>,
 }
 
 /// Root-session retention policy supplied by a profile at session creation.

@@ -823,6 +823,7 @@ mod tests {
                     description: Some("Reviews things".to_owned()),
                     revision,
                     document: ProfileDocument {
+                        program: None,
                         metadata: Default::default(),
                         retention: None,
                         config: None,
@@ -1036,6 +1037,7 @@ mod tests {
     fn inherit_attachment_resolves_against_the_captured_parent_environment() {
         fn document(attachments: Vec<api::EnvironmentAttachment>) -> ProfileDocument {
             ProfileDocument {
+                program: None,
                 config: Some(api::SessionConfig {
                     features: Some(api::FeaturesConfig {
                         environments: Some(api::EnvironmentsFeature {

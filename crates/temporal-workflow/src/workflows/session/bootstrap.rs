@@ -50,6 +50,7 @@ pub(super) async fn initialize(
         &core_state,
         is_fresh_session,
         args.workflow_tools.as_ref(),
+        &args.driver,
     )?;
     let run_submissions = loaded.run_submissions;
     let head = loaded.head;
@@ -89,31 +90,35 @@ async fn open_new_session(
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let session_config = args.session_config;
+    let is_program = args.driver.is_program();
 
     let mut drive = drive_from_state(ctx)?;
     let open_command = match args.workflow_tools {
         Some(workflow_tools) => CoreAgentCommand::OpenManagedSession {
-            driver: Default::default(),
+            driver: args.driver,
             config: session_config,
             session_universe_id: args.universe_id,
             workflow_tools,
         },
         None => CoreAgentCommand::OpenSession {
-            driver: Default::default(),
+            driver: args.driver,
             config: session_config,
         },
     };
     append_command(ctx, &mut drive, open_command).await?;
-    append_command(
-        ctx,
-        &mut drive,
-        CoreAgentCommand::UpsertContext {
-            expected_revision: None,
-            key: ContextEntryKey::new("instructions.000.default"),
-            entry: instruction_context_input(instructions_ref),
-        },
-    )
-    .await?;
+    // A program session has no model context to instruct.
+    if !is_program {
+        append_command(
+            ctx,
+            &mut drive,
+            CoreAgentCommand::UpsertContext {
+                expected_revision: None,
+                key: ContextEntryKey::new("instructions.000.default"),
+                entry: instruction_context_input(instructions_ref),
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -122,12 +127,16 @@ pub(super) fn validate_session_creation_identity(
     state: &CoreAgentState,
     is_fresh_session: bool,
     workflow_tools: Option<&harness::ManagedSessionWorkflowTools>,
+    driver: &harness::SessionDriver,
 ) -> anyhow::Result<()> {
     let admitted = workflow_tools
         .map(|tools| tools.admit(universe_id))
         .transpose()?;
     if is_fresh_session {
         return Ok(());
+    }
+    if &state.lifecycle.driver != driver {
+        anyhow::bail!("session driver conflicts with durable state");
     }
 
     match (

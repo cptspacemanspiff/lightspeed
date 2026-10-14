@@ -1670,6 +1670,19 @@ export type ProfileInstructions =
     };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramSource".
+ */
+export type ProgramSource =
+  | {
+      text: string;
+      type: "text";
+    }
+  | {
+      blobRef: string;
+      type: "textRef";
+    };
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ApprovalDecisionFailureKind".
  */
 export type ApprovalDecisionFailureKind =
@@ -5992,6 +6005,15 @@ export interface AgentProfile {
   };
   profileId: ProfileId;
   /**
+   * Makes sessions created from this profile program sessions: their
+   * runs execute this program instead of a model, with `config` carrying
+   * the grants the program may use. The program is resolved and pinned
+   * when the session is created; a later revision never changes a
+   * running session. Applying the profile to an existing session does
+   * not change its program.
+   */
+  program?: ProgramSpec | null;
+  /**
    * Creation-time session retention default. Absence keeps the tree until
    * manual deletion. Applying a profile to an existing session does not
    * change retention.
@@ -5999,6 +6021,44 @@ export interface AgentProfile {
   retention?: ProfileSessionRetention | null;
   revision: number;
   updatedAtMs: number;
+}
+/**
+ * A deterministic JavaScript program: a module whose default export has a
+ * `run(input, env, ctx)` handler.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramSpec".
+ */
+export interface ProgramSpec {
+  /**
+   * JSON Schema that run input must satisfy.
+   */
+  inputSchema?: {
+    [k: string]: unknown;
+  };
+  limits?: ProgramLimitsInput | null;
+  /**
+   * JSON Schema that run output must satisfy.
+   */
+  outputSchema?: {
+    [k: string]: unknown;
+  };
+  /**
+   * The guest API version the program was written against.
+   */
+  semanticsVersion?: number;
+  source: ProgramSource;
+}
+/**
+ * Per-run budgets of a program; omitted fields take the runtime defaults.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramLimitsInput".
+ */
+export interface ProgramLimitsInput {
+  maxCalls?: number | null;
+  maxInFlight?: number | null;
+  maxWallClockMs?: number | null;
 }
 /**
  * Root-session retention policy supplied by a profile at session creation.
@@ -6696,6 +6756,15 @@ export interface AgentProfileInput {
     [k: string]: string;
   };
   profileId: ProfileId;
+  /**
+   * Makes sessions created from this profile program sessions: their
+   * runs execute this program instead of a model, with `config` carrying
+   * the grants the program may use. The program is resolved and pinned
+   * when the session is created; a later revision never changes a
+   * running session. Applying the profile to an existing session does
+   * not change its program.
+   */
+  program?: ProgramSpec | null;
   /**
    * Creation-time session retention default. Absence keeps the tree until
    * manual deletion. Applying a profile to an existing session does not
@@ -7872,6 +7941,15 @@ export interface InlineAgentProfile {
   metadata?: {
     [k: string]: string;
   };
+  /**
+   * Makes sessions created from this profile program sessions: their
+   * runs execute this program instead of a model, with `config` carrying
+   * the grants the program may use. The program is resolved and pinned
+   * when the session is created; a later revision never changes a
+   * running session. Applying the profile to an existing session does
+   * not change its program.
+   */
+  program?: ProgramSpec | null;
   /**
    * Creation-time session retention default. Absence keeps the tree until
    * manual deletion. Applying a profile to an existing session does not

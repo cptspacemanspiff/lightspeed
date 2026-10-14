@@ -116,6 +116,7 @@ async fn run_profile_environment_selection_live_client(
             display_name: None,
             description: None,
             document: ProfileDocument {
+                program: None,
                 config: Some(SessionConfig {
                     model: Some(model_to_api(&model)),
                     features: Some(api::FeaturesConfig {
@@ -280,6 +281,7 @@ async fn run_profiles_live_client(
                 display_name: Some("Live profile".to_owned()),
                 description: Some("Initial live profile".to_owned()),
                 document: ProfileDocument {
+                    program: None,
                     metadata: Default::default(),
                     config: Some(SessionConfig {
                         features: Some(api::FeaturesConfig {

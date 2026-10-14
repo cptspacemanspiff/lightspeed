@@ -1099,6 +1099,7 @@ mod tests {
 
     fn profile_document_with_vfs(workspaces: Vec<WorkspaceAttachment>) -> api::ProfileDocument {
         api::ProfileDocument {
+            program: None,
             config: Some(api::SessionConfig {
                 model: None,
                 generation: None,

@@ -1791,6 +1791,7 @@ async fn pg_live_profile_put_creates_and_replaces() {
         display_name: Some("Support".to_owned()),
         description: None,
         document: ProfileDocument {
+            program: None,
             instructions: Some(ProfileInstructions::Text {
                 text: instructions.to_owned(),
             }),
@@ -3561,6 +3562,7 @@ async fn pg_live_profile_refs_are_borrowed_and_do_not_prevent_collection() {
                 display_name: None,
                 description: None,
                 document: api::ProfileDocument {
+                    program: None,
                     instructions: Some(api::ProfileInstructions::TextRef {
                         blob_ref: blob_ref.to_string(),
                     }),

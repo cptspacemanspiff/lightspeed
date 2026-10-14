@@ -3135,6 +3135,7 @@ fn test_profile(profile_id: ProfileId) -> AgentProfile {
         description: Some("Ticket support profile".to_owned()),
         revision: 1,
         document: ProfileDocument {
+            program: None,
             metadata: Default::default(),
             retention: None,
             config: Some(SessionConfig {

@@ -171,6 +171,7 @@ impl GatewayAgentApi {
             metadata,
             delete_after_close_ms,
             session_config,
+            driver: Default::default(),
             workflow_tools,
             legacy_max_steps_per_input: None,
             continue_as_new_history_threshold: self.continue_as_new_history_threshold,
@@ -326,10 +327,23 @@ impl GatewayAgentApi {
             self.record_session_creator(&session_id, visibility).await?;
             return Ok(self.session_start_response(&loaded));
         }
-        let resolved_profile = match profile {
-            Some(source) => Some(self.resolve_profile_source(source).await?),
+        let resolved = match profile {
+            Some(source) => Some(self.resolve_profile(source).await?),
             None => None,
         };
+        let driver = match resolved.as_ref().and_then(|resolved| {
+            resolved
+                .document
+                .program
+                .as_ref()
+                .map(|program| (program, resolved.named.as_ref()))
+        }) {
+            Some((program, named)) => harness::SessionDriver::Program {
+                program: self.pin_program(program, named).await?,
+            },
+            None => harness::SessionDriver::Agent,
+        };
+        let resolved_profile = resolved.map(|resolved| resolved.document);
         let effective_metadata = profiles::merge_profile_start_metadata(
             resolved_profile.as_ref().map(|profile| &profile.metadata),
             metadata,
@@ -372,6 +386,7 @@ impl GatewayAgentApi {
             close_on_terminal,
             auto_reject_approvals,
         );
+        args.driver = driver;
         args.setup = match resolved_profile.as_ref() {
             Some(profile) => {
                 let mut intent = Self::profile_intent(profile, None)?;
