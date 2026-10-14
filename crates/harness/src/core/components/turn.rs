@@ -48,7 +48,9 @@ pub enum Event {
 pub type TurnEvent = Event;
 
 pub fn plan_next(state: &CoreAgentState) -> Result<Vec<CoreAgentEventProposal>, PlanningError> {
-    if state.lifecycle.status != CoreAgentStatus::Open {
+    // A program session never starts a model turn; its runs are driven by
+    // the program workflow.
+    if state.lifecycle.status != CoreAgentStatus::Open || crate::is_program_session(state) {
         return Ok(Vec::new());
     }
 

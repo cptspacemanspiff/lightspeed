@@ -1742,6 +1742,7 @@ pub enum RunFailureKindView {
 )]
 pub enum RunAcceptedSourceView {
     Input { entries: Vec<ContextEntryInputView> },
+    Program { input_ref: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

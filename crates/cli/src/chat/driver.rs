@@ -1648,7 +1648,10 @@ fn run_is_terminal(status: api::RunStatus) -> bool {
 }
 
 fn turn_from_summary(summary: &api::RunSummaryView, settings: &ChatDraftSettings) -> ChatTurn {
-    let api::RunSummarySourceView::Input { preview, .. } = &summary.source;
+    let preview = match &summary.source {
+        api::RunSummarySourceView::Input { preview, .. } => preview,
+        api::RunSummarySourceView::Program { .. } => &None,
+    };
     let run = match run_event_from_summary(summary, settings, run_seq_from_id(&summary.id)) {
         ChatEvent::RunChanged(run) => Some(run),
         _ => None,
@@ -1671,8 +1674,8 @@ fn turn_from_summary(summary: &api::RunSummaryView, settings: &ChatDraftSettings
 /// Fills a summary turn from the full run: the untruncated text input, the
 /// last assistant message, and the run's tool chains.
 fn apply_run_detail(turn: &mut ChatTurn, run: &api::RunView) {
-    let api::RunViewSource::Input { items } = &run.source;
-    if let Some(InputItem::Text { text, .. }) = items.first()
+    if let api::RunViewSource::Input { items } = &run.source
+        && let Some(InputItem::Text { text, .. }) = items.first()
         && let Some(user) = turn.user.as_mut()
     {
         user.content = text.clone();

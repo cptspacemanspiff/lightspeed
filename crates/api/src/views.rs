@@ -22,6 +22,9 @@ pub struct SessionView {
     /// True only when immutable lifecycle ownership was admitted with a
     /// lifecycle controller at managed-session creation.
     pub managed: bool,
+    /// Fixed at creation. Absent means the model loop.
+    #[serde(default, skip_serializing_if = "SessionDriverView::is_agent")]
+    pub driver: SessionDriverView,
     pub config_revision: u64,
     /// The stored sparse config document, exactly as last put (model and
     /// feature versions materialized at admission). Effective tool reality
@@ -87,6 +90,35 @@ pub enum RunSummarySourceView {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         preview_truncated: bool,
     },
+    Program {
+        input_ref: String,
+    },
+}
+
+/// What drives a session's runs: the model loop, or a program pinned at
+/// creation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionDriverView {
+    #[default]
+    Agent,
+    Program {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+        semantics_version: u32,
+    },
+}
+
+impl SessionDriverView {
+    pub fn is_agent(&self) -> bool {
+        matches!(self, Self::Agent)
+    }
 }
 
 /// Managed-session reads use the same immutable declaration document accepted
@@ -222,7 +254,13 @@ pub struct LlmUsageView {
     rename_all_fields = "camelCase"
 )]
 pub enum RunViewSource {
-    Input { items: Vec<InputItem> },
+    Input {
+        items: Vec<InputItem>,
+    },
+    /// A program run: its JSON input by content reference.
+    Program {
+        input_ref: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

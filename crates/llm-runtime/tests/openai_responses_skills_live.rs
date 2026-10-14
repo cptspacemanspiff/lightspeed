@@ -227,6 +227,7 @@ async fn openai_responses_live_selects_and_reads_the_matching_skill() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: session_config(model, workspace_attachments),
             },
             max_steps: None,

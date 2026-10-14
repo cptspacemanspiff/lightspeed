@@ -325,34 +325,44 @@ pub struct RunTerminalNotifyIntent {
     pub token: String,
 }
 
-/// Every run starts from explicit input entries. The tagged single-variant
-/// encoding keeps the wire shape (`{"type":"input",...}`) stable for any
-/// future source kind without a migration of stored accepted events.
+/// What a run starts from. An agent run starts from explicit input entries;
+/// a program run starts from JSON input by reference. The tagged encoding
+/// keeps the wire shape (`{"type":"input",...}`) stable across source kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RunRequestSource {
     Input { input: Vec<ContextEntryInput> },
+    Program { input_ref: BlobRef },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RunSource {
     Input { input: Vec<ContextEntryInput> },
+    Program { input_ref: BlobRef },
 }
 
 impl RunRequestSource {
+    /// The context entries an agent run starts from; a program run has none.
     pub fn input(&self) -> &[ContextEntryInput] {
         match self {
             Self::Input { input } => input,
+            Self::Program { .. } => &[],
         }
     }
 }
 
 impl RunSource {
+    /// The context entries an agent run starts from; a program run has none.
     pub fn input(&self) -> &[ContextEntryInput] {
         match self {
             Self::Input { input } => input,
+            Self::Program { .. } => &[],
         }
+    }
+
+    pub fn is_program(&self) -> bool {
+        matches!(self, Self::Program { .. })
     }
 
     /// Whether this accepted source matches a client-requested source.
@@ -361,12 +371,21 @@ impl RunSource {
             (Self::Input { input }, RunRequestSource::Input { input: requested }) => {
                 input == requested
             }
+            (
+                Self::Program { input_ref },
+                RunRequestSource::Program {
+                    input_ref: requested,
+                },
+            ) => input_ref == requested,
+            (Self::Input { .. }, RunRequestSource::Program { .. })
+            | (Self::Program { .. }, RunRequestSource::Input { .. }) => false,
         }
     }
 
     pub fn matches_message_input(&self, requested: &[ContextEntryInput]) -> bool {
         match self {
             Self::Input { input } => input == requested,
+            Self::Program { .. } => false,
         }
     }
 }
@@ -651,6 +670,11 @@ pub(crate) fn apply_event(
                     "accepted run config revision {} does not match session revision {}",
                     config_revision, state.lifecycle.config_revision
                 )));
+            }
+            if source.is_program() != crate::is_program_session(state) {
+                return Err(DomainError::InvariantViolation(
+                    "accepted run source does not match the session driver".into(),
+                ));
             }
             crate::core::components::config::validate_recorded_run_config(state, run_config)?;
             let expected_run_id =
@@ -985,6 +1009,9 @@ pub(crate) fn source_request_equivalent(source: &RunSource) -> RunRequestSource 
         RunSource::Input { input } => RunRequestSource::Input {
             input: input.clone(),
         },
+        RunSource::Program { input_ref } => RunRequestSource::Program {
+            input_ref: input_ref.clone(),
+        },
     }
 }
 
@@ -1077,9 +1104,10 @@ fn finish_active_run(
 }
 
 fn compact_terminal_source(mut source: RunSource) -> RunSource {
-    let RunSource::Input { input } = &mut source;
-    for entry in input {
-        entry.preview = None;
+    if let RunSource::Input { input } = &mut source {
+        for entry in input {
+            entry.preview = None;
+        }
     }
     source
 }

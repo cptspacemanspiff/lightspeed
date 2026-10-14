@@ -895,7 +895,7 @@ fn is_instructions_key(key: &ContextEntryKey) -> bool {
 }
 
 pub fn plan_next(state: &CoreAgentState) -> Result<Vec<CoreAgentEventProposal>, PlanningError> {
-    if state.lifecycle.status != CoreAgentStatus::Open {
+    if state.lifecycle.status != CoreAgentStatus::Open || crate::is_program_session(state) {
         return Ok(Vec::new());
     }
 
@@ -1144,7 +1144,9 @@ fn missing_run_input_entries(state: &CoreAgentState) -> Result<Vec<ContextEntry>
     let Some(active_run) = state.runs.active.as_ref() else {
         return Ok(Vec::new());
     };
-    let RunSource::Input { input } = &active_run.source;
+    let RunSource::Input { input } = &active_run.source else {
+        return Ok(Vec::new());
+    };
     if active_run.input_entry_ids.len() >= input.len() {
         return Ok(Vec::new());
     }
@@ -1728,7 +1730,12 @@ fn record_entry_materialization(
         } => {
             let active_run = crate::core::components::run::active_run_mut(state, *run_id)?;
             let index = *input_index as usize;
-            let RunSource::Input { input } = &active_run.source;
+            let RunSource::Input { input } = &active_run.source else {
+                return Err(DomainError::InvariantViolation(format!(
+                    "run input context entry {} belongs to a run without input entries",
+                    entry.entry_id
+                )));
+            };
             let Some(expected) = input.get(index) else {
                 return Err(DomainError::InvariantViolation(format!(
                     "run input context entry {} references missing input index {}",

@@ -93,11 +93,13 @@ async fn open_new_session(
     let mut drive = drive_from_state(ctx)?;
     let open_command = match args.workflow_tools {
         Some(workflow_tools) => CoreAgentCommand::OpenManagedSession {
+            driver: Default::default(),
             config: session_config,
             session_universe_id: args.universe_id,
             workflow_tools,
         },
         None => CoreAgentCommand::OpenSession {
+            driver: Default::default(),
             config: session_config,
         },
     };

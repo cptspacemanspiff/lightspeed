@@ -1,12 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CoreAgentState, DomainError, SessionConfig};
+use crate::{CoreAgentState, DomainError, SessionConfig, SessionDriver};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
     Opened {
         config: SessionConfig,
+        /// Fixed for the session's lifetime. Absent in records written
+        /// before program sessions existed, which were all agent sessions.
+        #[serde(default, skip_serializing_if = "SessionDriver::is_agent")]
+        driver: SessionDriver,
     },
     ConfigChanged {
         config: SessionConfig,
@@ -31,6 +35,8 @@ pub struct LifecycleState {
     pub status: Status,
     pub config: Option<SessionConfig>,
     pub config_revision: u64,
+    #[serde(default, skip_serializing_if = "SessionDriver::is_agent")]
+    pub driver: SessionDriver,
 }
 
 impl Default for LifecycleState {
@@ -39,22 +45,25 @@ impl Default for LifecycleState {
             status: Status::New,
             config: None,
             config_revision: 0,
+            driver: SessionDriver::Agent,
         }
     }
 }
 
 pub(crate) fn apply_event(state: &mut CoreAgentState, event: &Event) -> Result<(), DomainError> {
     match event {
-        Event::Opened { config } => {
+        Event::Opened { config, driver } => {
             if state.lifecycle.status != Status::New {
                 return Err(DomainError::InvariantViolation(
                     "session can only be opened from new state".into(),
                 ));
             }
             config.validate()?;
+            driver.validate()?;
             state.lifecycle.status = Status::Open;
             state.lifecycle.config = Some(config.clone());
             state.lifecycle.config_revision = 0;
+            state.lifecycle.driver = driver.clone();
             Ok(())
         }
         Event::ConfigChanged { config, revision } => {

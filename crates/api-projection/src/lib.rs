@@ -121,6 +121,7 @@ impl<'a> CoreAgentProjector<'a> {
             closed_at_ms: params.record.closed_at_ms,
             retention: params.retention.clone(),
             managed: params.record.managed,
+            driver: session_driver_view(&params.state.lifecycle.driver),
             config_revision: params.state.lifecycle.config_revision,
             config,
             created_at_ms: params.record.created_at_ms,
@@ -298,6 +299,9 @@ impl<'a> CoreAgentProjector<'a> {
                     preview_truncated,
                 })
             }
+            Some(RunSource::Program { input_ref }) => Ok(RunSummarySourceView::Program {
+                input_ref: input_ref.as_str().to_owned(),
+            }),
             None => Ok(RunSummarySourceView::Input {
                 content_ref: None,
                 preview: None,
@@ -329,6 +333,9 @@ impl<'a> CoreAgentProjector<'a> {
             source: match params.source {
                 RunSource::Input { input } => RunViewSource::Input {
                     items: self.project_input_entries(input).await?,
+                },
+                RunSource::Program { input_ref } => RunViewSource::Program {
+                    input_ref: input_ref.as_str().to_owned(),
                 },
             },
             entries: projected_entries,
@@ -708,7 +715,7 @@ impl<'a> CoreAgentProjector<'a> {
                 })
             }
             CoreAgentEvent::Lifecycle(event) => match event {
-                CoreAgentLifecycleEvent::Opened { config } => {
+                CoreAgentLifecycleEvent::Opened { config, .. } => {
                     Ok(SessionEventKindView::SessionOpened {
                         model: Some(model_to_api(&config.model)),
                     })
@@ -822,6 +829,9 @@ impl<'a> CoreAgentProjector<'a> {
                     source: match &accepted.source {
                         RunSource::Input { input } => RunAcceptedSourceView::Input {
                             entries: project_context_entry_inputs(input),
+                        },
+                        RunSource::Program { input_ref } => RunAcceptedSourceView::Program {
+                            input_ref: input_ref.as_str().to_owned(),
                         },
                     },
                     requested_by: attribution(accepted.requested_by.as_ref()),
@@ -2159,6 +2169,17 @@ pub fn event_joins_to_api(joins: &CoreAgentJoins) -> EventJoinsView {
             .correlation_id
             .as_ref()
             .map(|correlation_id| correlation_id.as_str().to_owned()),
+    }
+}
+
+fn session_driver_view(driver: &harness::SessionDriver) -> api::SessionDriverView {
+    match driver {
+        harness::SessionDriver::Agent => api::SessionDriverView::Agent,
+        harness::SessionDriver::Program { program } => api::SessionDriverView::Program {
+            program_id: program.program_id.clone(),
+            revision: program.revision,
+            semantics_version: program.engine.semantics_version,
+        },
     }
 }
 

@@ -69,7 +69,10 @@ async fn assert_tool_loop(builtin: bool) {
         .drive_command(DriveCommand {
             session_id: session_id.clone(),
             observed_at_ms: 10,
-            command: CoreAgentCommand::OpenSession { config },
+            command: CoreAgentCommand::OpenSession {
+                config,
+                driver: Default::default(),
+            },
             max_steps: Some(64),
         })
         .await

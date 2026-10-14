@@ -795,6 +795,9 @@ pub(crate) fn validate_run_config_for_state(
     run_config: &RunConfig,
 ) -> Result<(), DomainError> {
     validate_recorded_run_config(state, run_config)?;
+    if crate::is_program_session(state) {
+        return Ok(());
+    }
     let config = current_config(state)?;
     validate_retained_native_model(
         state,
@@ -808,6 +811,9 @@ pub(crate) fn validate_recorded_run_config(
     state: &CoreAgentState,
     run_config: &RunConfig,
 ) -> Result<(), DomainError> {
+    if crate::is_program_session(state) {
+        return validate_program_run_config(run_config);
+    }
     if run_config.input_limit_tokens == Some(0) {
         return Err(DomainError::ProviderCompatibility(
             "input_limit_tokens must be positive".into(),
@@ -817,6 +823,17 @@ pub(crate) fn validate_recorded_run_config(
     run_config.validate_provider_compatibility(&config.model)?;
     validate_active_context_api_kind(state, &config.model.api_kind)?;
     validate_tool_choice_for_active_tools(state, run_config.tool_choice.as_ref())?;
+    Ok(())
+}
+
+/// A program run has no model, so every model-shaping run setting is a typed
+/// rejection rather than a silently ignored field.
+fn validate_program_run_config(run_config: &RunConfig) -> Result<(), DomainError> {
+    if run_config != &RunConfig::default() {
+        return Err(DomainError::UnsupportedForSessionDriver(
+            "run config settings are not supported on a program session".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1460,7 +1477,10 @@ mod tests {
                 supersedes: None,
             };
             let events = [
-                CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config: original }),
+                CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened {
+                    config: original,
+                    driver: Default::default(),
+                }),
                 CoreAgentEvent::Context(ContextEvent::EntriesApplied {
                     base_revision: 0,
                     entries: vec![native],
@@ -1566,6 +1586,7 @@ mod tests {
         let mut history = Vec::new();
         for command in [
             CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: original.clone(),
             },
             CoreAgentCommand::ReplaceSessionConfig {
@@ -2231,6 +2252,7 @@ mod tests {
             });
         let events = [
             Event::Opened {
+                driver: Default::default(),
                 config: empty.clone(),
             },
             Event::ConfigChanged {

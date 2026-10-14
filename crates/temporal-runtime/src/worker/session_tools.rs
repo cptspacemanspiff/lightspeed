@@ -2910,6 +2910,7 @@ mod tests {
         let proposals = harness::admit_command(
             &harness::CoreAgentState::new(),
             harness::CoreAgentCommand::OpenManagedSession {
+                driver: Default::default(),
                 config,
                 session_universe_id: universe_id,
                 workflow_tools,

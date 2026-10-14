@@ -2490,7 +2490,13 @@ mod tests {
 
     fn open_session_with_config(drive: &mut CoreAgentDrive, config: SessionConfig) {
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config,
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(drive, open);
     }
@@ -3280,7 +3286,13 @@ mod tests {
         let mut entries = Vec::new();
 
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         entries.extend(commit_action(&mut drive, open));
         let request_run = drive
@@ -6378,7 +6390,13 @@ mod tests {
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
 
         let action = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("admit command");
 
         assert!(matches!(action, CoreAgentAction::AppendEvents { .. }));
@@ -6390,7 +6408,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let action = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("admit command");
 
         assert_eq!(drive.state().lifecycle.status, CoreAgentStatus::New);
@@ -6405,7 +6429,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
 
@@ -6443,6 +6473,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: uuid::Uuid::from_u128(7),
                     workflow_tools: crate::ManagedSessionWorkflowTools::v1(
@@ -6486,7 +6517,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
 
@@ -6509,7 +6546,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
 
@@ -6539,7 +6582,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let mut run_config = run_config();
@@ -6565,7 +6614,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6602,7 +6657,13 @@ mod tests {
         let mut drive =
             CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6633,7 +6694,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6666,7 +6733,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6734,7 +6807,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6816,7 +6895,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -6910,7 +6995,13 @@ mod tests {
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let mut entries = Vec::new();
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         entries.extend(commit_action(&mut drive, open));
         let request = drive
@@ -7111,7 +7202,13 @@ mod tests {
             CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
         let mut entries = Vec::new();
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         entries.extend(commit_action(&mut drive, open));
         let request = drive
@@ -7186,7 +7283,13 @@ mod tests {
         let session_id = SessionId::new("session-a");
         let mut drive = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
         let open = drive
-            .admit_command(CoreAgentCommand::OpenSession { config: config() }, 10)
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
             .expect("open");
         commit_action(&mut drive, open);
         let request = drive
@@ -8021,6 +8124,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,
@@ -8152,6 +8256,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,
@@ -8443,6 +8548,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: universe_id,
                     workflow_tools: crate::ManagedSessionWorkflowTools::v1(
@@ -8881,6 +8987,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,
@@ -9060,6 +9167,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,
@@ -10288,6 +10396,7 @@ mod tests {
         let action = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: config(),
                     session_universe_id: uuid::Uuid::from_u128(7),
                     workflow_tools: crate::ManagedSessionWorkflowTools::v1(None, declarations),
@@ -11476,5 +11585,193 @@ mod tests {
                 .unwrap();
             assert_eq!(replayed.state(), drive.state());
         }
+    }
+
+    fn program_driver() -> crate::SessionDriver {
+        crate::SessionDriver::Program {
+            program: crate::PinnedProgram {
+                program_id: Some("grader".into()),
+                revision: Some(3),
+                source_ref: BlobRef::from_bytes(
+                    b"export default { async run(input) { return input; } }",
+                ),
+                engine: crate::ProgramEngine {
+                    kind: crate::ProgramEngineKind::Js,
+                    semantics_version: 1,
+                },
+                input_schema: None,
+                output_schema: None,
+                limits: Default::default(),
+            },
+        }
+    }
+
+    fn program_run_command(run_config: RunConfig) -> CoreAgentCommand {
+        CoreAgentCommand::RequestRun(RunRequestCommand {
+            requested_by: None,
+            notify_on_terminal: Vec::new(),
+            submission_id: None,
+            source: RunRequestSource::Program {
+                input_ref: BlobRef::from_bytes(b"{\"claim\":1}"),
+            },
+            run_config,
+        })
+    }
+
+    fn assert_unsupported_for_driver(error: CoreAgentDriveError) {
+        match error {
+            CoreAgentDriveError::Command(CommandError::Rejected(rejection)) => assert_eq!(
+                rejection.kind,
+                crate::CommandRejectionKind::UnsupportedForSessionDriver,
+                "{rejection}"
+            ),
+            other => panic!("expected a driver rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn program_session_accepts_only_program_runs_and_never_plans_a_model_turn() {
+        let session_id = SessionId::new("program-session");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: program_driver(),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        assert!(drive.state().lifecycle.driver.is_program());
+
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(
+                    request_run_command(None, user_input(BlobRef::from_bytes(b"hi")), run_config()),
+                    20,
+                )
+                .unwrap_err(),
+        );
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(
+                    program_run_command(RunConfig {
+                        max_turns: Some(1),
+                        ..RunConfig::default()
+                    }),
+                    20,
+                )
+                .unwrap_err(),
+        );
+
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive.next_action(30, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        assert!(matches!(
+            drive.next_action(31, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        let active = drive.state().runs.active.as_ref().expect("started run");
+        assert_eq!(active.status, RunStatus::Active);
+        assert!(matches!(active.source, crate::RunSource::Program { .. }));
+        assert!(active.turns.is_empty());
+        assert!(active.input_entry_ids.is_empty());
+        assert!(drive.state().context.entries.is_empty());
+        let run_id = active.run_id;
+
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(
+                    CoreAgentCommand::RequestRunSteering {
+                        run_id,
+                        input: user_input(BlobRef::from_bytes(b"steer")),
+                        requested_by: None,
+                    },
+                    40,
+                )
+                .unwrap_err(),
+        );
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(
+                    CoreAgentCommand::UpsertContext {
+                        expected_revision: None,
+                        key: ContextEntryKey::new("note"),
+                        entry: message_input(ContextMessageRole::User, BlobRef::from_bytes(b"n")),
+                    },
+                    40,
+                )
+                .unwrap_err(),
+        );
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(CoreAgentCommand::CompactContext, 40)
+                .unwrap_err(),
+        );
+        assert!(matches!(
+            crate::core_agent_clone_opening_events(drive.state(), 40),
+            Err(crate::CoreAgentCloneError::ProgramSession)
+        ));
+
+        let mut replayed = CoreAgentState::new();
+        for entry in &log {
+            let stored = CoreAgentCodec.encode_entry(entry).unwrap();
+            if stored.event.kind == "lightspeed.core.lifecycle.opened" {
+                assert_eq!(
+                    stored.event.payload["lifecycle"]["opened"]["driver"]["kind"],
+                    "program"
+                );
+            }
+            crate::apply_event(
+                &mut replayed,
+                &CoreAgentCodec.decode_entry(&stored).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(&replayed, drive.state());
+    }
+
+    #[test]
+    fn agent_sessions_reject_program_runs_and_open_without_a_recorded_driver() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("agent-session"),
+            CoreAgentState::new(),
+            None,
+        );
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
+            .unwrap();
+        let log = commit_action(&mut drive, action);
+        assert_unsupported_for_driver(
+            drive
+                .admit_command(program_run_command(RunConfig::default()), 20)
+                .unwrap_err(),
+        );
+        // Agent sessions keep the pre-driver wire shape, so records written
+        // before program sessions existed decode identically.
+        let stored = CoreAgentCodec.encode_entry(&log[0]).unwrap();
+        assert!(
+            stored.event.payload["lifecycle"]["opened"]
+                .get("driver")
+                .is_none()
+        );
+        assert_eq!(
+            CoreAgentCodec.decode_event(&stored.event).unwrap(),
+            CoreAgentEvent::Lifecycle(crate::CoreAgentLifecycleEvent::Opened {
+                config: drive.state().lifecycle.config.clone().unwrap(),
+                driver: crate::SessionDriver::Agent,
+            })
+        );
     }
 }

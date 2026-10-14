@@ -3334,6 +3334,21 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "items"
               ],
               "type": "object"
+            },
+            {
+              "description": "One invocation of a program session's program. The JSON input is\nvalidated against the pinned program's input schema at admission.",
+              "properties": {
+                "input": {},
+                "type": {
+                  "const": "program",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "input"
+              ],
+              "type": "object"
             }
           ]
         },

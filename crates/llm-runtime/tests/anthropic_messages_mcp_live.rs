@@ -75,6 +75,7 @@ async fn anthropic_messages_live_core_session_uses_public_remote_mcp() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: session_config(model),
             },
             max_steps: None,

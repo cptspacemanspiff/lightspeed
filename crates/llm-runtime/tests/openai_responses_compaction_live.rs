@@ -65,6 +65,7 @@ async fn openai_responses_live_harness_prunes_and_reuses_provider_compaction() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: session_config(model),
             },
             max_steps: Some(64),
@@ -184,6 +185,7 @@ async fn openai_responses_live_manual_standalone_compaction() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: standalone_session_config(live_model_selection(), None),
             },
             max_steps: Some(64),
@@ -266,6 +268,7 @@ async fn openai_responses_live_high_watermark_standalone_compaction() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: standalone_session_config(live_model_selection(), Some(10)),
             },
             max_steps: Some(64),
@@ -602,7 +605,10 @@ async fn openai_responses_live_provider_triggered_without_threshold_override() {
         .drive_command(DriveCommand {
             session_id: session_id.clone(),
             observed_at_ms: 10,
-            command: CoreAgentCommand::OpenSession { config },
+            command: CoreAgentCommand::OpenSession {
+                config,
+                driver: Default::default(),
+            },
             max_steps: Some(64),
         })
         .await

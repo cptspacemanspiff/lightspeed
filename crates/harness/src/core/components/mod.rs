@@ -16,6 +16,7 @@ pub mod ids;
 pub mod lifecycle;
 pub mod llm;
 pub mod log;
+pub mod program;
 pub mod promise;
 pub mod run;
 pub mod state;
@@ -55,6 +56,10 @@ pub use ids::*;
 pub use lifecycle::{CoreAgentLifecycleEvent, CoreAgentStatus, LifecycleState};
 pub use llm::*;
 pub use log::*;
+pub use program::{
+    PinnedProgram, ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver,
+    is_program_session,
+};
 pub use promise::AwaitOutcome;
 pub use promise::{
     PROMISE_CANCEL_EFFECT_KIND, PROMISE_CREATE_EFFECT_KIND, PROMISE_DETACH_EFFECT_KIND,

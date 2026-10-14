@@ -74,7 +74,14 @@ pub struct RunTerminalNotificationInput {
     rename_all_fields = "camelCase"
 )]
 pub enum RunStartSource {
-    Input { items: Vec<InputItem> },
+    Input {
+        items: Vec<InputItem>,
+    },
+    /// One invocation of a program session's program. The JSON input is
+    /// validated against the pinned program's input schema at admission.
+    Program {
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

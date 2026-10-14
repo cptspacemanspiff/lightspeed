@@ -45,7 +45,10 @@ async fn anthropic_messages_live_harness_prunes_and_reuses_provider_compaction()
         .drive_command(DriveCommand {
             session_id: session_id.clone(),
             observed_at_ms: 10,
-            command: CoreAgentCommand::OpenSession { config },
+            command: CoreAgentCommand::OpenSession {
+                config,
+                driver: Default::default(),
+            },
             max_steps: Some(64),
         })
         .await
@@ -199,6 +202,7 @@ async fn anthropic_messages_live_manual_standalone_compaction_preserves_marker()
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: standalone_session_config(live_model_selection(), None),
             },
             max_steps: Some(64),
@@ -352,6 +356,7 @@ async fn anthropic_messages_live_high_watermark_standalone_compaction() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: standalone_session_config(live_model_selection(), Some(10)),
             },
             max_steps: Some(64),
@@ -659,7 +664,10 @@ async fn anthropic_messages_live_chunked_compaction_keeps_tail_and_transitions_t
         .drive_command(DriveCommand {
             session_id: session_id.clone(),
             observed_at_ms: 10,
-            command: CoreAgentCommand::OpenSession { config },
+            command: CoreAgentCommand::OpenSession {
+                config,
+                driver: Default::default(),
+            },
             max_steps: Some(64),
         })
         .await

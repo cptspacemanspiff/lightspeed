@@ -287,12 +287,17 @@ export type ApprovalSubjectView = {
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunSummarySourceView".
  */
-export type RunSummarySourceView = {
-  contentRef?: string | null;
-  preview?: string | null;
-  previewTruncated?: boolean;
-  type: "input";
-};
+export type RunSummarySourceView =
+  | {
+      contentRef?: string | null;
+      preview?: string | null;
+      previewTruncated?: boolean;
+      type: "input";
+    }
+  | {
+      inputRef: string;
+      type: "program";
+    };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunStatus".
@@ -370,6 +375,23 @@ export type ToolChoice =
   | {
       toolId: string;
       type: "specific";
+    };
+/**
+ * What drives a session's runs: the model loop, or a program pinned at
+ * creation.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "SessionDriverView".
+ */
+export type SessionDriverView =
+  | {
+      kind: "agent";
+    }
+  | {
+      kind: "program";
+      programId?: string | null;
+      revision?: number | null;
+      semanticsVersion: number;
     };
 /**
  * Completion contract for one workflow-tool invocation. Joined tools park
@@ -814,10 +836,15 @@ export type SessionEventKindView =
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunAcceptedSourceView".
  */
-export type RunAcceptedSourceView = {
-  entries: ContextEntryInputView[];
-  type: "input";
-};
+export type RunAcceptedSourceView =
+  | {
+      entries: ContextEntryInputView[];
+      type: "input";
+    }
+  | {
+      inputRef: string;
+      type: "program";
+    };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ApprovalDecisionKind".
@@ -856,10 +883,15 @@ export type CodeToolProgressPhase =
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunViewSource".
  */
-export type RunViewSource = {
-  items: InputItem[];
-  type: "input";
-};
+export type RunViewSource =
+  | {
+      items: InputItem[];
+      type: "input";
+    }
+  | {
+      inputRef: string;
+      type: "program";
+    };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "InputItem".
@@ -1879,10 +1911,15 @@ export type RecommendedRole = "viewer" | "contributor" | "operator" | "admin";
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunStartSource".
  */
-export type RunStartSource = {
-  items: InputItem[];
-  type: "input";
-};
+export type RunStartSource =
+  | {
+      items: InputItem[];
+      type: "input";
+    }
+  | {
+      input: unknown;
+      type: "program";
+    };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SessionEventDirection".
@@ -1981,6 +2018,10 @@ export interface SessionView {
   configRevision: number;
   createdAtMs: number;
   displayName?: string | null;
+  /**
+   * Fixed at creation. Absent means the model loop.
+   */
+  driver?: SessionDriverView;
   id: string;
   /**
    * True only when immutable lifecycle ownership was admitted with a

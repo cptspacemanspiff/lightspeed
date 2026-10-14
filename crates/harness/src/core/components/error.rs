@@ -9,6 +9,10 @@ pub enum DomainError {
     EventOrdering(String),
     #[error("provider compatibility error: {0}")]
     ProviderCompatibility(String),
+    /// The operation belongs to another session driver: for example a model
+    /// turn, steering or a context edit on a program session.
+    #[error("unsupported for session driver: {0}")]
+    UnsupportedForSessionDriver(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -64,6 +68,7 @@ pub enum CommandRejectionKind {
     InvariantViolation,
     DuplicateSubmission,
     RevisionConflict,
+    UnsupportedForSessionDriver,
     Other,
 }
 

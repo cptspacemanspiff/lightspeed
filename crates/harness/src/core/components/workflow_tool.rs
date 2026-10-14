@@ -2916,6 +2916,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: session_config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,
@@ -3354,6 +3355,7 @@ mod tests {
         let proposals = crate::admit_command(
             &CoreAgentState::new(),
             CoreAgentCommand::OpenManagedSession {
+                driver: Default::default(),
                 config: session_config(),
                 session_universe_id: universe_id,
                 workflow_tools: declaration,
@@ -3440,6 +3442,7 @@ mod tests {
         let open = drive
             .admit_command(
                 CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: session_config(),
                 },
                 1,
