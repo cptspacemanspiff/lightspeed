@@ -1720,6 +1720,18 @@
           "description": "A call the model made in a tool batch, or a code-tool call attributed\nto the parked batch of its parent."
         },
         {
+          "description": "A call made from a scope that no model batch owns: a program run's\nscoped call. The call id identifies the scope and request.",
+          "properties": {
+            "tool_call_id": {
+              "$ref": "#/definitions/ToolCallId"
+            }
+          },
+          "required": [
+            "tool_call_id"
+          ],
+          "type": "object"
+        },
+        {
           "description": "The run's own invocation: a program run's execution. There is no\nturn, batch or call, and the run id alone identifies it.",
           "type": "object"
         }

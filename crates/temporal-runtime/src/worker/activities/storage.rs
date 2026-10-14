@@ -885,13 +885,11 @@ mod tests {
                         .get(&call.tool_name)
                         .expect("test tool call must have a durable workflow-tool binding");
                     let invocation = WorkflowToolInvocation {
-                        invocation_id: WorkflowToolInvocationId::for_call(
+                        invocation_id: WorkflowToolInvocationId::for_context(
                             self.universe_id,
                             &request.session_id,
                             request.run_id,
-                            request.turn_id,
-                            request.batch_id,
-                            &call.call_id,
+                            &request.context.call_context(&call.call_id),
                             &binding.binding_fingerprint,
                         ),
                         tool_id: binding.definition.tool_id.clone(),
@@ -901,11 +899,7 @@ mod tests {
                         session_universe_id: self.universe_id,
                         session_id: request.session_id.clone(),
                         run_id: request.run_id,
-                        context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
-                            turn_id: request.turn_id,
-                            tool_batch_id: request.batch_id,
-                            tool_call_id: call.call_id.clone(),
-                        }),
+                        context: request.context.call_context(&call.call_id),
                         arguments_ref: call.arguments_ref.clone(),
                         execution_context_ref: None,
                         completion_promises: None,
@@ -932,8 +926,7 @@ mod tests {
                 .collect();
             Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results,
             }))
         }

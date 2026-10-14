@@ -726,6 +726,16 @@ pub struct ActiveToolBatch {
     pub promise_id_base: u64,
 }
 
+impl ActiveToolBatch {
+    /// The dispatch context of this batch's calls.
+    pub fn dispatch_context(&self) -> crate::DispatchContext {
+        crate::DispatchContext::ModelBatch {
+            turn_id: self.turn_id,
+            batch_id: self.batch_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedToolBatch {
     pub batch_id: ToolBatchId,

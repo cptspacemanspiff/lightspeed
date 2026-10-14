@@ -450,6 +450,23 @@ pub fn scope_owner(
     }
 }
 
+/// The dispatch context of a scope's calls: the parent's model batch for a
+/// model-invocation scope.
+pub(crate) fn dispatch_context(
+    state: &CoreAgentState,
+    scope: &CodeToolScopeSpec,
+) -> Result<crate::DispatchContext, DomainError> {
+    match &scope.owner {
+        ScopeOwner::ModelInvocation { .. } => {
+            let batch = parent_batch(code_tool_parent(state, scope)?)?;
+            Ok(crate::DispatchContext::ModelBatch {
+                turn_id: batch.turn_id,
+                batch_id: batch.tool_batch_id,
+            })
+        }
+    }
+}
+
 /// The model-batch call of a scope's parent invocation. A model-invocation
 /// scope is only ever opened beneath a model call.
 pub(crate) fn parent_batch(
@@ -854,15 +871,13 @@ pub fn complete_code_tool_call_proposals(
     validate_result(call, &result)?;
     let scope = &state.code_tools.scopes[&origin.execution_id];
     let parent = code_tool_parent(state, &scope.spec)?;
-    let batch = parent_batch(parent)?;
     crate::core::drive::code_tool_result_proposals(
         state,
         &parent.session_id,
         origin,
         ToolInvocationBatchResult {
             run_id: parent.run_id,
-            turn_id: batch.turn_id,
-            batch_id: batch.tool_batch_id,
+            context: dispatch_context(state, &scope.spec)?,
             results: vec![result],
         },
     )
@@ -1189,13 +1204,11 @@ pub fn code_tool_request(
             "code tool request session does not match its parent",
         ));
     }
-    let batch = parent_batch(parent)?;
     let mut request = crate::core::drive::tool_invocation_request(
         state,
         session_id,
         parent.run_id,
-        batch.turn_id,
-        batch.tool_batch_id,
+        dispatch_context(state, &scope.spec)?,
         call.promise_id_base,
         std::slice::from_ref(&crate::ObservedToolCall {
             call_id: call.call_id.clone(),

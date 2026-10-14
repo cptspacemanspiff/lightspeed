@@ -91,12 +91,74 @@ pub enum PromiseSourceCheckResult {
     Failed { error_ref: Option<BlobRef> },
 }
 
+/// Where a tool dispatch comes from: a model tool batch, or a scope of
+/// calls made as the session by code outside it, which has no model batch
+/// behind it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DispatchContext {
+    ModelBatch {
+        turn_id: TurnId,
+        batch_id: ToolBatchId,
+    },
+    Scope {
+        scope_id: String,
+    },
+}
+
+impl DispatchContext {
+    pub fn model_batch(&self) -> Option<(TurnId, ToolBatchId)> {
+        match self {
+            Self::ModelBatch { turn_id, batch_id } => Some((*turn_id, *batch_id)),
+            Self::Scope { .. } => None,
+        }
+    }
+
+    pub fn turn_id(&self) -> Option<TurnId> {
+        self.model_batch().map(|(turn_id, _)| turn_id)
+    }
+
+    pub fn batch_id(&self) -> Option<ToolBatchId> {
+        self.model_batch().map(|(_, batch_id)| batch_id)
+    }
+
+    /// The context a workflow-tool invocation made by one call of this
+    /// dispatch records.
+    pub fn call_context(&self, call_id: &ToolCallId) -> crate::CallContext {
+        match self {
+            Self::ModelBatch { turn_id, batch_id } => {
+                crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                    turn_id: *turn_id,
+                    tool_batch_id: *batch_id,
+                    tool_call_id: call_id.clone(),
+                })
+            }
+            Self::Scope { .. } => crate::CallContext::Scope {
+                tool_call_id: call_id.clone(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for DispatchContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModelBatch { turn_id, batch_id } => {
+                write!(formatter, "turn_id={turn_id} batch_id={batch_id}")
+            }
+            Self::Scope { scope_id } => write!(formatter, "scope_id={scope_id}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInvocationBatchRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub batch_id: ToolBatchId,
+    /// The model batch or scoped-call scope this dispatch belongs to. The
+    /// model-batch fields stay at the top level of the wire record.
+    #[serde(flatten)]
+    pub context: DispatchContext,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_attachments: Vec<WorkspaceAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,8 +372,10 @@ impl ToolInvocationBatchRequest {
 pub struct ToolInvocationCallRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub batch_id: ToolBatchId,
+    /// The model batch or scoped-call scope this dispatch belongs to. The
+    /// model-batch fields stay at the top level of the wire record.
+    #[serde(flatten)]
+    pub context: DispatchContext,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_attachments: Vec<WorkspaceAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,8 +415,7 @@ impl ToolInvocationCallRequest {
         ToolInvocationBatchRequest {
             session_id: self.session_id,
             run_id: self.run_id,
-            turn_id: self.turn_id,
-            batch_id: self.batch_id,
+            context: self.context.clone(),
             workspace_attachments: self.workspace_attachments,
             vfs_working_directory: self.vfs_working_directory,
             active_environment_id: self.active_environment_id,
@@ -389,8 +452,7 @@ impl ToolInvocationBatchRequest {
         Some(ToolInvocationCallRequest {
             session_id: self.session_id.clone(),
             run_id: self.run_id,
-            turn_id: self.turn_id,
-            batch_id: self.batch_id,
+            context: self.context.clone(),
             workspace_attachments: self.workspace_attachments.clone(),
             vfs_working_directory: self.vfs_working_directory.clone(),
             active_environment_id: self.active_environment_id.clone(),
@@ -432,8 +494,10 @@ impl WorkflowToolCallRuntime {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInvocationBatchResult {
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub batch_id: ToolBatchId,
+    /// The model batch or scoped-call scope this dispatch belongs to. The
+    /// model-batch fields stay at the top level of the wire record.
+    #[serde(flatten)]
+    pub context: DispatchContext,
     pub results: Vec<ToolInvocationResult>,
 }
 
@@ -467,7 +531,7 @@ pub enum ToolBatchOutcome {
         result: ToolInvocationBatchResult,
     },
     Deferred {
-        batch_id: ToolBatchId,
+        context: DispatchContext,
         call_id: ToolCallId,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         completed_results: Vec<ToolInvocationResult>,
@@ -479,7 +543,7 @@ pub enum ToolBatchOutcome {
     /// decision is outstanding) stay pending and are re-dispatched once the
     /// run is unparked.
     AwaitingApproval {
-        batch_id: ToolBatchId,
+        context: DispatchContext,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         completed_results: Vec<ToolInvocationResult>,
         approvals: Vec<NativeMcpApprovalRequest>,
@@ -494,12 +558,12 @@ impl ToolBatchOutcome {
     pub fn completed_result(self) -> Result<ToolInvocationBatchResult, CoreAgentIoError> {
         match self {
             Self::Completed { result } => Ok(result),
-            Self::Deferred { batch_id, .. } => Err(CoreAgentIoError::Failed {
-                message: format!("tool batch {batch_id} deferred instead of completing"),
+            Self::Deferred { context, .. } => Err(CoreAgentIoError::Failed {
+                message: format!("tool dispatch ({context}) deferred instead of completing"),
             }),
-            Self::AwaitingApproval { batch_id, .. } => Err(CoreAgentIoError::Failed {
+            Self::AwaitingApproval { context, .. } => Err(CoreAgentIoError::Failed {
                 message: format!(
-                    "tool batch {batch_id} is awaiting approval instead of completing"
+                    "tool dispatch ({context}) is awaiting approval instead of completing"
                 ),
             }),
         }
@@ -628,8 +692,10 @@ mod tests {
     fn tool_batch_single_result_requires_exactly_one_result() {
         let empty = ToolInvocationBatchResult {
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: crate::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             results: Vec::new(),
         };
         assert!(empty.single_result().is_err());
@@ -640,8 +706,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-a"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(2),
-            batch_id: ToolBatchId::new(3),
+            context: crate::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(2),
+                batch_id: ToolBatchId::new(3),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: Some(EnvironmentId::new("environment-a")),
@@ -673,7 +741,10 @@ mod tests {
             .expect("call request");
 
         assert_eq!(request.call.call_id, ToolCallId::new("call_b"));
-        assert_eq!(request.batch_id, batch.batch_id);
+        assert_eq!(
+            request.context.batch_id().unwrap(),
+            batch.context.batch_id().unwrap()
+        );
         assert_eq!(request.active_environment_id, batch.active_environment_id);
         assert_eq!(
             request
@@ -690,7 +761,10 @@ mod tests {
         );
 
         let rebuilt = request.into_batch_request();
-        assert_eq!(rebuilt.batch_id, batch.batch_id);
+        assert_eq!(
+            rebuilt.context.batch_id().unwrap(),
+            batch.context.batch_id().unwrap()
+        );
         assert_eq!(rebuilt.calls.len(), 1);
         assert_eq!(rebuilt.calls[0].call_id, ToolCallId::new("call_b"));
     }
@@ -721,8 +795,7 @@ mod tests {
                 .collect();
             Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results,
             }))
         }
@@ -768,8 +841,10 @@ mod promise_base_tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-1"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: crate::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             workspace_attachments: Vec::new(),
             active_environment_id: None,
             environment_policy: None,

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use harness::{
-    BlobRef, PromiseId, PromiseIdAllocator, REPLY_COMPLETION_KEY, RunId, SessionId, ToolBatchId,
-    ToolInvocationRequest, ToolKind, TurnId, WorkflowToolBinding, WorkflowToolCompletion,
+    BlobRef, PromiseId, PromiseIdAllocator, REPLY_COMPLETION_KEY, RunId, SessionId,
+    ToolInvocationRequest, ToolKind, WorkflowToolBinding, WorkflowToolCompletion,
     WorkflowToolCompletionKeySource, WorkflowToolDefinition, WorkflowToolInvocation,
     WorkflowToolInvocationId, WorkflowToolTarget, storage::BlobStore, validate_completion_key,
     with_completion_deadline, workflow_tool_emit_effect, workflow_tool_execution_id,
@@ -217,8 +217,7 @@ pub async fn invoke_workflow_tool(
     binding: &WorkflowToolBinding,
     session_id: &SessionId,
     run_id: RunId,
-    turn_id: TurnId,
-    tool_batch_id: ToolBatchId,
+    context: harness::CallContext,
     call: &ToolInvocationRequest,
     execution_context_ref: Option<BlobRef>,
     promise_ids: &PromiseIdAllocator,
@@ -242,13 +241,19 @@ pub async fn invoke_workflow_tool(
     }
     let arguments = validate_workflow_tool_arguments(blobs, binding, call).await?;
 
-    let invocation_id = WorkflowToolInvocationId::for_call(
+    if context.tool_call_id() != Some(&call.call_id) {
+        return Err(ToolError::InvalidRequest {
+            message: format!(
+                "workflow tool {} call context does not name call {}",
+                binding.definition.tool_id, call.call_id
+            ),
+        });
+    }
+    let invocation_id = WorkflowToolInvocationId::for_context(
         binding.session_universe_id,
         session_id,
         run_id,
-        turn_id,
-        tool_batch_id,
-        &call.call_id,
+        &context,
         &binding.binding_fingerprint,
     );
     let (completion_promises, completion_deadline_ms) = match &binding.completion {
@@ -288,11 +293,7 @@ pub async fn invoke_workflow_tool(
         session_universe_id: binding.session_universe_id,
         session_id: session_id.clone(),
         run_id,
-        context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
-            turn_id,
-            tool_batch_id,
-            tool_call_id: call.call_id.clone(),
-        }),
+        context,
         arguments_ref: call.arguments_ref.clone(),
         execution_context_ref,
         completion_promises,
@@ -519,6 +520,7 @@ mod tests {
         WorkflowEndpointRef, WorkflowToolId,
         storage::{BlobStore, InMemoryBlobStore},
     };
+    use harness::{ToolBatchId, TurnId};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -606,8 +608,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -620,8 +625,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -712,8 +720,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -778,8 +789,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -834,8 +848,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call(arguments_ref.clone()).call_id,
+            }),
             &call(arguments_ref),
             None,
             &PromiseIdAllocator::new(1),
@@ -859,8 +876,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call(duplicate_ref.clone()).call_id,
+            }),
             &call(duplicate_ref),
             None,
             &PromiseIdAllocator::new(1),
@@ -880,8 +900,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call(over_cap_ref.clone()).call_id,
+            }),
             &call(over_cap_ref),
             None,
             &PromiseIdAllocator::new(1),
@@ -924,8 +947,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -977,8 +1003,11 @@ mod tests {
                     &binding,
                     &SessionId::new("session-1"),
                     RunId::new(1),
-                    TurnId::new(2),
-                    ToolBatchId::new(3),
+                    harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                        turn_id: TurnId::new(2),
+                        tool_batch_id: ToolBatchId::new(3),
+                        tool_call_id: call(arguments_ref.clone()).call_id,
+                    }),
                     &call(arguments_ref),
                     None,
                     &PromiseIdAllocator::new(7),
@@ -1074,8 +1103,11 @@ mod tests {
             &binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),
@@ -1125,8 +1157,11 @@ mod tests {
             &joined_binding,
             &SessionId::new("session-1"),
             RunId::new(1),
-            TurnId::new(2),
-            ToolBatchId::new(3),
+            harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: TurnId::new(2),
+                tool_batch_id: ToolBatchId::new(3),
+                tool_call_id: call.call_id.clone(),
+            }),
             &call,
             None,
             &PromiseIdAllocator::new(1),

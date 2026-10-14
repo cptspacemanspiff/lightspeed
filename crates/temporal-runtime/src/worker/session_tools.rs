@@ -268,7 +268,7 @@ impl SessionTools {
         let args: AwaitArgs = self.read_tool_args(call).await?;
         match await_spec_from_args(args, now_unix_ms()?).map_err(io_error) {
             Ok(spec) => Ok(ToolBatchOutcome::Deferred {
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 call_id: call.call_id.clone(),
                 completed_results: Vec::new(),
                 spec,
@@ -279,8 +279,7 @@ impl SessionTools {
                         .await?;
                 Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                     run_id: request.run_id,
-                    turn_id: request.turn_id,
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     results: vec![result],
                 }))
             }
@@ -319,8 +318,7 @@ impl SessionTools {
             }
             return Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results: completed,
             }));
         }
@@ -350,8 +348,7 @@ impl SessionTools {
                 .await?;
                 return Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                     run_id: request.run_id,
-                    turn_id: request.turn_id,
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     results: vec![result],
                 }));
             }
@@ -374,13 +371,12 @@ impl SessionTools {
                 results.extend(result.results);
                 Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                     run_id: request.run_id,
-                    turn_id: request.turn_id,
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     results,
                 }))
             }
             ToolBatchOutcome::Deferred {
-                batch_id,
+                context,
                 call_id,
                 completed_results: await_completed,
                 spec,
@@ -388,7 +384,7 @@ impl SessionTools {
                 let mut results = completed_results;
                 results.extend(await_completed);
                 Ok(ToolBatchOutcome::Deferred {
-                    batch_id,
+                    context,
                     call_id,
                     completed_results: results,
                     spec,
@@ -829,8 +825,7 @@ impl SessionTools {
             binding,
             &request.session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.call_context(&call.call_id),
             call,
             execution_context_ref,
             promise_ids,
@@ -1736,8 +1731,7 @@ impl CoreAgentTools for SessionTools {
             }
             return Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results,
             }));
         }
@@ -1852,8 +1846,7 @@ impl CoreAgentTools for SessionTools {
             }
             Ok(ToolBatchOutcome::completed(ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results,
             }))
         }
@@ -2559,8 +2552,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-a"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: None,
@@ -2998,8 +2993,10 @@ mod tests {
                 .invoke_batch(ToolInvocationBatchRequest {
                     session_id,
                     run_id: RunId::new(9),
-                    turn_id: TurnId::new(1),
-                    batch_id: ToolBatchId::new(1),
+                    context: harness::DispatchContext::ModelBatch {
+                        turn_id: TurnId::new(1),
+                        batch_id: ToolBatchId::new(1),
+                    },
                     promise_id_base: 5,
                     // A special-only batch must not inspect this nonexistent cwd.
                     vfs_working_directory: Some(
@@ -3172,8 +3169,10 @@ mod tests {
             vfs_working_directory: None,
             session_id,
             run_id: RunId::new(9),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             active_environment_id: None,
             environment_policy: None,
@@ -3341,8 +3340,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-job-start"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             active_environment_id: Some(EnvironmentId::new("environment-original")),
             environment_policy: Some(test_environment_policy(&["environment-original"])),
@@ -3415,8 +3416,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session-job-start"),
                 run_id: RunId::new(2),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: Some(test_environment_policy(&[])),
@@ -3527,8 +3530,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-parent"),
             run_id: RunId::new(7),
-            turn_id: TurnId::new(2),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(2),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             active_environment_id: None,
             environment_policy: None,
@@ -3607,8 +3612,14 @@ mod tests {
             assert_eq!(first.status, ToolCallStatus::Succeeded);
             let invocation = &first.effects[0].data;
             assert_eq!(invocation["run_id"], request.run_id.to_string());
-            assert_eq!(invocation["turn_id"], request.turn_id.to_string());
-            assert_eq!(invocation["tool_batch_id"], request.batch_id.to_string());
+            assert_eq!(
+                invocation["turn_id"],
+                request.context.turn_id().unwrap().to_string()
+            );
+            assert_eq!(
+                invocation["tool_batch_id"],
+                request.context.batch_id().unwrap().to_string()
+            );
             assert_eq!(
                 invocation["tool_call_id"],
                 request.calls[0].call_id.as_str()
@@ -4775,8 +4786,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-per-call-list"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: Some(EnvironmentId::new("environment-allowed-1")),
@@ -4851,8 +4864,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-per-call-not-ready"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: Some(EnvironmentId::new("environment-pending")),
@@ -4982,8 +4997,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-per-call-await"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: None,
@@ -5036,8 +5053,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-environment-list"),
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: harness::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             active_environment_id: Some(EnvironmentId::new("environment-allowed-1")),
             environment_policy: Some(test_environment_policy(&[
@@ -5163,8 +5182,10 @@ mod tests {
                 vfs_working_directory: Some("/workspace".into()),
                 session_id,
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5209,8 +5230,10 @@ mod tests {
                 vfs_working_directory: Some("/workspace".into()),
                 session_id,
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5268,8 +5291,10 @@ mod tests {
                 vfs_working_directory: Some("/workspace".into()),
                 session_id,
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: Some(EnvironmentId::new("test")),
                 environment_policy: Some(test_environment_policy(&["test"])),
@@ -5405,8 +5430,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: parent,
                 run_id: RunId::new(9),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5440,7 +5467,7 @@ mod tests {
             .expect("invoke");
 
         let ToolBatchOutcome::Deferred {
-            batch_id,
+            context,
             call_id,
             completed_results,
             spec,
@@ -5448,7 +5475,7 @@ mod tests {
         else {
             panic!("expected deferred mixed await batch");
         };
-        assert_eq!(batch_id, ToolBatchId::new(1));
+        assert_eq!(context.batch_id(), Some(ToolBatchId::new(1)));
         assert_eq!(call_id, ToolCallId::new("call_wait"));
         assert_eq!(spec.promise_ids, vec![harness::PromiseId::new("promise_1")]);
         assert_eq!(completed_results.len(), 1);
@@ -5515,8 +5542,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: parent,
                 run_id: RunId::new(9),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5567,8 +5596,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: parent,
                 run_id: RunId::new(9),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5624,8 +5655,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: parent,
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5699,8 +5732,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session_sleep"),
                 run_id: RunId::new(9),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 5,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5794,8 +5829,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session_1"),
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,
@@ -5841,8 +5878,10 @@ mod tests {
                 vfs_working_directory: None,
                 session_id: SessionId::new("session_1"),
                 run_id: RunId::new(1),
-                turn_id: TurnId::new(1),
-                batch_id: ToolBatchId::new(1),
+                context: harness::DispatchContext::ModelBatch {
+                    turn_id: TurnId::new(1),
+                    batch_id: ToolBatchId::new(1),
+                },
                 promise_id_base: 1,
                 active_environment_id: None,
                 environment_policy: None,

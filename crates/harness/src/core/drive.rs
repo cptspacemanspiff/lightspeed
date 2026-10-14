@@ -215,8 +215,7 @@ impl CoreAgentDrive {
         })?;
         let result = ToolInvocationBatchResult {
             run_id: batch.run_id,
-            turn_id: batch.turn_id,
-            batch_id: batch.batch_id,
+            context: batch.dispatch_context(),
             results: vec![result],
         };
         self.resume_tool_batch(result, observed_at_ms)
@@ -321,16 +320,20 @@ impl CoreAgentDrive {
                 self.resume_tool_batch(result, observed_at_ms)
             }
             ToolBatchOutcome::Deferred {
-                batch_id,
+                context,
                 call_id,
                 completed_results,
                 spec,
-            } => self.defer_tool_batch(batch_id, call_id, completed_results, spec, observed_at_ms),
+            } => {
+                let batch_id = model_batch_id(&context)?;
+                self.defer_tool_batch(batch_id, call_id, completed_results, spec, observed_at_ms)
+            }
             ToolBatchOutcome::AwaitingApproval {
-                batch_id,
+                context,
                 completed_results,
                 approvals,
             } => {
+                let batch_id = model_batch_id(&context)?;
                 // Ungated siblings complete durably in the same append that
                 // parks the run, so a re-dispatch after the decisions only
                 // ever carries the calls that are still pending.
@@ -349,8 +352,7 @@ impl CoreAgentDrive {
                         &self.state,
                         ToolInvocationBatchResult {
                             run_id: batch.run_id,
-                            turn_id: batch.turn_id,
-                            batch_id: batch.batch_id,
+                            context: batch.dispatch_context(),
                             results: completed_results,
                         },
                     )?);
@@ -423,6 +425,24 @@ impl CoreAgentDrive {
         self.steps_taken = self.steps_taken.saturating_add(1);
         true
     }
+}
+
+/// Deferred and approval outcomes park a model batch; a scoped dispatch has
+/// none to park.
+fn model_batch_id(context: &crate::DispatchContext) -> Result<ToolBatchId, DomainError> {
+    context.batch_id().ok_or_else(|| {
+        DomainError::InvariantViolation("tool dispatch outcome requires a model batch".to_owned())
+    })
+}
+
+/// The model batch a result belongs to; scoped-call results have none and
+/// complete through their scope instead.
+fn model_batch_ids(
+    context: &crate::DispatchContext,
+) -> Result<(crate::TurnId, ToolBatchId), DomainError> {
+    context.model_batch().ok_or_else(|| {
+        DomainError::InvariantViolation("tool batch result requires a model batch".to_owned())
+    })
 }
 
 fn with_run_terminal_side_effects(
@@ -890,8 +910,7 @@ pub fn next_tool_batch_request(
         state,
         session_id,
         batch.run_id,
-        batch.turn_id,
-        batch.batch_id,
+        batch.dispatch_context(),
         batch.promise_id_base,
         &calls,
     )
@@ -904,8 +923,7 @@ pub(crate) fn tool_invocation_request(
     state: &CoreAgentState,
     session_id: &SessionId,
     run_id: crate::RunId,
-    turn_id: crate::TurnId,
-    batch_id: ToolBatchId,
+    context: crate::DispatchContext,
     promise_id_base: u64,
     observed_calls: &[crate::ObservedToolCall],
 ) -> Result<ToolInvocationBatchRequest, DomainError> {
@@ -972,8 +990,7 @@ pub(crate) fn tool_invocation_request(
     Ok(ToolInvocationBatchRequest {
         session_id: session_id.clone(),
         run_id,
-        turn_id,
-        batch_id,
+        context,
         promise_id_base,
         vfs_working_directory: state
             .lifecycle
@@ -1117,8 +1134,7 @@ pub fn tool_batch_deferred_proposals(
     }
     let completed_result = ToolInvocationBatchResult {
         run_id: batch.run_id,
-        turn_id: batch.turn_id,
-        batch_id: batch.batch_id,
+        context: batch.dispatch_context(),
         results: completed_results,
     };
     validate_tool_batch_result(&completed_result)?;
@@ -1207,8 +1223,7 @@ pub fn tool_batch_deferred_proposals(
             state,
             ToolInvocationBatchResult {
                 run_id: batch.run_id,
-                turn_id: batch.turn_id,
-                batch_id: batch.batch_id,
+                context: batch.dispatch_context(),
                 results,
             },
         );
@@ -1225,8 +1240,7 @@ pub fn tool_batch_deferred_proposals(
             state,
             ToolInvocationBatchResult {
                 run_id: batch.run_id,
-                turn_id: batch.turn_id,
-                batch_id: batch.batch_id,
+                context: batch.dispatch_context(),
                 results,
             },
         );
@@ -1260,8 +1274,7 @@ pub fn tool_batch_deferred_proposals(
             state,
             ToolInvocationBatchResult {
                 run_id: batch.run_id,
-                turn_id: batch.turn_id,
-                batch_id: batch.batch_id,
+                context: batch.dispatch_context(),
                 results,
             },
         );
@@ -1380,10 +1393,11 @@ pub fn resume_tool_batch_proposals(
     };
     validate_tool_batch_result(&result)?;
     validate_result_matches_active_tool_batch(state, &result, true)?;
+    let (turn_id, batch_id) = model_batch_ids(&result.context)?;
     let joins = CoreAgentJoins {
         run_id: Some(result.run_id),
-        turn_id: Some(result.turn_id),
-        tool_batch_id: Some(result.batch_id),
+        turn_id: Some(turn_id),
+        tool_batch_id: Some(batch_id),
         ..CoreAgentJoins::default()
     };
     let mut proposals = Vec::new();
@@ -1410,8 +1424,8 @@ pub fn resume_tool_batch_proposals(
         joins.clone(),
         CoreAgentEvent::Tool(ToolEvent::BatchResumed {
             run_id: result.run_id,
-            turn_id: result.turn_id,
-            batch_id: result.batch_id,
+            turn_id,
+            batch_id,
         }),
     ));
     proposals.extend(tool_call_completed_proposals(state, None, result)?);
@@ -1545,8 +1559,7 @@ fn await_resume_result(
     model_visible_context_entries.extend(additional_context);
     Ok(ToolInvocationBatchResult {
         run_id: active_run.run_id,
-        turn_id: batch.turn_id,
-        batch_id: batch.batch_id,
+        context: batch.dispatch_context(),
         results: vec![ToolInvocationResult {
             effects: Vec::new(),
             duration_ms: None,
@@ -1696,8 +1709,7 @@ fn joined_workflow_resume_result(
     }
     Ok(ToolInvocationBatchResult {
         run_id: active_run.run_id,
-        turn_id: batch.turn_id,
-        batch_id: batch.batch_id,
+        context: batch.dispatch_context(),
         results,
     })
 }
@@ -1710,7 +1722,7 @@ fn joined_workflow_resume_result(
 fn validate_minted_promise_id(
     state: &CoreAgentState,
     run_id: crate::RunId,
-    batch_id: crate::ToolBatchId,
+    batch_id: Option<crate::ToolBatchId>,
     promise_id: &crate::PromiseId,
     origin: Option<&crate::CodeToolOrigin>,
     minted_in_result: &mut BTreeSet<crate::PromiseId>,
@@ -1730,6 +1742,11 @@ fn validate_minted_promise_id(
         }
         call.promise_id_base
     } else {
+        let batch_id = batch_id.ok_or_else(|| {
+            DomainError::InvariantViolation(
+                "tool result outside a scope requires a model batch".to_owned(),
+            )
+        })?;
         state
             .runs
             .active
@@ -1745,7 +1762,7 @@ fn validate_minted_promise_id(
     };
     if promise_id.number() < base {
         return Err(DomainError::InvariantViolation(format!(
-            "promise {promise_id} was minted below tool batch {batch_id}'s promise base {base}"
+            "promise {promise_id} was minted below its dispatch's promise base {base}"
         )));
     }
     if state.promises.promises.contains_key(promise_id)
@@ -1814,8 +1831,8 @@ fn tool_call_completed_proposals_inner(
         let call_id = result_item.call_id.clone();
         let joins = CoreAgentJoins {
             run_id: Some(result.run_id),
-            turn_id: Some(result.turn_id),
-            tool_batch_id: Some(result.batch_id),
+            turn_id: result.context.turn_id(),
+            tool_batch_id: result.context.batch_id(),
             tool_call_id: Some(call_id.clone()),
             ..CoreAgentJoins::default()
         };
@@ -1835,7 +1852,9 @@ fn tool_call_completed_proposals_inner(
                 // invariant spans the whole batch, not one result set.
                 if saw_environment_selection_effect
                     || (origin.is_none()
-                        && batch_has_terminal_environment_selection(state, result.batch_id))
+                        && result.context.batch_id().is_some_and(|batch_id| {
+                            batch_has_terminal_environment_selection(state, batch_id)
+                        }))
                 {
                     return Err(DomainError::InvariantViolation(
                         "tool batch produced more than one environment selection effect".to_owned(),
@@ -1870,7 +1889,7 @@ fn tool_call_completed_proposals_inner(
                 validate_minted_promise_id(
                     state,
                     result.run_id,
-                    result.batch_id,
+                    result.context.batch_id(),
                     &promise.promise_id,
                     origin.as_ref(),
                     &mut minted_promises,
@@ -1966,8 +1985,7 @@ fn tool_call_completed_proposals_inner(
                     state,
                     session_id,
                     result.run_id,
-                    result.turn_id,
-                    result.batch_id,
+                    &result.context,
                     &call_id,
                     &invocation,
                     pending,
@@ -2008,7 +2026,7 @@ fn tool_call_completed_proposals_inner(
                         validate_minted_promise_id(
                             state,
                             result.run_id,
-                            result.batch_id,
+                            result.context.batch_id(),
                             promise_id,
                             origin.as_ref(),
                             &mut minted_promises,
@@ -2093,12 +2111,15 @@ fn tool_call_completed_proposals_inner(
                         origin: origin.clone(),
                         result: result_item.into(),
                     }),
-                    None => CoreAgentEvent::Tool(ToolEvent::CallCompleted {
-                        run_id: result.run_id,
-                        turn_id: result.turn_id,
-                        batch_id: result.batch_id,
-                        result: invocation_result_to_call_result(result_item),
-                    }),
+                    None => {
+                        let (turn_id, batch_id) = model_batch_ids(&result.context)?;
+                        CoreAgentEvent::Tool(ToolEvent::CallCompleted {
+                            run_id: result.run_id,
+                            turn_id,
+                            batch_id,
+                            result: invocation_result_to_call_result(result_item),
+                        })
+                    }
                 },
             ));
             proposals.extend(promise_proposals);
@@ -2117,8 +2138,8 @@ fn tool_call_completed_proposals_inner(
         proposals.extend(joined_promise_proposals);
         let joins = CoreAgentJoins {
             run_id: Some(result.run_id),
-            turn_id: Some(result.turn_id),
-            tool_batch_id: Some(result.batch_id),
+            turn_id: result.context.turn_id(),
+            tool_batch_id: result.context.batch_id(),
             ..CoreAgentJoins::default()
         };
         let promise_ids = joined_calls
@@ -2139,12 +2160,15 @@ fn tool_call_completed_proposals_inner(
                     origin,
                     suspension,
                 }),
-                None => CoreAgentEvent::Tool(ToolEvent::BatchDeferred {
-                    run_id: result.run_id,
-                    turn_id: result.turn_id,
-                    batch_id: result.batch_id,
-                    suspension,
-                }),
+                None => {
+                    let (turn_id, batch_id) = model_batch_ids(&result.context)?;
+                    CoreAgentEvent::Tool(ToolEvent::BatchDeferred {
+                        run_id: result.run_id,
+                        turn_id,
+                        batch_id,
+                        suspension,
+                    })
+                }
             }
         }));
         proposals.extend(joined_tool_proposals);
@@ -2201,20 +2225,16 @@ fn validate_result_matches_active_tool_batch(
         .active
         .as_ref()
         .ok_or_else(|| DomainError::InvariantViolation("no active run".into()))?;
-    if active_run.run_id != result.run_id
-        || active_run.active_tool_batch_id != Some(result.batch_id)
-    {
+    let (turn_id, batch_id) = model_batch_ids(&result.context)?;
+    if active_run.run_id != result.run_id || active_run.active_tool_batch_id != Some(batch_id) {
         return Err(DomainError::InvariantViolation(
             "tool invocation result does not match active tool batch".into(),
         ));
     }
-    let batch = active_run
-        .tool_batches
-        .get(&result.batch_id)
-        .ok_or_else(|| {
-            DomainError::InvariantViolation(format!("tool batch {} is missing", result.batch_id))
-        })?;
-    if batch.turn_id != result.turn_id {
+    let batch = active_run.tool_batches.get(&batch_id).ok_or_else(|| {
+        DomainError::InvariantViolation(format!("tool batch {batch_id} is missing"))
+    })?;
+    if batch.turn_id != turn_id {
         return Err(DomainError::InvariantViolation(
             "tool invocation result does not match active turn".into(),
         ));
@@ -2222,12 +2242,11 @@ fn validate_result_matches_active_tool_batch(
     let is_parked = active_run
         .parked_tool_batch
         .as_ref()
-        .is_some_and(|parked| parked.batch_id == result.batch_id);
+        .is_some_and(|parked| parked.batch_id == batch_id);
     match (require_parked, is_parked) {
         (true, false) => {
             return Err(DomainError::InvariantViolation(format!(
-                "tool batch {} is not deferred",
-                result.batch_id
+                "tool batch {batch_id} is not deferred"
             )));
         }
         (false, true) => {
@@ -3081,8 +3100,7 @@ mod tests {
     fn completed_tool_result(request: &ToolInvocationBatchRequest) -> ToolInvocationBatchResult {
         ToolInvocationBatchResult {
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            batch_id: request.batch_id,
+            context: request.context.clone(),
             results: vec![ToolInvocationResult {
                 attachments: Vec::new(),
                 duration_ms: None,
@@ -3156,7 +3174,7 @@ mod tests {
         spec: AwaitSpec,
     ) -> ToolBatchOutcome {
         ToolBatchOutcome::Deferred {
-            batch_id: request.batch_id,
+            context: request.context.clone(),
             call_id: request.calls[0].call_id.clone(),
             completed_results: Vec::new(),
             spec,
@@ -3173,7 +3191,7 @@ mod tests {
     ) -> CoreAgentCommand {
         CoreAgentCommand::ResumeToolBatch(crate::ResumeToolBatchCommand {
             run_id: request.run_id,
-            batch_id: request.batch_id,
+            batch_id: request.context.batch_id().unwrap(),
             claim,
             claim_observed_at_ms: 91,
             output: ToolBatchResumeOutput::AwaitTool {
@@ -7377,11 +7395,11 @@ mod tests {
                 .as_ref()
                 .expect("parked await")
                 .batch_id,
-            request.batch_id
+            request.context.batch_id().unwrap()
         );
         let batch = active_run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active tool batch");
         assert_eq!(batch.calls[0].status, ToolCallStatus::Pending);
 
@@ -7568,7 +7586,7 @@ mod tests {
         assert!(active_run.parked_tool_batch.is_none());
         let batch = active_run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active tool batch");
         assert_eq!(batch.calls[0].status, ToolCallStatus::Failed);
     }
@@ -7600,7 +7618,7 @@ mod tests {
         let active_run = drive.state().runs.active.as_ref().expect("active run");
         let batch = active_run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active tool batch");
         assert!(active_run.parked_tool_batch.is_none());
         assert_eq!(batch.calls[0].status, ToolCallStatus::Succeeded);
@@ -7620,11 +7638,15 @@ mod tests {
             CoreAgentEvent::Tool(ToolEvent::BatchCompleted { .. })
         )));
         let active_run = drive.state().runs.active.as_ref().expect("active run");
-        assert!(!active_run.tool_batches.contains_key(&request.batch_id));
+        assert!(
+            !active_run
+                .tool_batches
+                .contains_key(&request.context.batch_id().unwrap())
+        );
         assert!(
             active_run
                 .completed_tool_batches
-                .contains_key(&request.batch_id)
+                .contains_key(&request.context.batch_id().unwrap())
         );
     }
 
@@ -7650,7 +7672,7 @@ mod tests {
         let active_run = drive.state().runs.active.as_ref().expect("active run");
         let batch = active_run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active tool batch");
         assert!(active_run.parked_tool_batch.is_none());
         assert_eq!(batch.calls[0].status, ToolCallStatus::Succeeded);
@@ -8149,8 +8171,8 @@ mod tests {
             universe_id,
             &session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &call.call_id,
             &binding.binding_fingerprint,
         );
@@ -8164,8 +8186,8 @@ mod tests {
             session_id,
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: call.call_id.clone(),
             }),
             arguments_ref: call.arguments_ref.clone(),
@@ -8213,7 +8235,7 @@ mod tests {
         let active = drive.state().runs.active.as_ref().expect("active run");
         let batch = active
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active tool batch");
         let call = batch
             .calls
@@ -8283,8 +8305,8 @@ mod tests {
             universe_id,
             &session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &call.call_id,
             &binding.binding_fingerprint,
         );
@@ -8299,8 +8321,8 @@ mod tests {
             session_id,
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: call.call_id.clone(),
             }),
             arguments_ref: call.arguments_ref.clone(),
@@ -8374,8 +8396,7 @@ mod tests {
         ] {
             let forbidden = ToolInvocationBatchResult {
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                batch_id: request.batch_id,
+                context: request.context.clone(),
                 results: vec![ToolInvocationResult {
                     attachments: Vec::new(),
                     duration_ms: None,
@@ -8423,7 +8444,7 @@ mod tests {
             &cancelling_state,
             ResumeToolBatchCommand {
                 run_id: request.run_id,
-                batch_id: request.batch_id,
+                batch_id: request.context.batch_id().unwrap(),
                 claim: WakeReason::Cancelled,
                 claim_observed_at_ms: 100,
                 output: ToolBatchResumeOutput::JoinedWorkflowCalls {
@@ -8479,7 +8500,7 @@ mod tests {
             .admit_command(
                 CoreAgentCommand::ResumeToolBatch(ResumeToolBatchCommand {
                     run_id: request.run_id,
-                    batch_id: request.batch_id,
+                    batch_id: request.context.batch_id().unwrap(),
                     claim: WakeReason::Terminal,
                     claim_observed_at_ms: 100,
                     output: ToolBatchResumeOutput::JoinedWorkflowCalls {
@@ -8658,8 +8679,8 @@ mod tests {
                 universe_id,
                 &session_id,
                 request.run_id,
-                request.turn_id,
-                request.batch_id,
+                request.context.turn_id().unwrap(),
+                request.context.batch_id().unwrap(),
                 &call.call_id,
                 &binding.binding_fingerprint,
             );
@@ -8674,8 +8695,8 @@ mod tests {
                 session_id: session_id.clone(),
                 run_id: request.run_id,
                 context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                    turn_id: request.turn_id,
-                    tool_batch_id: request.batch_id,
+                    turn_id: request.context.turn_id().unwrap(),
+                    tool_batch_id: request.context.batch_id().unwrap(),
                     tool_call_id: call.call_id.clone(),
                 }),
                 arguments_ref: call.arguments_ref.clone(),
@@ -8706,8 +8727,7 @@ mod tests {
             .resume_tool_batch(
                 ToolInvocationBatchResult {
                     run_id: request.run_id,
-                    turn_id: request.turn_id,
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     results,
                 },
                 90,
@@ -8718,7 +8738,7 @@ mod tests {
         let active = drive.state().runs.active.as_ref().expect("active run");
         let batch = active
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active batch");
         let echo = batch
             .calls
@@ -8756,7 +8776,7 @@ mod tests {
             .admit_command(
                 CoreAgentCommand::ResumeToolBatch(ResumeToolBatchCommand {
                     run_id: request.run_id,
-                    batch_id: request.batch_id,
+                    batch_id: request.context.batch_id().unwrap(),
                     claim: WakeReason::Terminal,
                     claim_observed_at_ms: 100,
                     output: ToolBatchResumeOutput::JoinedWorkflowCalls {
@@ -8882,8 +8902,8 @@ mod tests {
             universe_id,
             &session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &workflow_call.call_id,
             &binding.binding_fingerprint,
         );
@@ -8898,8 +8918,8 @@ mod tests {
             session_id,
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: workflow_call.call_id.clone(),
             }),
             arguments_ref: workflow_call.arguments_ref.clone(),
@@ -8926,7 +8946,7 @@ mod tests {
         }];
         let rejected = drive
             .defer_tool_batch(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 await_call.call_id.clone(),
                 completed_results,
                 AwaitSpec {
@@ -9020,8 +9040,8 @@ mod tests {
             universe_id,
             &session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &call.call_id,
             &binding.binding_fingerprint,
         );
@@ -9036,8 +9056,8 @@ mod tests {
             session_id,
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: call.call_id.clone(),
             }),
             arguments_ref: call.arguments_ref.clone(),
@@ -9202,8 +9222,8 @@ mod tests {
             universe_id,
             &session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &call.call_id,
             &binding.binding_fingerprint,
         );
@@ -9220,8 +9240,8 @@ mod tests {
             session_id,
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: call.call_id.clone(),
             }),
             arguments_ref: call.arguments_ref.clone(),
@@ -9537,8 +9557,10 @@ mod tests {
             vfs_working_directory: None,
             session_id: SessionId::new("session-a"),
             run_id: RunId::new(4),
-            turn_id: TurnId::new(1),
-            batch_id: ToolBatchId::new(1),
+            context: crate::DispatchContext::ModelBatch {
+                turn_id: TurnId::new(1),
+                batch_id: ToolBatchId::new(1),
+            },
             promise_id_base: 1,
             workspace_attachments: Vec::new(),
             active_environment_id: None,
@@ -9772,7 +9794,7 @@ mod tests {
         // batch stays active.
         let first = drive
             .resume_tool_call(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 per_call_result(
                     &request.calls[0].call_id,
                     ToolCallStatus::Succeeded,
@@ -9785,17 +9807,20 @@ mod tests {
         let active_run = drive.state().runs.active.as_ref().expect("active run");
         let batch = active_run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active batch");
         assert_eq!(batch.calls[0].status, ToolCallStatus::Succeeded);
         assert_eq!(batch.calls[1].status, ToolCallStatus::Pending);
-        assert_eq!(active_run.active_tool_batch_id, Some(request.batch_id));
+        assert_eq!(
+            active_run.active_tool_batch_id,
+            Some(request.context.batch_id().unwrap())
+        );
 
         // A duplicate completion for the first call is rejected without
         // touching the sibling.
         drive
             .resume_tool_call(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 per_call_result(
                     &request.calls[0].call_id,
                     ToolCallStatus::Succeeded,
@@ -9809,7 +9834,7 @@ mod tests {
         // untouched and the batch completes once every call is terminal.
         let second = drive
             .resume_tool_call(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 per_call_result(
                     &request.calls[1].call_id,
                     ToolCallStatus::Failed,
@@ -9832,12 +9857,15 @@ mod tests {
         let active_run = drive.state().runs.active.as_ref().expect("active run");
         let completed = active_run
             .completed_tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("completed batch");
         assert_eq!(completed.results.len(), 2);
         assert_eq!(completed.results[0].status, ToolCallStatus::Succeeded);
         assert_eq!(completed.results[1].status, ToolCallStatus::Failed);
-        assert_ne!(active_run.active_tool_batch_id, Some(request.batch_id));
+        assert_ne!(
+            active_run.active_tool_batch_id,
+            Some(request.context.batch_id().unwrap())
+        );
     }
 
     /// Runtime-measured per-call durations recorded by the execution
@@ -9856,7 +9884,7 @@ mod tests {
         );
         first.duration_ms = Some(400);
         let first = drive
-            .resume_tool_call(request.batch_id, first, 121)
+            .resume_tool_call(request.context.batch_id().unwrap(), first, 121)
             .expect("resume first call");
         commit_action(&mut drive, first);
 
@@ -9867,7 +9895,7 @@ mod tests {
         );
         second.duration_ms = Some(600);
         let second = drive
-            .resume_tool_call(request.batch_id, second, 122)
+            .resume_tool_call(request.context.batch_id().unwrap(), second, 122)
             .expect("resume second call");
         commit_action(&mut drive, second);
 
@@ -9884,7 +9912,7 @@ mod tests {
         let active_run = drive.state().runs.active.as_ref().expect("active run");
         let completed_batch = active_run
             .completed_tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("completed batch");
         assert_eq!(completed_batch.results[0].duration_ms, Some(400));
         assert_eq!(completed_batch.results[1].duration_ms, Some(600));
@@ -9905,7 +9933,7 @@ mod tests {
 
         let first = drive
             .resume_tool_call(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 per_call_result(
                     &request.calls[0].call_id,
                     ToolCallStatus::Succeeded,
@@ -9920,7 +9948,7 @@ mod tests {
         // effect arriving through a later per-call resume must be rejected.
         let error = drive
             .resume_tool_call(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 per_call_result(
                     &request.calls[1].call_id,
                     ToolCallStatus::Succeeded,
@@ -10090,7 +10118,7 @@ mod tests {
         let parked = drive
             .resume_tool_batch_outcome(
                 ToolBatchOutcome::AwaitingApproval {
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     completed_results: vec![per_call_result(
                         &request.calls[0].call_id,
                         ToolCallStatus::Succeeded,
@@ -10111,7 +10139,7 @@ mod tests {
         assert_eq!(run.pending_approvals().count(), 2);
         let batch = run
             .tool_batches
-            .get(&request.batch_id)
+            .get(&request.context.batch_id().unwrap())
             .expect("active batch");
         assert_eq!(batch.calls[0].status, ToolCallStatus::Succeeded);
         assert_eq!(batch.calls[1].status, ToolCallStatus::Pending);
@@ -10144,7 +10172,10 @@ mod tests {
         // The re-dispatch is the same batch, carries only the pending calls,
         // and pins each decision onto its call's routing facts.
         let redispatch = next_tool_batch_dispatch(&mut drive, 95);
-        assert_eq!(redispatch.batch_id, request.batch_id);
+        assert_eq!(
+            redispatch.context.batch_id().unwrap(),
+            request.context.batch_id().unwrap()
+        );
         assert_eq!(redispatch.promise_id_base, request.promise_id_base);
         assert_eq!(
             redispatch
@@ -10165,7 +10196,7 @@ mod tests {
         let request = mixed_native_mcp_batch(&mut drive);
 
         let empty = drive
-            .request_native_mcp_approvals(request.batch_id, Vec::new(), 90)
+            .request_native_mcp_approvals(request.context.batch_id().unwrap(), Vec::new(), 90)
             .expect_err("an empty gated set must not park the run");
         assert!(matches!(
             empty,
@@ -10173,7 +10204,7 @@ mod tests {
         ));
         let unknown = drive
             .request_native_mcp_approvals(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 vec![native_mcp_approval(&crate::ToolCallId::new("call_unknown"))],
                 90,
             )
@@ -10184,7 +10215,7 @@ mod tests {
         ));
         let duplicate = drive
             .request_native_mcp_approvals(
-                request.batch_id,
+                request.context.batch_id().unwrap(),
                 vec![
                     native_mcp_approval(&request.calls[1].call_id),
                     native_mcp_approval(&request.calls[1].call_id),
@@ -10447,8 +10478,7 @@ mod tests {
             .resume_tool_batch(
                 ToolInvocationBatchResult {
                     run_id: request.run_id,
-                    turn_id: request.turn_id,
-                    batch_id: request.batch_id,
+                    context: request.context.clone(),
                     results: vec![result],
                 },
                 90,
@@ -10467,8 +10497,8 @@ mod tests {
             binding.session_universe_id,
             &request.session_id,
             request.run_id,
-            request.turn_id,
-            request.batch_id,
+            request.context.turn_id().unwrap(),
+            request.context.batch_id().unwrap(),
             &call.call_id,
             &binding.binding_fingerprint,
         );
@@ -10482,8 +10512,8 @@ mod tests {
             session_id: request.session_id.clone(),
             run_id: request.run_id,
             context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
+                turn_id: request.context.turn_id().unwrap(),
+                tool_batch_id: request.context.batch_id().unwrap(),
                 tool_call_id: call.call_id.clone(),
             }),
             arguments_ref: call.arguments_ref.clone(),
@@ -11292,7 +11322,7 @@ mod tests {
         ));
         let outer_resume = CoreAgentCommand::ResumeToolBatch(ResumeToolBatchCommand {
             run_id: ordinary_request.run_id,
-            batch_id: ordinary_request.batch_id,
+            batch_id: ordinary_request.context.batch_id().unwrap(),
             claim: WakeReason::Cancelled,
             claim_observed_at_ms: 100,
             output: ToolBatchResumeOutput::JoinedWorkflowCalls {
