@@ -1543,6 +1543,7 @@ async fn run_openai_live_client(
                 display_name: Some("OpenAI live test".to_owned()),
                 description: None,
                 document: ProfileDocument {
+                    program: None,
                     config: Some(SessionConfig::default()),
                     instructions: Some(ProfileInstructions::Text {
                         text: instructions.to_owned(),
@@ -1692,6 +1693,7 @@ async fn run_builtin_tool_live_client(
                 display_name: Some("Built-in tool live test".to_owned()),
                 description: None,
                 document: ProfileDocument {
+                    program: None,
                     instructions: Some(ProfileInstructions::Text {
                         text: "You are in a live tool integration test. You must use the requested tools before replying, then follow the exact-output instruction.".to_owned(),
                     }),

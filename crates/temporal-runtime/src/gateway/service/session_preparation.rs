@@ -290,6 +290,52 @@ impl SessionPreparationService {
         ))
     }
 
+    /// The system binding that executes a program session's program: a
+    /// joined start of the program run workflow on the code queue. The run
+    /// owns its single invocation; the program itself can never call it.
+    pub(crate) async fn core_program_execute_workflow_tool_declaration(
+        &self,
+    ) -> Result<WorkflowToolDeclaration, AgentApiError> {
+        let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
+            workflow_type: tools::program::PROGRAM_RUN_WORKFLOW_TYPE.to_owned(),
+            task_queue: self.code_task_queue.clone(),
+        })
+        .map_err(|error| {
+            AgentApiError::internal(format!("encode program workflow recipe: {error}"))
+        })?;
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe_bytes);
+        let recipe_ref = self
+            .store
+            .put_bytes(recipe_bytes)
+            .await
+            .map_err(map_blob_store_error)?;
+        Ok(WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(tools::program::PROGRAM_EXECUTE_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: tools::program::PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool: tools::definitions::register(
+                    tools::program::PROGRAM_EXECUTE_TOOL_NAME,
+                    Default::default(),
+                    harness::ToolParallelism::ParallelSafe,
+                    Default::default(),
+                ),
+            },
+            WorkflowToolTarget::Start {
+                start: WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: tools::program::PROGRAM_EXECUTION_DEADLINE_CEILING_MS,
+            },
+        ))
+    }
+
     pub(crate) async fn prepare_toolset(
         &self,
         source: SessionToolsetSource,
@@ -304,6 +350,12 @@ impl SessionPreparationService {
         let subagents = session_config.features.subagents.is_some();
         let code_mode = session_config.features.code_mode.is_some();
         let mut declarations = Vec::new();
+        if source.driver.is_program() {
+            declarations.push(
+                self.core_program_execute_workflow_tool_declaration()
+                    .await?,
+            );
+        }
         if jobs {
             declarations.extend(
                 self.core_environment_job_workflow_tool_declarations()
@@ -454,7 +506,12 @@ impl SessionPreparationService {
     ) -> Result<temporal_workflow::SessionProfilePreparation, AgentApiError> {
         self.validate_configuration(&request.source.config).await?;
         let mut instructions = BTreeMap::new();
-        if let Some(input) = request.instructions {
+        // A program session has no model context; its profile's
+        // instructions are not published.
+        if let Some(input) = request
+            .instructions
+            .filter(|_| !request.source.driver.is_program())
+        {
             let reference = match input {
                 ProfileInstructions::Text { text } => self
                     .store

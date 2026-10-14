@@ -122,6 +122,15 @@ impl GatewayAgentApi {
         &self,
         source: ProfileSource,
     ) -> Result<ProfileDocument, AgentApiError> {
+        Ok(self.resolve_profile(source).await?.document)
+    }
+
+    /// Resolve a profile source, keeping the named profile's identity and
+    /// revision so a program pinned from it records where it came from.
+    pub(super) async fn resolve_profile(
+        &self,
+        source: ProfileSource,
+    ) -> Result<ResolvedProfile, AgentApiError> {
         source.validate().map_err(map_profile_error)?;
         match source {
             ProfileSource::Named { profile_id } => {
@@ -130,10 +139,91 @@ impl GatewayAgentApi {
                     .read_agent_profile(&profile_id)
                     .await
                     .map_err(map_profile_error)?;
-                Ok(profile.document)
+                Ok(ResolvedProfile {
+                    document: profile.document,
+                    named: Some((profile_id, profile.revision)),
+                })
             }
-            ProfileSource::Inline { profile } => Ok(profile.document),
+            ProfileSource::Inline { profile } => Ok(ResolvedProfile {
+                document: profile.document,
+                named: None,
+            }),
         }
+    }
+
+    /// Pin a profile's program for a new session: the source and schemas go
+    /// to CAS by content, so the session retains exactly what it was created
+    /// from.
+    pub(super) async fn pin_program(
+        &self,
+        spec: &api::ProgramSpec,
+        named: Option<&(api::ProfileId, u64)>,
+    ) -> Result<harness::PinnedProgram, AgentApiError> {
+        let source_ref = match &spec.source {
+            api::ProgramSource::Text { text } => {
+                if text.trim().is_empty() {
+                    return Err(AgentApiError::invalid_request(
+                        "program source must not be empty",
+                    ));
+                }
+                self.store
+                    .put_bytes(text.clone().into_bytes())
+                    .await
+                    .map_err(map_blob_store_error)?
+            }
+            api::ProgramSource::TextRef { blob_ref } => {
+                let reference = parse_blob_ref(blob_ref)?;
+                if !self
+                    .store
+                    .has_blob(&reference)
+                    .await
+                    .map_err(map_blob_store_error)?
+                {
+                    return Err(AgentApiError::not_found(format!(
+                        "program source blob not found: {reference}"
+                    )));
+                }
+                reference
+            }
+        };
+        let schema_ref = async |schema: &Option<serde_json::Value>| match schema {
+            Some(schema) => {
+                let bytes = serde_json::to_vec(schema).map_err(|error| {
+                    AgentApiError::invalid_request(format!("invalid program schema: {error}"))
+                })?;
+                Ok::<_, AgentApiError>(Some(
+                    self.store
+                        .put_bytes(bytes)
+                        .await
+                        .map_err(map_blob_store_error)?,
+                ))
+            }
+            None => Ok(None),
+        };
+        let input_schema = schema_ref(&spec.input_schema).await?;
+        let output_schema = schema_ref(&spec.output_schema).await?;
+        let defaults = harness::ProgramLimits::default();
+        let limits = spec.limits.clone().unwrap_or_default();
+        let program = harness::PinnedProgram {
+            program_id: named.map(|(profile_id, _)| profile_id.as_str().to_owned()),
+            revision: named.map(|(_, revision)| *revision),
+            source_ref,
+            engine: harness::ProgramEngine {
+                kind: harness::ProgramEngineKind::Js,
+                semantics_version: spec.semantics_version,
+            },
+            input_schema,
+            output_schema,
+            limits: harness::ProgramLimits {
+                max_calls: limits.max_calls.unwrap_or(defaults.max_calls),
+                max_in_flight: limits.max_in_flight.unwrap_or(defaults.max_in_flight),
+                max_wall_clock_ms: limits.max_wall_clock_ms,
+            },
+        };
+        program
+            .validate()
+            .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
+        Ok(program)
     }
 
     pub(super) fn merge_profile_start_config(
@@ -182,6 +272,12 @@ impl GatewayAgentApi {
             environment,
         })
     }
+}
+
+/// A profile document with the identity it was read under, if it was named.
+pub(super) struct ResolvedProfile {
+    pub document: ProfileDocument,
+    pub named: Option<(api::ProfileId, u64)>,
 }
 
 /// The attachment a profile activates when the session has no active

@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct SessionToolsetSource {
     pub config: SessionConfig,
     pub config_revision: u64,
+    /// A program session gets the binding that executes its program.
+    #[serde(default, skip_serializing_if = "harness::SessionDriver::is_agent")]
+    pub driver: harness::SessionDriver,
     pub bindings: BTreeMap<WorkflowToolId, WorkflowToolBinding>,
     pub system_binding_ids: BTreeSet<WorkflowToolId>,
 }
@@ -20,6 +23,7 @@ impl SessionToolsetSource {
         Some(Self {
             config: state.lifecycle.config.clone()?,
             config_revision: state.lifecycle.config_revision,
+            driver: state.lifecycle.driver.clone(),
             bindings: state.workflow_tools.bindings.clone(),
             system_binding_ids: state.workflow_tools.system_binding_ids.clone(),
         })

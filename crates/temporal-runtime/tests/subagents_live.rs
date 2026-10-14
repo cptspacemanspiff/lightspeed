@@ -678,6 +678,7 @@ async fn create_child_profile_with_config(
             display_name: Some("Live child".to_owned()),
             description: Some("Answers CHILD_TASK briefs".to_owned()),
             document: ProfileDocument {
+                program: None,
                 metadata: Default::default(),
                 config: Some(config),
                 instructions: Some(ProfileInstructions::Text {
@@ -1366,6 +1367,7 @@ async fn run_agent_run_inherit_environment_live_client(
             display_name: Some("Inheriting child".to_owned()),
             description: Some("Answers CHILD_TASK briefs on the parent\'s environment".to_owned()),
             document: ProfileDocument {
+                program: None,
                 metadata: Default::default(),
                 config: Some(SessionConfig {
                     features: Some(api::FeaturesConfig {
@@ -1414,6 +1416,7 @@ async fn run_agent_run_inherit_environment_live_client(
                 display_name: None,
                 description: None,
                 document: ProfileDocument {
+                    program: None,
                     metadata: Default::default(),
                     config: Some(SessionConfig {
                         model: Some(model_to_api(&model)),

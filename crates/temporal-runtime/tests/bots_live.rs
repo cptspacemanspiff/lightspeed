@@ -144,6 +144,7 @@ async fn create_profile(api: &GatewayAgentApi, instructions: &str) -> anyhow::Re
             display_name: Some("bots live".to_owned()),
             description: None,
             document: ProfileDocument {
+                program: None,
                 instructions: Some(ProfileInstructions::Text {
                     text: instructions.to_owned(),
                 }),

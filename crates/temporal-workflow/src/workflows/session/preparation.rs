@@ -562,8 +562,10 @@ async fn apply_profile(
             },
         );
     }
-    summary.instructions_changed =
-        desired != admissions::active_instruction_inputs(candidate.state());
+    // A program session has no model context; its profile's instructions
+    // are not published.
+    summary.instructions_changed = !candidate.state().lifecycle.driver.is_program()
+        && desired != admissions::active_instruction_inputs(candidate.state());
     if summary.instructions_changed {
         candidate.push(
             CoreAgentCommand::ReplaceContextPrefix {

@@ -623,6 +623,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "description": "Descriptive metadata defaults copied to a session when it is created\nfrom this profile. Explicit `session/start` metadata wins key by key.\nApplying the profile to an existing session does not change metadata.",
               "type": "object"
             },
+            "program": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Makes sessions created from this profile program sessions: their\nruns execute this program instead of a model, with `config` carrying\nthe grants the program may use. The program is resolved and pinned\nwhen the session is created; a later revision never changes a\nrunning session. Applying the profile to an existing session does\nnot change its program."
+            },
             "retention": {
               "anyOf": [
                 {
@@ -831,6 +842,114 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "object"
             }
           ]
+        },
+        "ProgramLimitsInput": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "properties": {
+            "maxCalls": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxInFlight": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWallClockMs": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProgramSpec": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
+          "properties": {
+            "inputSchema": {
+              "description": "JSON Schema that run input must satisfy."
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramLimitsInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputSchema": {
+              "description": "JSON Schema that run output must satisfy."
+            },
+            "semanticsVersion": {
+              "default": 1,
+              "description": "The guest API version the program was written against.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/definitions/ProgramSource"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
         },
         "SessionConfig": {
           "additionalProperties": {
@@ -4295,6 +4414,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "description": "Descriptive metadata defaults copied to a session when it is created\nfrom this profile. Explicit `session/start` metadata wins key by key.\nApplying the profile to an existing session does not change metadata.",
               "type": "object"
             },
+            "program": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Makes sessions created from this profile program sessions: their\nruns execute this program instead of a model, with `config` carrying\nthe grants the program may use. The program is resolved and pinned\nwhen the session is created; a later revision never changes a\nrunning session. Applying the profile to an existing session does\nnot change its program."
+            },
             "retention": {
               "anyOf": [
                 {
@@ -4503,6 +4633,114 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "object"
             }
           ]
+        },
+        "ProgramLimitsInput": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "properties": {
+            "maxCalls": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxInFlight": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWallClockMs": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProgramSpec": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
+          "properties": {
+            "inputSchema": {
+              "description": "JSON Schema that run input must satisfy."
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramLimitsInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputSchema": {
+              "description": "JSON Schema that run output must satisfy."
+            },
+            "semanticsVersion": {
+              "default": 1,
+              "description": "The guest API version the program was written against.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/definitions/ProgramSource"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
         },
         "SessionConfig": {
           "additionalProperties": {
@@ -5936,6 +6174,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "profileId": {
               "$ref": "#/definitions/ProfileId"
             },
+            "program": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Makes sessions created from this profile program sessions: their\nruns execute this program instead of a model, with `config` carrying\nthe grants the program may use. The program is resolved and pinned\nwhen the session is created; a later revision never changes a\nrunning session. Applying the profile to an existing session does\nnot change its program."
+            },
             "retention": {
               "anyOf": [
                 {
@@ -6561,6 +6810,114 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "required": [
             "deleteAfterCloseMs"
+          ],
+          "type": "object"
+        },
+        "ProgramLimitsInput": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "properties": {
+            "maxCalls": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxInFlight": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWallClockMs": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProgramSpec": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
+          "properties": {
+            "inputSchema": {
+              "description": "JSON Schema that run input must satisfy."
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramLimitsInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputSchema": {
+              "description": "JSON Schema that run output must satisfy."
+            },
+            "semanticsVersion": {
+              "default": 1,
+              "description": "The guest API version the program was written against.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/definitions/ProgramSource"
+            }
+          },
+          "required": [
+            "source"
           ],
           "type": "object"
         },
@@ -7069,6 +7426,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "profileId": {
               "$ref": "#/definitions/ProfileId"
             },
+            "program": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Makes sessions created from this profile program sessions: their\nruns execute this program instead of a model, with `config` carrying\nthe grants the program may use. The program is resolved and pinned\nwhen the session is created; a later revision never changes a\nrunning session. Applying the profile to an existing session does\nnot change its program."
+            },
             "retention": {
               "anyOf": [
                 {
@@ -7694,6 +8062,114 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "required": [
             "deleteAfterCloseMs"
+          ],
+          "type": "object"
+        },
+        "ProgramLimitsInput": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "properties": {
+            "maxCalls": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxInFlight": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWallClockMs": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProgramSpec": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
+          "properties": {
+            "inputSchema": {
+              "description": "JSON Schema that run input must satisfy."
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramLimitsInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputSchema": {
+              "description": "JSON Schema that run output must satisfy."
+            },
+            "semanticsVersion": {
+              "default": 1,
+              "description": "The guest API version the program was written against.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/definitions/ProgramSource"
+            }
+          },
+          "required": [
+            "source"
           ],
           "type": "object"
         },

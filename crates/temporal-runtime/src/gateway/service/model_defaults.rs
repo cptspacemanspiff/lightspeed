@@ -98,6 +98,7 @@ mod tests {
             search: None,
         });
         let profile = api::ProfileDocument {
+            program: None,
             config: Some(api::SessionConfig::default()),
             ..Default::default()
         };

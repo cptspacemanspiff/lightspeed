@@ -292,6 +292,7 @@ async fn create_bot_with_chat(
             display_name: None,
             description: None,
             document: ProfileDocument {
+                program: None,
                 instructions: Some(ProfileInstructions::Text {
                     text: "You are a chat bot in a live test.".to_owned(),
                 }),

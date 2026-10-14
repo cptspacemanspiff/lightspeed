@@ -28,6 +28,9 @@ pub struct AgentSessionArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_after_close_ms: Option<u64>,
     pub session_config: SessionConfig,
+    /// What drives the session's runs; fixed at creation.
+    #[serde(default, skip_serializing_if = "harness::SessionDriver::is_agent")]
+    pub driver: harness::SessionDriver,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<crate::SessionProfileIntent>,
     /// Present only for the trusted managed-session creation path. The

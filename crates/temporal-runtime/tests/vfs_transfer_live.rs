@@ -356,6 +356,7 @@ async fn run_case(
     let profile = api.create_profile(api::ProfileCreateParams { profile: api::AgentProfileInput {
         profile_id: api::ProfileId::new(format!("profile_{session}")), display_name: None, description: None,
         document: api::ProfileDocument {
+            program: None,
             config: Some(serde_json::from_value(json!({"model": api_projection::model_to_api(&model), "features": features}))?),
             ..Default::default()
         },
@@ -527,6 +528,7 @@ async fn run_content_case(
                 display_name: None,
                 description: None,
                 document: api::ProfileDocument {
+                    program: None,
                     config: Some(serde_json::from_value(json!({
                         "model": api_projection::model_to_api(&model),
                         "features": {"environments": {"environments": [{

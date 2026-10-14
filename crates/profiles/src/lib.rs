@@ -286,6 +286,7 @@ mod tests {
     fn document_validation_checks_environment_attachment_identity() {
         fn document(environments: Vec<EnvironmentAttachment>) -> ProfileDocument {
             ProfileDocument {
+                program: None,
                 config: Some(api::SessionConfig {
                     features: Some(api::FeaturesConfig {
                         environments: Some(api::EnvironmentsFeature {
@@ -333,12 +334,14 @@ mod tests {
     #[test]
     fn document_validation_applies_session_metadata_bounds() {
         let valid = ProfileDocument {
+            program: None,
             metadata: BTreeMap::from([("campaign".to_owned(), "release-42".to_owned())]),
             ..ProfileDocument::default()
         };
         assert!(validate_profile_document(&valid).is_ok());
 
         let reserved = ProfileDocument {
+            program: None,
             metadata: BTreeMap::from([("lightspeed.internal".to_owned(), "value".to_owned())]),
             ..ProfileDocument::default()
         };
@@ -352,6 +355,7 @@ mod tests {
     #[test]
     fn document_validation_checks_session_retention_default() {
         let valid = ProfileDocument {
+            program: None,
             retention: Some(api::ProfileSessionRetention {
                 delete_after_close_ms: 86_400_000,
             }),
@@ -360,6 +364,7 @@ mod tests {
         assert!(validate_profile_document(&valid).is_ok());
 
         let zero = ProfileDocument {
+            program: None,
             retention: Some(api::ProfileSessionRetention {
                 delete_after_close_ms: 0,
             }),
@@ -378,6 +383,7 @@ mod tests {
                 display_name: None,
                 description: None,
                 document: ProfileDocument {
+                    program: None,
                     instructions: Some(ProfileInstructions::Text {
                         text: " ".to_owned(),
                     }),
@@ -401,6 +407,7 @@ mod tests {
             description: Some("Old description".to_owned()),
             revision: 7,
             document: ProfileDocument {
+                program: None,
                 instructions: Some(ProfileInstructions::Text {
                     text: "Old instructions".to_owned(),
                 }),

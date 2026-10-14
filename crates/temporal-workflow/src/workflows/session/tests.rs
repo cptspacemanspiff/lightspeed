@@ -377,6 +377,7 @@ fn admission(command: CoreAgentCommand) -> AgentAdmission {
 fn agent_session_args_with_close_on_terminal(close_on_terminal: bool) -> AgentSessionArgs {
     AgentSessionArgs {
         setup: None,
+        driver: Default::default(),
         metadata: Default::default(),
         universe_id: test_universe(),
         session_id: SessionId::new("session_test"),
@@ -418,6 +419,7 @@ fn bootstrap_creation_identity_records_source_universe_and_is_immutable() {
         &CoreAgentState::new(),
         true,
         Some(&declaration),
+        &Default::default(),
     )
     .expect("fresh managed session with opaque controller id");
 
@@ -433,6 +435,7 @@ fn bootstrap_creation_identity_records_source_universe_and_is_immutable() {
         &existing,
         false,
         Some(&declaration),
+        &Default::default(),
     )
     .expect("matching restart");
     assert!(
@@ -441,6 +444,31 @@ fn bootstrap_creation_identity_records_source_universe_and_is_immutable() {
             &existing,
             false,
             Some(&managed_workflow_tools("another arbitrary controller id")),
+            &Default::default(),
+        )
+        .is_err()
+    );
+    // A restart cannot change what drives the session.
+    assert!(
+        bootstrap::validate_session_creation_identity(
+            test_universe(),
+            &existing,
+            false,
+            Some(&declaration),
+            &harness::SessionDriver::Program {
+                program: harness::PinnedProgram {
+                    program_id: None,
+                    revision: None,
+                    source_ref: harness::BlobRef::from_bytes(b"export default {}"),
+                    engine: harness::ProgramEngine {
+                        kind: harness::ProgramEngineKind::Js,
+                        semantics_version: 1,
+                    },
+                    input_schema: None,
+                    output_schema: None,
+                    limits: Default::default(),
+                },
+            },
         )
         .is_err()
     );
@@ -450,12 +478,19 @@ fn bootstrap_creation_identity_records_source_universe_and_is_immutable() {
             &existing,
             false,
             Some(&declaration),
+            &Default::default()
         )
         .is_err()
     );
     assert!(
-        bootstrap::validate_session_creation_identity(test_universe(), &existing, false, None)
-            .is_err()
+        bootstrap::validate_session_creation_identity(
+            test_universe(),
+            &existing,
+            false,
+            None,
+            &Default::default()
+        )
+        .is_err()
     );
 }
 

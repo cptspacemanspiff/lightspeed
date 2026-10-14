@@ -184,6 +184,7 @@ impl Fixture {
                     display_name: None,
                     description: None,
                     document: api::ProfileDocument {
+                        program: None,
                         config: Some(api::SessionConfig {
                             features: Some(features),
                             ..Default::default()
@@ -574,6 +575,7 @@ async fn jobs_and_subagents_case(fixture: Fixture) -> anyhow::Result<()> {
                 display_name: None,
                 description: None,
                 document: api::ProfileDocument {
+                    program: None,
                     config: Some(api::SessionConfig::default()),
                     ..Default::default()
                 },
