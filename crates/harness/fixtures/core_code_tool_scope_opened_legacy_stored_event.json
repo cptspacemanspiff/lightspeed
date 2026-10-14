@@ -1,0 +1,22 @@
+{
+  "kind": "lightspeed.core.code_tool.scope_opened",
+  "version": 1,
+  "payload": {
+    "code_tool": {
+      "scope_opened": {
+        "scope": {
+          "execution_id": "execution-1",
+          "parent_invocation_id": "wti:sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "bindings": {
+            "echo": {
+              "tool_id": "local_echo",
+              "tool_name": "local_echo"
+            }
+          },
+          "max_calls": 16,
+          "max_in_flight": 8
+        }
+      }
+    }
+  }
+}

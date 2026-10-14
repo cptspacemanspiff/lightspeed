@@ -43,7 +43,7 @@ impl RolloverBlockers {
             pending_promise_cancellations: state.pending_promise_cancellations.len(),
             workflow_start_backoffs: state.workflow_start_backoffs.len(),
             cancellation_watchdog: state.cancelling_watchdog.is_some(),
-            code_tool_execution: !code_tools::is_quiescent(state),
+            code_tool_execution: !scoped_calls::is_quiescent(state),
         }
     }
 
