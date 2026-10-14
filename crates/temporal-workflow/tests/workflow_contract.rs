@@ -75,6 +75,8 @@ fn vector_fixtures_validate_against_every_public_root() {
         ("CloseCodeToolScopeRequest", "closeRequest"),
         ("CodeToolScopeReportRequest", "reportRequest"),
         ("CodeToolScopeReport", "report"),
+        ("ScopeRecordedOutcomesRequest", "recordedOutcomesRequest"),
+        ("ScopeRecordedOutcomes", "recordedOutcomes"),
         ("CodeToolCallOutcome", "outcome"),
         ("CodeToolRejection", "rejection"),
     ] {

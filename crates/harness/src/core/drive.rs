@@ -10493,13 +10493,11 @@ mod tests {
     ) -> (ToolInvocationResult, crate::WorkflowToolInvocationId) {
         let call = &request.calls[0];
         let binding = &call.workflow_tool.as_ref().unwrap().binding;
-        let invocation_id = crate::WorkflowToolInvocationId::for_call(
+        let invocation_id = crate::WorkflowToolInvocationId::for_context(
             binding.session_universe_id,
             &request.session_id,
             request.run_id,
-            request.context.turn_id().unwrap(),
-            request.context.batch_id().unwrap(),
-            &call.call_id,
+            &request.context.call_context(&call.call_id),
             &binding.binding_fingerprint,
         );
         let invocation = WorkflowToolInvocation {
@@ -10511,11 +10509,7 @@ mod tests {
             session_universe_id: binding.session_universe_id,
             session_id: request.session_id.clone(),
             run_id: request.run_id,
-            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
-                turn_id: request.context.turn_id().unwrap(),
-                tool_batch_id: request.context.batch_id().unwrap(),
-                tool_call_id: call.call_id.clone(),
-            }),
+            context: request.context.call_context(&call.call_id),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(BTreeMap::from([(
@@ -12074,5 +12068,325 @@ mod tests {
             record.failure.as_ref().unwrap().kind,
             crate::RunFailureKind::Program
         );
+    }
+
+    fn agent_run_declaration() -> crate::WorkflowToolDeclaration {
+        crate::WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: crate::WorkflowToolId::new("agent_run"),
+                revision: 1,
+                semantic_type: "test.agent_run.v1".into(),
+                tool: test_tool_spec("agent_run"),
+            },
+            crate::WorkflowToolTarget::Bound {
+                receiver: WorkflowEndpointRef {
+                    workflow_id: "receiver-agent_run".into(),
+                    workflow_kind: "test.worker".into(),
+                },
+                dispatch: crate::BoundWorkflowToolDispatch::Push,
+            },
+            crate::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: 60_000,
+            },
+        )
+    }
+
+    fn program_scope(run_id: crate::RunId, execution_id: &str) -> crate::CodeToolScopeSpec {
+        crate::CodeToolScopeSpec {
+            execution_id: execution_id.to_owned(),
+            owner: crate::ScopeOwner::Run { run_id },
+            policy: crate::ScopePolicy::program(crate::ScopeLimits {
+                max_calls: 16,
+                max_in_flight: 8,
+            }),
+            bindings: ["agent_run", "local_echo"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        crate::CodeToolBinding {
+                            tool_id: test_tool_id(name),
+                            tool_name: ToolName::new(name),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn scoped_call_spec(
+        execution_id: &str,
+        request_id: &str,
+        tool: &str,
+    ) -> crate::CodeToolCallSpec {
+        crate::CodeToolCallSpec {
+            origin: crate::CodeToolOrigin {
+                execution_id: execution_id.to_owned(),
+                request_id: request_id.into(),
+            },
+            binding_id: tool.into(),
+            tool_id: test_tool_id(tool),
+            tool_name: ToolName::new(tool),
+            arguments_ref: BlobRef::from_bytes(b"{}"),
+        }
+    }
+
+    #[test]
+    fn program_run_scope_dispatches_scoped_calls_joins_a_child_and_drains_on_cancel() {
+        let session_id = SessionId::new("program-scope");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), agent_run_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "agent_run", "local_echo"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+
+        // The scope may not call the program's own execution, and its id
+        // must be the run's execution.
+        let mut recursive = program_scope(run_id, &execution_id);
+        recursive.bindings.insert(
+            "self".into(),
+            crate::CodeToolBinding {
+                tool_id: ToolName::new(crate::PROGRAM_EXECUTE_TOOL_NAME),
+                tool_name: ToolName::new(crate::PROGRAM_EXECUTE_TOOL_NAME),
+            },
+        );
+        assert!(
+            drive
+                .admit_command(CoreAgentCommand::OpenCodeToolScope { scope: recursive }, 40)
+                .is_err()
+        );
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::OpenCodeToolScope {
+                        scope: program_scope(run_id, "not-the-execution"),
+                    },
+                    40,
+                )
+                .is_err()
+        );
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope {
+                scope: program_scope(run_id, &execution_id),
+            },
+        ));
+        let scope_spec = drive.state().code_tools.scopes[&execution_id].spec.clone();
+        assert_eq!(
+            crate::scope_owner(drive.state(), &scope_spec).unwrap(),
+            crate::OwnerView {
+                run_id,
+                model_batch: None
+            }
+        );
+        assert!(crate::code_tool_scope_is_live(drive.state(), &scope_spec));
+
+        // A plain tool call dispatches in the scope's own context and joins
+        // the run alone.
+        let echo = scoped_call_spec(&execution_id, "1", "local_echo");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall { call: echo.clone() },
+        ));
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
+                .unwrap();
+        assert_eq!(
+            request.context,
+            crate::DispatchContext::Scope {
+                scope_id: execution_id.clone()
+            }
+        );
+        let completion = code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: echo.origin.clone(),
+                result: completed_tool_result(&request).results.remove(0),
+            },
+        );
+        assert_eq!(completion[0].joins.run_id, Some(run_id));
+        assert_eq!(completion[0].joins.turn_id, None);
+        log.extend(completion);
+
+        // A joined child call records a scoped-call invocation and waits on
+        // its reply promise like a code-mode child.
+        let child = scoped_call_spec(&execution_id, "2", "agent_run");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: child.clone(),
+            },
+        ));
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "2")
+                .unwrap();
+        let (result, invocation_id) = code_tool_workflow_effect(&request);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: child.origin.clone(),
+                result,
+            },
+        ));
+        let emitted = &drive.state().workflow_tools.emissions[&invocation_id];
+        assert_eq!(
+            emitted.context,
+            crate::CallContext::Scope {
+                tool_call_id: crate::code_tool_call_id(&child.origin)
+            }
+        );
+        let child_promise = PromiseId::from_number(request.promise_id_base);
+        assert!(matches!(
+            crate::code_tool_call(drive.state(), &child.origin)
+                .unwrap()
+                .status,
+            crate::CodeToolCallStatus::Waiting { .. }
+        ));
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id: child_promise,
+                    resolution: crate::PromiseResolution::Resolved {
+                        payload_ref: Some(BlobRef::from_bytes(b"child-output")),
+                    },
+                },
+                50,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let joined = crate::code_tool_joined_result(drive.state(), &child.origin, false).unwrap();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResumeCodeToolCall {
+                    origin: child.origin.clone(),
+                    result: joined,
+                    claim_observed_at_ms: 51,
+                },
+                51,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let scope = &drive.state().code_tools.scopes[&execution_id];
+        assert_eq!(scope.completed, vec!["1", "2"]);
+        assert_eq!(
+            scope
+                .recorded_outcomes(1, 10)
+                .iter()
+                .map(|call| call.spec.origin.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2"]
+        );
+
+        // Cancelling the run withdraws the execution; the scope stops being
+        // live, the session closes it, and the run ends after the drain.
+        let pending = scoped_call_spec(&execution_id, "3", "local_echo");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: pending.clone(),
+            },
+        ));
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::CancelRun {
+                    run_id,
+                    requested_by: None,
+                },
+                60,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive.next_action(61, 8).unwrap();
+        let entries = commit_action(&mut drive, action);
+        assert!(matches!(
+            entries[0].event,
+            CoreAgentEvent::Promise(PromiseEvent::Cancelled { .. })
+        ));
+        log.extend(entries);
+        assert!(!crate::code_tool_scope_is_live(drive.state(), &scope_spec));
+        assert!(matches!(
+            drive.next_action(62, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        assert_eq!(
+            drive.state().runs.active.as_ref().unwrap().status,
+            RunStatus::Cancelling
+        );
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CloseCodeToolScope {
+                execution_id: execution_id.clone(),
+                cancel: true,
+            },
+        ));
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: pending.origin.clone(),
+                result: ToolInvocationResult {
+                    call_id: crate::code_tool_call_id(&pending.origin),
+                    status: ToolCallStatus::Cancelled,
+                    output_ref: None,
+                    error_ref: None,
+                    model_visible_context_entries: Vec::new(),
+                    effects: Vec::new(),
+                    attachments: Vec::new(),
+                    duration_ms: None,
+                    output_bytes: None,
+                    truncated: false,
+                },
+            },
+        ));
+        let action = drive.next_action(63, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let record = drive.state().runs.completed.last().unwrap();
+        assert_eq!(
+            (record.run_id, record.status),
+            (run_id, RunStatus::Cancelled)
+        );
+        assert_eq!(
+            drive.state().code_tools.scopes[&execution_id].completed,
+            vec!["1", "2", "3"]
+        );
+        assert_replays_identically(&drive, &log);
     }
 }

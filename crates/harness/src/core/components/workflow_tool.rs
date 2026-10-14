@@ -1459,18 +1459,28 @@ pub fn workflow_tool_emit_effect(invocation: &WorkflowToolInvocation) -> ToolEff
         invocation.session_id.as_str().to_owned(),
     );
     data.insert(EFFECT_RUN_ID.to_owned(), invocation.run_id.to_string());
-    // Only a model-batch call emits through a tool result; a run-owned
-    // invocation is planned directly from state and never rides an effect.
-    if let Some(call) = invocation.model_batch() {
-        data.insert(EFFECT_TURN_ID.to_owned(), call.turn_id.to_string());
-        data.insert(
-            EFFECT_TOOL_BATCH_ID.to_owned(),
-            call.tool_batch_id.to_string(),
-        );
-        data.insert(
-            EFFECT_TOOL_CALL_ID.to_owned(),
-            call.tool_call_id.as_str().to_owned(),
-        );
+    // A tool result carries the call it was made from: a model-batch call
+    // or a scoped call. A run-owned invocation is planned directly from
+    // state and never rides an effect.
+    match &invocation.context {
+        CallContext::ModelBatch(call) => {
+            data.insert(EFFECT_TURN_ID.to_owned(), call.turn_id.to_string());
+            data.insert(
+                EFFECT_TOOL_BATCH_ID.to_owned(),
+                call.tool_batch_id.to_string(),
+            );
+            data.insert(
+                EFFECT_TOOL_CALL_ID.to_owned(),
+                call.tool_call_id.as_str().to_owned(),
+            );
+        }
+        CallContext::Scope { tool_call_id } => {
+            data.insert(
+                EFFECT_TOOL_CALL_ID.to_owned(),
+                tool_call_id.as_str().to_owned(),
+            );
+        }
+        CallContext::Run {} => {}
     }
     data.insert(
         EFFECT_ARGUMENTS_REF.to_owned(),
@@ -1631,14 +1641,21 @@ pub(crate) fn invocation_from_emit_effect(
         session_universe_id,
         session_id,
         run_id: RunId::new(parse_u64(EFFECT_RUN_ID, field(EFFECT_RUN_ID)?)?),
-        context: CallContext::ModelBatch(ModelBatchCall {
-            turn_id: TurnId::new(parse_u64(EFFECT_TURN_ID, field(EFFECT_TURN_ID)?)?),
-            tool_batch_id: ToolBatchId::new(parse_u64(
-                EFFECT_TOOL_BATCH_ID,
-                field(EFFECT_TOOL_BATCH_ID)?,
-            )?),
-            tool_call_id,
-        }),
+        // A scoped call carries no turn or batch.
+        context: if effect.data.contains_key(EFFECT_TURN_ID)
+            || effect.data.contains_key(EFFECT_TOOL_BATCH_ID)
+        {
+            CallContext::ModelBatch(ModelBatchCall {
+                turn_id: TurnId::new(parse_u64(EFFECT_TURN_ID, field(EFFECT_TURN_ID)?)?),
+                tool_batch_id: ToolBatchId::new(parse_u64(
+                    EFFECT_TOOL_BATCH_ID,
+                    field(EFFECT_TOOL_BATCH_ID)?,
+                )?),
+                tool_call_id,
+            })
+        } else {
+            CallContext::Scope { tool_call_id }
+        },
         arguments_ref,
         execution_context_ref,
         completion_promises,
@@ -1898,13 +1915,13 @@ fn validate_invocation_against_state(
         .bindings
         .get(&invocation.tool_id)
         .expect("binding was validated above");
-    let Some(model_call) = invocation.model_batch() else {
+    let Some(tool_call_id) = invocation.tool_call_id() else {
         return crate::core::components::program::validate_run_invocation(
             state, active_run, binding, invocation,
         );
     };
     if let Some((scope, call)) =
-        crate::core::components::code_tool::code_tool_call_for_id(state, &model_call.tool_call_id)
+        crate::core::components::code_tool::code_tool_call_for_id(state, tool_call_id)
     {
         validate_code_tool_invocation(state, scope, call, invocation)?;
         match (&binding.completion, &call.status) {
@@ -1914,7 +1931,7 @@ fn validate_invocation_against_state(
                     suspension: crate::ToolBatchSuspension::JoinedWorkflowCalls { calls, .. },
                 },
             ) if calls.iter().any(|joined| {
-                joined.call_id == model_call.tool_call_id
+                &joined.call_id == tool_call_id
                     && joined.invocation_id == invocation.invocation_id
                     && invocation
                         .completion_promises
@@ -1934,6 +1951,12 @@ fn validate_invocation_against_state(
             }
         }
     } else {
+        // Outside a scope, only a model batch can have made the call.
+        let Some(model_call) = invocation.model_batch() else {
+            return Err(DomainError::InvariantViolation(
+                "scoped-call invocation does not match an admitted scoped call".to_owned(),
+            ));
+        };
         let batch = active_run
             .tool_batches
             .get(&model_call.tool_batch_id)
@@ -2046,21 +2069,16 @@ fn validate_code_tool_invocation(
     call: &crate::CodeToolCall,
     invocation: &WorkflowToolInvocation,
 ) -> Result<(), DomainError> {
-    let parent = crate::code_tool_parent(state, &scope.spec)?;
+    let facts = crate::core::components::code_tool::owner_facts(state, &scope.spec)?;
     let binding = state
         .workflow_tools
         .bindings
         .get(&invocation.tool_id)
         .expect("binding was validated above");
-    let batch_of = |invocation: &WorkflowToolInvocation| {
-        invocation
-            .model_batch()
-            .map(|call| (call.turn_id, call.tool_batch_id))
-    };
-    if invocation.run_id != parent.run_id
-        || batch_of(invocation) != batch_of(parent)
-        || invocation.session_id != parent.session_id
-        || invocation.session_universe_id != parent.session_universe_id
+    if invocation.run_id != facts.run_id
+        || invocation.context != facts.dispatch.call_context(&call.call_id)
+        || &invocation.session_id != facts.session_id
+        || invocation.session_universe_id != facts.session_universe_id
         || call.spec.tool_id != binding.definition.tool.name
         || call.spec.arguments_ref != invocation.arguments_ref
     {

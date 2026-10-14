@@ -76,6 +76,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
   },
   "queries": {
     "codeToolScopeReport": "code_tool_scope_report",
+    "scopeRecordedOutcomes": "scope_recorded_outcomes",
     "workflowToolRecovery": "workflow_tool_recovery"
   },
   "roots": [
@@ -96,6 +97,8 @@ export const WORKFLOW_CONTRACT_MANIFEST =
     "CloseCodeToolScopeRequest",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
+    "ScopeRecordedOutcomesRequest",
+    "ScopeRecordedOutcomes",
     "CodeToolCallOutcome",
     "CodeToolRejection",
     "CodeExecutionDescriptor",
@@ -204,6 +207,28 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
         "request_id": "request:vector",
         "status": "succeeded"
+      },
+      "recordedOutcomes": {
+        "cancel_requested": false,
+        "closed": false,
+        "execution_id": "execution:vector",
+        "next": 1,
+        "outcomes": [
+          {
+            "call_id": "code-tool:vector",
+            "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
+            "request_id": "request:vector",
+            "status": "succeeded"
+          }
+        ],
+        "pending": [
+          "call-2"
+        ]
+      },
+      "recordedOutcomesRequest": {
+        "after": 0,
+        "execution_id": "execution:vector",
+        "limit": 64
       },
       "rejection": {
         "kind": "scope_closed",

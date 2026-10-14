@@ -20,14 +20,24 @@ pub const OPEN_CODE_TOOL_SCOPE_UPDATE: &str = "open_code_tool_scope";
 pub const INVOKE_CODE_TOOL_UPDATE: &str = "invoke_code_tool";
 pub const CLOSE_CODE_TOOL_SCOPE_UPDATE: &str = "close_code_tool_scope";
 pub const CODE_TOOL_SCOPE_REPORT_QUERY: &str = "code_tool_scope_report";
+pub const SCOPE_RECORDED_OUTCOMES_QUERY: &str = "scope_recorded_outcomes";
 
-/// Trusted host request to open a scope beneath an admitted joined invocation.
-/// The session resolves bindings itself; this allowlist can only narrow grants.
+/// Trusted host request to open a scope. A code execution opens it beneath
+/// its admitted, pending joined invocation; a program execution opens the
+/// scope its run owns. The session resolves bindings itself; the allowlist
+/// can only narrow grants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OpenCodeToolScopeRequest {
     pub execution_id: String,
-    pub parent_invocation_id: WorkflowToolInvocationId,
+    /// The parked joined invocation that owns a code execution's scope.
+    /// Exactly one of this and `run_id` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_invocation_id: Option<WorkflowToolInvocationId>,
+    /// The program run that owns a program execution's scope; the execution
+    /// id must be the run's program execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<harness::RunId>,
     /// A supplied set narrows logical tool identities; an empty set grants no
     /// tools. None selects all currently host-callable tools except the parent
     /// operation. Reopening an existing scope retains its original bindings.
@@ -66,6 +76,36 @@ pub struct CloseCodeToolScopeRequest {
 pub struct CodeToolScopeReportRequest {
     pub execution_id: String,
 }
+
+/// Read a scope's recorded outcomes in the order they were recorded, after
+/// the first `after` of them. A replaying executor feeds these to the guest
+/// as its journal, so every attempt sees completions in the same order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRecordedOutcomesRequest {
+    pub execution_id: String,
+    #[serde(default)]
+    pub after: u64,
+    #[schemars(range(min = 1))]
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScopeRecordedOutcomes {
+    pub execution_id: String,
+    pub closed: bool,
+    pub cancel_requested: bool,
+    /// Terminal outcomes in log order, starting after `after`.
+    pub outcomes: Vec<CodeToolCallOutcome>,
+    /// The cursor for the next page: `after` plus the outcomes returned.
+    pub next: u64,
+    /// Requests admitted but not yet terminal, so a replaying executor
+    /// knows what it is still waiting on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<String>,
+}
+
+pub const MAX_RECORDED_OUTCOMES_PER_PAGE: u32 = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeToolScopeReport {
@@ -203,6 +243,7 @@ impl std::error::Error for CodeToolRejection {}
 
 pub type CodeToolScopeResult = Result<CodeToolScopeReport, CodeToolRejection>;
 pub type CodeToolInvocationResult = Result<CodeToolCallOutcome, CodeToolRejection>;
+pub type ScopeRecordedOutcomesResult = Result<ScopeRecordedOutcomes, CodeToolRejection>;
 
 /// Temporal is the transport even when the runner and session share a process.
 /// Dropping one of these futures only drops the client waiter; explicit scope
@@ -259,6 +300,23 @@ impl CodeToolClient {
                 AgentSessionWorkflow::close_code_tool_scope,
                 request,
                 options,
+            )
+            .await
+    }
+
+    pub async fn recorded_outcomes(
+        &self,
+        request: ScopeRecordedOutcomesRequest,
+        rpc_options: RpcOptions,
+    ) -> Result<ScopeRecordedOutcomesResult, WorkflowQueryError> {
+        self.client
+            .get_workflow_handle::<AgentSessionWorkflow>(self.session_workflow_id.clone())
+            .query(
+                AgentSessionWorkflow::scope_recorded_outcomes,
+                request,
+                WorkflowQueryOptions::builder()
+                    .rpc_options(rpc_options)
+                    .build(),
             )
             .await
     }

@@ -785,8 +785,10 @@ export interface ModelConfig {
   providerId: string;
 }
 /**
- * Trusted host request to open a scope beneath an admitted joined invocation.
- * The session resolves bindings itself; this allowlist can only narrow grants.
+ * Trusted host request to open a scope. A code execution opens it beneath
+ * its admitted, pending joined invocation; a program execution opens the
+ * scope its run owns. The session resolves bindings itself; the allowlist
+ * can only narrow grants.
  *
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "OpenCodeToolScopeRequest".
@@ -801,7 +803,16 @@ export interface OpenCodeToolScopeRequest {
   execution_id: string;
   max_calls: number;
   max_in_flight: number;
-  parent_invocation_id: WorkflowToolInvocationId;
+  /**
+   * The parked joined invocation that owns a code execution's scope.
+   * Exactly one of this and `run_id` is set.
+   */
+  parent_invocation_id?: WorkflowToolInvocationId | null;
+  /**
+   * The program run that owns a program execution's scope; the execution
+   * id must be the run's program execution.
+   */
+  run_id?: number | null;
 }
 /**
  * `prepare_channel_media`: the connector downloads the provider file and
@@ -833,6 +844,41 @@ export interface PreparedMediaItem {
   kind: ChannelMediaKind;
   mime: string;
   name?: string | null;
+}
+/**
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "ScopeRecordedOutcomes".
+ */
+export interface ScopeRecordedOutcomes {
+  cancel_requested: boolean;
+  closed: boolean;
+  execution_id: string;
+  /**
+   * The cursor for the next page: `after` plus the outcomes returned.
+   */
+  next: number;
+  /**
+   * Terminal outcomes in log order, starting after `after`.
+   */
+  outcomes: CodeToolCallOutcome[];
+  /**
+   * Requests admitted but not yet terminal, so a replaying executor
+   * knows what it is still waiting on.
+   */
+  pending?: string[];
+}
+/**
+ * Read a scope's recorded outcomes in the order they were recorded, after
+ * the first `after` of them. A replaying executor feeds these to the guest
+ * as its journal, so every attempt sees completions in the same order.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "ScopeRecordedOutcomesRequest".
+ */
+export interface ScopeRecordedOutcomesRequest {
+  after?: number;
+  execution_id: string;
+  limit: number;
 }
 /**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema

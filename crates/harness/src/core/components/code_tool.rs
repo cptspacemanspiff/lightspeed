@@ -55,6 +55,13 @@ pub(crate) fn interrupt_code_tools_for_run(state: &mut CoreAgentState, run_id: c
             .expect("scope was collected above");
         scope.closed = true;
         scope.cancel_requested = true;
+        let interrupted = scope
+            .calls
+            .values()
+            .filter(|call| !call.status.is_terminal())
+            .map(|call| call.spec.origin.request_id.clone())
+            .collect::<Vec<_>>();
+        scope.completed.extend(interrupted);
         for call in scope
             .calls
             .values_mut()
@@ -96,6 +103,9 @@ pub enum ScopeOwner {
     ModelInvocation {
         parent_invocation_id: WorkflowToolInvocationId,
     },
+    /// A program run. The scope is live while the run is active and its
+    /// program execution is pending; its calls join the run alone.
+    Run { run_id: RunId },
 }
 
 /// How calls in a scope are admitted, completed and retained. Recorded at open
@@ -120,6 +130,15 @@ impl ScopePolicy {
             limits,
             retention: Retention::FullInState,
             approvals: ApprovalPolicy::Reject,
+        }
+    }
+
+    /// The policy a program run's scope runs under. Calls are acknowledged
+    /// on admission so an attempt can release the session while they run.
+    pub fn program(limits: ScopeLimits) -> Self {
+        Self {
+            completion: Completion::Ack,
+            ..Self::code_mode(limits)
         }
     }
 }
@@ -382,6 +401,22 @@ pub struct CodeToolScope {
     pub closed: bool,
     pub cancel_requested: bool,
     pub calls: BTreeMap<String, CodeToolCall>,
+    /// Request ids in the order their completions were recorded: the log
+    /// order a replaying executor is fed outcomes in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed: Vec<String>,
+}
+
+impl CodeToolScope {
+    /// Recorded outcomes after the first `after` completions, in log order.
+    pub fn recorded_outcomes(&self, after: usize, limit: usize) -> Vec<&CodeToolCall> {
+        self.completed
+            .iter()
+            .skip(after)
+            .take(limit)
+            .filter_map(|request_id| self.calls.get(request_id))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,36 +470,71 @@ pub fn scope_owner(
     state: &CoreAgentState,
     scope: &CodeToolScopeSpec,
 ) -> Result<OwnerView, DomainError> {
-    match &scope.owner {
+    let facts = owner_facts(state, scope)?;
+    Ok(OwnerView {
+        run_id: facts.run_id,
+        model_batch: facts
+            .dispatch
+            .model_batch()
+            .map(|(turn_id, tool_batch_id)| ModelBatch {
+                turn_id,
+                tool_batch_id,
+            }),
+    })
+}
+
+/// What the call machinery needs to know about a scope's owner, whichever
+/// kind it is.
+pub(crate) struct OwnerFacts<'a> {
+    pub run_id: RunId,
+    /// The session the calls are made as.
+    pub session_id: &'a SessionId,
+    pub session_universe_id: uuid::Uuid,
+    /// How the scope's calls are dispatched and what their invocations join.
+    pub dispatch: crate::DispatchContext,
+    /// The operation that owns the scope; a scope may never call it.
+    pub owner_tool: &'a ToolName,
+}
+
+pub(crate) fn owner_facts<'a>(
+    state: &'a CoreAgentState,
+    scope: &CodeToolScopeSpec,
+) -> Result<OwnerFacts<'a>, DomainError> {
+    let (invocation, dispatch) = match &scope.owner {
         ScopeOwner::ModelInvocation { .. } => {
             let parent = code_tool_parent(state, scope)?;
             let batch = parent_batch(parent)?;
-            Ok(OwnerView {
-                run_id: parent.run_id,
-                model_batch: Some(ModelBatch {
+            (
+                parent,
+                crate::DispatchContext::ModelBatch {
                     turn_id: batch.turn_id,
-                    tool_batch_id: batch.tool_batch_id,
-                }),
-            })
+                    batch_id: batch.tool_batch_id,
+                },
+            )
         }
-    }
-}
-
-/// The dispatch context of a scope's calls: the parent's model batch for a
-/// model-invocation scope.
-pub(crate) fn dispatch_context(
-    state: &CoreAgentState,
-    scope: &CodeToolScopeSpec,
-) -> Result<crate::DispatchContext, DomainError> {
-    match &scope.owner {
-        ScopeOwner::ModelInvocation { .. } => {
-            let batch = parent_batch(code_tool_parent(state, scope)?)?;
-            Ok(crate::DispatchContext::ModelBatch {
-                turn_id: batch.turn_id,
-                batch_id: batch.tool_batch_id,
-            })
-        }
-    }
+        ScopeOwner::Run { run_id } => (
+            super::program::program_run_invocation(state, *run_id)
+                .ok_or_else(|| invalid("run-owned scope has no program execution"))?,
+            crate::DispatchContext::Scope {
+                scope_id: scope.execution_id.clone(),
+            },
+        ),
+    };
+    let owner_tool = &state
+        .workflow_tools
+        .bindings
+        .get(&invocation.tool_id)
+        .ok_or_else(|| invalid("scope owner binding is missing"))?
+        .definition
+        .tool
+        .name;
+    Ok(OwnerFacts {
+        run_id: invocation.run_id,
+        session_id: &invocation.session_id,
+        session_universe_id: invocation.session_universe_id,
+        dispatch,
+        owner_tool,
+    })
 }
 
 /// The model-batch call of a scope's parent invocation. A model-invocation
@@ -485,7 +555,10 @@ pub fn code_tool_parent<'a>(
 ) -> Result<&'a WorkflowToolInvocation, DomainError> {
     let ScopeOwner::ModelInvocation {
         parent_invocation_id,
-    } = &scope.owner;
+    } = &scope.owner
+    else {
+        return Err(invalid("scope is not owned by a model invocation"));
+    };
     state
         .workflow_tools
         .emissions
@@ -535,7 +608,38 @@ fn validate_live_owner(
 ) -> Result<(), DomainError> {
     match &scope.owner {
         ScopeOwner::ModelInvocation { .. } => validate_live_parent(state, scope),
+        ScopeOwner::Run { run_id } => validate_live_run(state, scope, *run_id),
     }
+}
+
+/// A run-owned scope lives while its program run is active and its program
+/// execution is still pending. Cancelling the run ends liveness, which makes
+/// the session close the scope and drain its calls before the run ends.
+fn validate_live_run(
+    state: &CoreAgentState,
+    scope: &CodeToolScopeSpec,
+    run_id: RunId,
+) -> Result<(), DomainError> {
+    if !crate::is_program_session(state) {
+        return Err(invalid("run-owned scopes require a program session"));
+    }
+    let run = state
+        .runs
+        .active
+        .as_ref()
+        .filter(|run| run.run_id == run_id)
+        .ok_or_else(|| invalid("run-owned scope run is not active"))?;
+    if !matches!(run.status, RunStatus::Active | RunStatus::Parked) {
+        return Err(invalid("run-owned scope run is not accepting calls"));
+    }
+    let execution_id = super::program::program_run_execution_id(state, run_id)
+        .ok_or_else(|| invalid("run-owned scope has no pending program execution"))?;
+    if execution_id != scope.execution_id {
+        return Err(invalid(
+            "run-owned scope id does not match the run's program execution",
+        ));
+    }
+    Ok(())
 }
 
 /// A model-invocation scope lives while its parent joined call is pending in
@@ -593,19 +697,8 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
         ));
     }
     // A scope may not call the operation that owns it.
-    let owner_tool = match &scope.owner {
-        ScopeOwner::ModelInvocation { .. } => {
-            let parent = code_tool_parent(state, scope)?;
-            &state
-                .workflow_tools
-                .bindings
-                .get(&parent.tool_id)
-                .ok_or_else(|| invalid("code tool parent binding is missing"))?
-                .definition
-                .tool
-                .name
-        }
-    };
+    let facts = owner_facts(state, scope)?;
+    let owner_tool = facts.owner_tool;
     for (binding_id, binding) in &scope.bindings {
         validate_id("binding_id", binding_id)?;
         let tool_id = &binding.tool_id;
@@ -620,7 +713,7 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
             )));
         }
     }
-    let run_id = scope_owner(state, scope)?.run_id;
+    let run_id = facts.run_id;
     let count = state
         .code_tools
         .scopes
@@ -870,14 +963,14 @@ pub fn complete_code_tool_call_proposals(
     }
     validate_result(call, &result)?;
     let scope = &state.code_tools.scopes[&origin.execution_id];
-    let parent = code_tool_parent(state, &scope.spec)?;
+    let facts = owner_facts(state, &scope.spec)?;
     crate::core::drive::code_tool_result_proposals(
         state,
-        &parent.session_id,
+        facts.session_id,
         origin,
         ToolInvocationBatchResult {
-            run_id: parent.run_id,
-            context: dispatch_context(state, &scope.spec)?,
+            run_id: facts.run_id,
+            context: facts.dispatch,
             results: vec![result],
         },
     )
@@ -1198,17 +1291,17 @@ pub fn code_tool_request(
     }
     validate_live_owner(state, &scope.spec)?;
     validate_bindings_current(state, scope)?;
-    let parent = code_tool_parent(state, &scope.spec)?;
-    if &parent.session_id != session_id {
+    let facts = owner_facts(state, &scope.spec)?;
+    if facts.session_id != session_id {
         return Err(invalid(
-            "code tool request session does not match its parent",
+            "code tool request session does not match its owner",
         ));
     }
     let mut request = crate::core::drive::tool_invocation_request(
         state,
         session_id,
-        parent.run_id,
-        dispatch_context(state, &scope.spec)?,
+        facts.run_id,
+        facts.dispatch,
         call.promise_id_base,
         std::slice::from_ref(&crate::ObservedToolCall {
             call_id: call.call_id.clone(),
@@ -1269,6 +1362,7 @@ pub(crate) fn apply_code_tool_event(
                     closed: false,
                     cancel_requested: false,
                     calls: BTreeMap::new(),
+                    completed: Vec::new(),
                 },
             );
         }
@@ -1310,17 +1404,19 @@ pub(crate) fn apply_code_tool_event(
             if call.status.is_terminal() {
                 return Err(invalid("duplicate code tool completion event"));
             }
-            state
+            let scope = state
                 .code_tools
                 .scopes
                 .get_mut(&origin.execution_id)
-                .expect("validated scope")
+                .expect("validated scope");
+            scope
                 .calls
                 .get_mut(&origin.request_id)
                 .expect("validated call")
                 .status = CodeToolCallStatus::Completed {
                 result: result.clone(),
             };
+            scope.completed.push(origin.request_id.clone());
         }
         CodeToolEvent::CallDeferred { origin, suspension } => {
             let call = code_tool_call(state, origin)
@@ -1359,25 +1455,20 @@ pub(crate) fn apply_code_tool_event(
                         .promises
                         .get(&calls[0].promise_id)
                         .ok_or_else(|| invalid("code tool completion promise is missing"))?;
-                    let parent = code_tool_parent(
-                        state,
-                        &state.code_tools.scopes[&origin.execution_id].spec,
-                    )?;
-                    let batch = parent_batch(parent)?;
-                    let expected_invocation_id = WorkflowToolInvocationId::for_call(
+                    let facts =
+                        owner_facts(state, &state.code_tools.scopes[&origin.execution_id].spec)?;
+                    let expected_invocation_id = WorkflowToolInvocationId::for_context(
                         binding.session_universe_id,
-                        &parent.session_id,
-                        parent.run_id,
-                        batch.turn_id,
-                        batch.tool_batch_id,
-                        &call.call_id,
+                        facts.session_id,
+                        facts.run_id,
+                        &facts.dispatch.call_context(&call.call_id),
                         &binding.binding_fingerprint,
                     );
                     if calls[0].invocation_id != expected_invocation_id
                         || promise.ownership != PromiseOwnership::Runtime
                         || promise.scope
                             != (crate::PromiseScope::Run {
-                                run_id: parent.run_id,
+                                run_id: facts.run_id,
                             })
                         || promise.status != PromiseStatus::Pending
                         || promise.deadline_ms.is_none_or(|deadline| deadline == 0)

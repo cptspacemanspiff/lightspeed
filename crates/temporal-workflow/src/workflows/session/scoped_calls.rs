@@ -143,6 +143,43 @@ pub(super) async fn close(
     ctx.state(|state| report(state, &execution_id))
 }
 
+pub(super) fn recorded_outcomes(
+    state: &AgentSessionWorkflow,
+    request: &crate::ScopeRecordedOutcomesRequest,
+) -> crate::ScopeRecordedOutcomesResult {
+    let scope = state
+        .core_state
+        .code_tools
+        .scopes
+        .get(&request.execution_id)
+        .ok_or_else(|| rejected(Rejection::UnknownScope, "unknown code tool execution scope"))?;
+    if request.limit == 0 || request.limit > crate::MAX_RECORDED_OUTCOMES_PER_PAGE {
+        return Err(rejected(
+            Rejection::LimitExceeded,
+            "recorded outcome page size is outside its bounded range",
+        ));
+    }
+    let after = usize::try_from(request.after).unwrap_or(usize::MAX);
+    let outcomes = scope
+        .recorded_outcomes(after, request.limit as usize)
+        .into_iter()
+        .map(crate::CodeToolCallOutcome::from)
+        .collect::<Vec<_>>();
+    Ok(crate::ScopeRecordedOutcomes {
+        execution_id: request.execution_id.clone(),
+        closed: scope.closed,
+        cancel_requested: scope.cancel_requested,
+        next: request.after.saturating_add(outcomes.len() as u64),
+        outcomes,
+        pending: scope
+            .calls
+            .values()
+            .filter(|call| !call.status.is_terminal())
+            .map(|call| call.spec.origin.request_id.clone())
+            .collect(),
+    })
+}
+
 pub(super) fn report(
     state: &AgentSessionWorkflow,
     execution_id: &str,
@@ -369,9 +406,13 @@ async fn admit_open(
             .values()
             .map(|binding| binding.tool_id.clone())
             .collect::<BTreeSet<_>>();
+        let requested = match scope_owner_request(&request) {
+            Ok(owner) => owner,
+            Err(error) => return Ok(Err(error)),
+        };
         return Ok(
-            if existing.spec.owner == code_mode_owner(&request)
-                && existing.spec.policy == code_mode_policy(&request)
+            if existing.spec.owner == requested
+                && existing.spec.policy == scope_policy_request(&request, &requested)
                 && request
                     .allowed_tools
                     .as_ref()
@@ -401,11 +442,15 @@ async fn admit_open(
             "code tool scope exceeds limits",
         )));
     }
+    let owner = match scope_owner_request(&request) {
+        Ok(owner) => owner,
+        Err(error) => return Ok(Err(error)),
+    };
     let prepared = ctx.state(|state| {
         let run = state.core_state.runs.active.as_ref().ok_or_else(|| {
             rejected(
                 Rejection::Unavailable,
-                "code tool scope requires active parent",
+                "code tool scope requires an active run",
             )
         })?;
         let model = run
@@ -421,34 +466,65 @@ async fn admit_open(
                     .map(|config| config.model.clone())
             })
             .ok_or_else(|| rejected(Rejection::SessionNotReady, "session has no model"))?;
-        let parent = state
-            .core_state
-            .workflow_tools
-            .start_requests
-            .get(&request.parent_invocation_id)
-            .or_else(|| {
-                state
-                    .core_state
-                    .workflow_tools
-                    .emissions
-                    .get(&request.parent_invocation_id)
-            })
-            .and_then(|parent| {
-                state
-                    .core_state
-                    .workflow_tools
-                    .bindings
-                    .get(&parent.tool_id)
-            })
-            .ok_or_else(|| {
-                rejected(
-                    Rejection::PermissionDenied,
-                    "parent workflow tool is not admitted",
-                )
-            })?;
+        let owner_tool = match &owner {
+            harness::ScopeOwner::ModelInvocation {
+                parent_invocation_id,
+            } => state
+                .core_state
+                .workflow_tools
+                .start_requests
+                .get(parent_invocation_id)
+                .or_else(|| {
+                    state
+                        .core_state
+                        .workflow_tools
+                        .emissions
+                        .get(parent_invocation_id)
+                })
+                .and_then(|parent| {
+                    state
+                        .core_state
+                        .workflow_tools
+                        .bindings
+                        .get(&parent.tool_id)
+                })
+                .map(|parent| parent.definition.tool.name.clone())
+                .ok_or_else(|| {
+                    rejected(
+                        Rejection::PermissionDenied,
+                        "parent workflow tool is not admitted",
+                    )
+                })?,
+            harness::ScopeOwner::Run { run_id } => {
+                let program = state.core_state.lifecycle.driver.program().ok_or_else(|| {
+                    rejected(
+                        Rejection::PermissionDenied,
+                        "run-owned scopes require a program session",
+                    )
+                })?;
+                if run.run_id != *run_id
+                    || harness::program_run_execution_id(&state.core_state, *run_id).as_deref()
+                        != Some(request.execution_id.as_str())
+                {
+                    return Err(rejected(
+                        Rejection::Unavailable,
+                        "scope execution is not the run's pending program execution",
+                    ));
+                }
+                if request.max_calls > program.limits.max_calls
+                    || request.max_in_flight > program.limits.max_in_flight
+                {
+                    return Err(rejected(
+                        Rejection::LimitExceeded,
+                        "scope limits exceed the program's limits",
+                    ));
+                }
+                harness::ToolName::new(harness::PROGRAM_EXECUTE_TOOL_NAME)
+            }
+        };
         let tools = select_code_tools(
             &state.core_state.tooling.tools,
-            &parent.definition.tool.name,
+            &owner_tool,
             request.allowed_tools.as_ref(),
         )?;
         Ok::<_, CodeToolRejection>((
@@ -496,26 +572,44 @@ async fn admit_open(
     }
     let scope = harness::CodeToolScopeSpec {
         execution_id: request.execution_id.clone(),
-        owner: code_mode_owner(&request),
-        policy: code_mode_policy(&request),
+        policy: scope_policy_request(&request, &owner),
+        owner,
         bindings,
     };
     apply(ctx, CoreAgentCommand::OpenCodeToolScope { scope }).await
 }
 
-/// A code execution's scope is owned by its parked parent call and runs under
-/// the code-mode policy with the limits the execution host requested.
-fn code_mode_owner(request: &crate::OpenCodeToolScopeRequest) -> harness::ScopeOwner {
-    harness::ScopeOwner::ModelInvocation {
-        parent_invocation_id: request.parent_invocation_id.clone(),
+/// A code execution's scope is owned by its parked parent call; a program
+/// execution's scope by its run. Exactly one owner must be named.
+fn scope_owner_request(
+    request: &crate::OpenCodeToolScopeRequest,
+) -> Result<harness::ScopeOwner, CodeToolRejection> {
+    match (&request.parent_invocation_id, request.run_id) {
+        (Some(parent_invocation_id), None) => Ok(harness::ScopeOwner::ModelInvocation {
+            parent_invocation_id: parent_invocation_id.clone(),
+        }),
+        (None, Some(run_id)) => Ok(harness::ScopeOwner::Run { run_id }),
+        _ => Err(rejected(
+            Rejection::InvalidRequest,
+            "scope must name exactly one owner: a parent invocation or a run",
+        )),
     }
 }
 
-fn code_mode_policy(request: &crate::OpenCodeToolScopeRequest) -> harness::ScopePolicy {
-    harness::ScopePolicy::code_mode(harness::ScopeLimits {
+/// Code executions run under the code-mode policy and program executions
+/// under the program policy, each with the limits the host requested.
+fn scope_policy_request(
+    request: &crate::OpenCodeToolScopeRequest,
+    owner: &harness::ScopeOwner,
+) -> harness::ScopePolicy {
+    let limits = harness::ScopeLimits {
         max_calls: request.max_calls,
         max_in_flight: request.max_in_flight,
-    })
+    };
+    match owner {
+        harness::ScopeOwner::ModelInvocation { .. } => harness::ScopePolicy::code_mode(limits),
+        harness::ScopeOwner::Run { .. } => harness::ScopePolicy::program(limits),
+    }
 }
 
 fn select_code_tools(
@@ -1119,6 +1213,7 @@ mod tests {
                 closed: false,
                 cancel_requested: false,
                 calls,
+                completed: Vec::new(),
             },
         );
         state

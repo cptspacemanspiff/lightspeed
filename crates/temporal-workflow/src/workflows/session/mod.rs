@@ -384,6 +384,15 @@ impl AgentSessionWorkflow {
     ) -> crate::CodeToolScopeResult {
         scoped_calls::report(self, &request.execution_id)
     }
+
+    #[query(name = "scope_recorded_outcomes")]
+    pub fn scope_recorded_outcomes(
+        &self,
+        _ctx: &WorkflowContextView,
+        request: crate::ScopeRecordedOutcomesRequest,
+    ) -> crate::ScopeRecordedOutcomesResult {
+        scoped_calls::recorded_outcomes(self, &request)
+    }
 }
 
 fn continuation_args(

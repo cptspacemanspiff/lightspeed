@@ -43,7 +43,7 @@ pub const WORKFLOW_CONTRACT_VERSION: u32 = 2;
 pub const DELIVER_EMISSION_SIGNAL: &str = "deliver_emission";
 
 /// Root types of the schema bundle; everything else is reachable from them.
-pub const WORKFLOW_CONTRACT_ROOTS: [&str; 22] = [
+pub const WORKFLOW_CONTRACT_ROOTS: [&str; 24] = [
     "EmissionEnvelope",
     "WorkflowToolStartArgs",
     "WorkflowToolRecoveryResult",
@@ -61,6 +61,8 @@ pub const WORKFLOW_CONTRACT_ROOTS: [&str; 22] = [
     "CloseCodeToolScopeRequest",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
+    "ScopeRecordedOutcomesRequest",
+    "ScopeRecordedOutcomes",
     "CodeToolCallOutcome",
     "CodeToolRejection",
     "CodeExecutionDescriptor",
@@ -97,6 +99,8 @@ pub fn export() -> ExportedWorkflowContract {
     let _ = generator.subschema_for::<crate::CloseCodeToolScopeRequest>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReportRequest>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReport>();
+    let _ = generator.subschema_for::<crate::ScopeRecordedOutcomesRequest>();
+    let _ = generator.subschema_for::<crate::ScopeRecordedOutcomes>();
     let _ = generator.subschema_for::<crate::CodeToolCallOutcome>();
     let _ = generator.subschema_for::<crate::CodeToolRejection>();
     let _ = generator.subschema_for::<crate::CodeExecutionDescriptor>();
@@ -140,6 +144,7 @@ fn manifest() -> Value {
         "queries": {
             "workflowToolRecovery": WORKFLOW_TOOL_RECOVERY_QUERY,
             "codeToolScopeReport": crate::CODE_TOOL_SCOPE_REPORT_QUERY,
+            "scopeRecordedOutcomes": crate::SCOPE_RECORDED_OUTCOMES_QUERY,
         },
         "updates": {
             "openCodeToolScope": crate::OPEN_CODE_TOOL_SCOPE_UPDATE,
@@ -370,7 +375,8 @@ fn code_tool_vectors() -> Value {
     use crate::{
         CloseCodeToolScopeRequest, CodeToolCallOutcome, CodeToolCallStatus, CodeToolRejection,
         CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest,
-        InvokeCodeToolRequest, OpenCodeToolScopeRequest,
+        InvokeCodeToolRequest, OpenCodeToolScopeRequest, ScopeRecordedOutcomes,
+        ScopeRecordedOutcomesRequest,
     };
 
     let invocation = WorkflowToolInvocationId::new(format!("wti:sha256:{}", "a".repeat(64)));
@@ -389,7 +395,8 @@ fn code_tool_vectors() -> Value {
     json!({
         "openRequest": OpenCodeToolScopeRequest {
             execution_id: execution_id.clone(),
-            parent_invocation_id: invocation,
+            parent_invocation_id: Some(invocation),
+            run_id: None,
             allowed_tools: Some([harness::ToolName::new("vfs.read_file")].into()),
             max_calls: 8,
             max_in_flight: 2,
@@ -405,6 +412,19 @@ fn code_tool_vectors() -> Value {
             cancel_pending: true,
         },
         "reportRequest": CodeToolScopeReportRequest { execution_id: execution_id.clone() },
+        "recordedOutcomesRequest": ScopeRecordedOutcomesRequest {
+            execution_id: execution_id.clone(),
+            after: 0,
+            limit: 64,
+        },
+        "recordedOutcomes": ScopeRecordedOutcomes {
+            execution_id: execution_id.clone(),
+            closed: false,
+            cancel_requested: false,
+            outcomes: vec![outcome.clone()],
+            next: 1,
+            pending: vec!["call-2".to_owned()],
+        },
         "report": CodeToolScopeReport {
             execution_id,
             closed: true,
@@ -519,8 +539,11 @@ fingerprinted over their exact raw bytes; canonical fingerprints begin with
 ## Code tool invocation scopes
 
 A trusted execution host calls the session's `{open_scope}` Update with
-`OpenCodeToolScopeRequest`. The parent must be an admitted, pending joined
-workflow-tool invocation. The request's allowlist and budgets only narrow the
+`OpenCodeToolScopeRequest`, naming exactly one owner. A code execution names
+its parent, which must be an admitted, pending joined workflow-tool
+invocation. A program execution names the run it executes; the scope id must
+be that run's pending program execution and the budgets must fit the pinned
+program's limits. The request's allowlist and budgets only narrow the
 session's existing capabilities; the session resolves and pins callable bindings.
 
 `{invoke}` accepts `InvokeCodeToolRequest`: the execution and request ids, an
@@ -535,6 +558,9 @@ completed effects. Dropping an Update client wait does not cancel the operation.
 Read `{scope_report}` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
+Read `{recorded_outcomes}` with `ScopeRecordedOutcomesRequest` for terminal
+outcomes in the order they were recorded, from a cursor; a replaying program
+execution feeds them to its guest as the journal.
 
 Scope operations return `Result<CodeToolScopeReport, CodeToolRejection>`;
 invocation returns `Result<CodeToolCallOutcome, CodeToolRejection>`. Serde
@@ -556,6 +582,7 @@ are: {roots}.
         invoke = crate::INVOKE_CODE_TOOL_UPDATE,
         close_scope = crate::CLOSE_CODE_TOOL_SCOPE_UPDATE,
         scope_report = crate::CODE_TOOL_SCOPE_REPORT_QUERY,
+        recorded_outcomes = crate::SCOPE_RECORDED_OUTCOMES_QUERY,
         definition_count = definitions.len(),
         roots = WORKFLOW_CONTRACT_ROOTS.join(", "),
     )
