@@ -13494,6 +13494,11 @@
             "const": "request_rejected",
             "description": "The provider rejected the request as invalid or larger than the model\naccepts. `message` is the provider's own text, unchanged; resending the\nsame context fails the same way.",
             "type": "string"
+          },
+          {
+            "const": "program",
+            "description": "The program execution failed; `message` is the program failure report.",
+            "type": "string"
           }
         ]
       },
@@ -14464,13 +14469,19 @@
                 "type": "string"
               },
               "batchId": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "bindingFingerprint": {
                 "type": "string"
               },
               "callId": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "completionPromises": {
                 "additionalProperties": {
@@ -14500,7 +14511,11 @@
                 "type": "string"
               },
               "turnId": {
-                "type": "string"
+                "description": "The model-batch call the invocation was made from; absent for a\nrun-owned invocation such as a program execution.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "type": {
                 "const": "workflowToolEmitted",
@@ -14515,9 +14530,6 @@
               "schemaRevision",
               "bindingFingerprint",
               "runId",
-              "turnId",
-              "batchId",
-              "callId",
               "argumentsRef"
             ],
             "type": "object"
@@ -14549,13 +14561,19 @@
                 "type": "string"
               },
               "batchId": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "bindingFingerprint": {
                 "type": "string"
               },
               "callId": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "completionPromises": {
                 "additionalProperties": {
@@ -14586,7 +14604,11 @@
                 "type": "string"
               },
               "turnId": {
-                "type": "string"
+                "description": "The model-batch call the invocation was made from; absent for a\nrun-owned invocation such as a program execution.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "type": {
                 "const": "workflowToolStartRequested",
@@ -14601,9 +14623,6 @@
               "schemaRevision",
               "bindingFingerprint",
               "runId",
-              "turnId",
-              "batchId",
-              "callId",
               "argumentsRef",
               "executionId",
               "completionPromises"

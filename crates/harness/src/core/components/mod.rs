@@ -57,8 +57,9 @@ pub use lifecycle::{CoreAgentLifecycleEvent, CoreAgentStatus, LifecycleState};
 pub use llm::*;
 pub use log::*;
 pub use program::{
-    PinnedProgram, ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver,
-    is_program_session,
+    PROGRAM_EXECUTE_TOOL_NAME, PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE,
+    PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram, ProgramEngine, ProgramEngineKind,
+    ProgramLimits, SessionDriver, is_program_session, program_run_invocation,
 };
 pub use promise::AwaitOutcome;
 pub use promise::{
@@ -90,13 +91,14 @@ pub use turn::{
     TurnOutcome, TurnState, TurnStatus,
 };
 pub use workflow_tool::{
-    AdmittedManagedSessionWorkflowTools, BoundWorkflowToolDispatch, MAX_COMPLETION_PROMISES,
-    MAX_WORKFLOW_TOOL_EMISSIONS_PER_READ, MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
-    ManagedSessionWorkflowTools, REPLY_COMPLETION_KEY, ReadToolEmissionsError,
-    WORKFLOW_TOOL_EMIT_EFFECT_KIND, WORKFLOW_TOOL_EXECUTION_KIND, WorkflowEndpointRef,
-    WorkflowStartRef, WorkflowToolBinding, WorkflowToolCompletion, WorkflowToolCompletionKeySource,
-    WorkflowToolConfigEvent, WorkflowToolDeclaration, WorkflowToolDefinition, WorkflowToolEvent,
-    WorkflowToolInvocation, WorkflowToolState, WorkflowToolTarget, completion_promise_source,
-    read_tool_emissions, validate_completion_key, with_completion_deadline,
-    workflow_tool_emit_effect, workflow_tool_execution_id,
+    AdmittedManagedSessionWorkflowTools, BoundWorkflowToolDispatch, CallContext,
+    MAX_COMPLETION_PROMISES, MAX_WORKFLOW_TOOL_EMISSIONS_PER_READ,
+    MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN, ManagedSessionWorkflowTools, ModelBatchCall,
+    REPLY_COMPLETION_KEY, ReadToolEmissionsError, WORKFLOW_TOOL_EMIT_EFFECT_KIND,
+    WORKFLOW_TOOL_EXECUTION_KIND, WorkflowEndpointRef, WorkflowStartRef, WorkflowToolBinding,
+    WorkflowToolCompletion, WorkflowToolCompletionKeySource, WorkflowToolConfigEvent,
+    WorkflowToolDeclaration, WorkflowToolDefinition, WorkflowToolEvent, WorkflowToolInvocation,
+    WorkflowToolState, WorkflowToolTarget, completion_promise_source, read_tool_emissions,
+    validate_completion_key, with_completion_deadline, workflow_tool_emit_effect,
+    workflow_tool_execution_id,
 };

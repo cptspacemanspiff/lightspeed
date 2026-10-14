@@ -114,12 +114,17 @@ pub(super) async fn prepare_workflow_tool(
         EnvironmentId::try_new(execution_context.environment_id).map_err(activity_error)?;
     // The executor admitted this call against the session's attachment
     // grant; the context names the machine it admitted.
+    let Some(call) = start.invocation.model_batch() else {
+        return Err(activity_error(
+            "environment job invocations must come from a model-batch call",
+        ));
+    };
     let request_id = format!(
         "jobreq:{}:{}:{}:{}",
         start.invocation.run_id.as_u64(),
-        start.invocation.turn_id.as_u64(),
-        start.invocation.tool_batch_id.as_u64(),
-        start.invocation.tool_call_id.as_str()
+        call.turn_id.as_u64(),
+        call.tool_batch_id.as_u64(),
+        call.tool_call_id.as_str()
     );
     let mut jobs = match tool_kind {
         WorkflowJobToolKind::Submit => {

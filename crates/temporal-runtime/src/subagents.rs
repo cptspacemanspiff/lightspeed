@@ -995,9 +995,11 @@ mod tests {
                 session_universe_id: UNIVERSE,
                 session_id: parent_id,
                 run_id: RunId::new(3),
-                turn_id: TurnId::new(1),
-                tool_batch_id: ToolBatchId::new(1),
-                tool_call_id: ToolCallId::new("call_agent"),
+                context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                    turn_id: TurnId::new(1),
+                    tool_batch_id: ToolBatchId::new(1),
+                    tool_call_id: ToolCallId::new("call_agent"),
+                }),
                 arguments_ref,
                 execution_context_ref: Some(context_ref),
                 completion_promises: Some(BTreeMap::from([(

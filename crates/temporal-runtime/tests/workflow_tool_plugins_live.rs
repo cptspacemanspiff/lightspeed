@@ -1783,9 +1783,11 @@ async fn workflow_tool_reply_requires_exact_stored_producer() -> anyhow::Result<
             session_universe_id: universe_id,
             session_id: session_id.clone(),
             run_id: harness::RunId::new(1),
-            turn_id: harness::TurnId::new(1),
-            tool_batch_id: harness::ToolBatchId::new(1),
-            tool_call_id: harness::ToolCallId::new("synthetic-call"),
+            context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                turn_id: harness::TurnId::new(1),
+                tool_batch_id: harness::ToolBatchId::new(1),
+                tool_call_id: harness::ToolCallId::new("synthetic-call"),
+            }),
             arguments_ref: harness::BlobRef::from_bytes(b"{}"),
             execution_context_ref: None,
             completion_promises: None,
@@ -2469,7 +2471,7 @@ async fn workflow_tool_start_survives_continue_as_new() -> anyhow::Result<()> {
                     _ => None,
                 })
                 .ok_or_else(|| anyhow::anyhow!("continued Joined start event was not projected"))?;
-            assert_eq!(event_call_id, joined_call.call_id);
+            assert_eq!(event_call_id.as_deref(), Some(joined_call.call_id.as_str()));
             assert!(events.result.events.iter().any(|event| matches!(
                 &event.kind,
                 api::SessionEventKindView::PromiseResolved {

@@ -18,6 +18,7 @@ use crate::{
     SessionId, ToolBatchId, ToolBatchSuspension, ToolCallId, ToolCallStatus,
     ToolInvocationBatchRequest, ToolInvocationBatchResult, ToolInvocationResult, ToolName, TurnId,
     WakeReason, WorkflowToolCompletion, WorkflowToolInvocation, WorkflowToolInvocationId,
+    core::components::workflow_tool::ModelBatchCall,
 };
 
 pub const MAX_CODE_TOOL_SCOPES_PER_RUN: usize = 32;
@@ -437,15 +438,26 @@ pub fn scope_owner(
     match &scope.owner {
         ScopeOwner::ModelInvocation { .. } => {
             let parent = code_tool_parent(state, scope)?;
+            let batch = parent_batch(parent)?;
             Ok(OwnerView {
                 run_id: parent.run_id,
                 model_batch: Some(ModelBatch {
-                    turn_id: parent.turn_id,
-                    tool_batch_id: parent.tool_batch_id,
+                    turn_id: batch.turn_id,
+                    tool_batch_id: batch.tool_batch_id,
                 }),
             })
         }
     }
+}
+
+/// The model-batch call of a scope's parent invocation. A model-invocation
+/// scope is only ever opened beneath a model call.
+pub(crate) fn parent_batch(
+    parent: &WorkflowToolInvocation,
+) -> Result<&ModelBatchCall, DomainError> {
+    parent
+        .model_batch()
+        .ok_or_else(|| invalid("code tool parent is not a model-batch call"))
 }
 
 /// The parked workflow-tool call that owns a model-invocation scope. Use
@@ -531,10 +543,11 @@ fn validate_live_parent(
     let ToolBatchSuspension::JoinedWorkflowCalls { calls, .. } = &parked.suspension else {
         return Err(invalid("code tool parent must be a joined workflow call"));
     };
-    if parked.batch_id != parent.tool_batch_id
+    let batch = parent_batch(parent)?;
+    if parked.batch_id != batch.tool_batch_id
         || !calls.iter().any(|call| {
             call.invocation_id == parent.invocation_id
-                && call.call_id == parent.tool_call_id
+                && call.call_id == batch.tool_call_id
                 && state
                     .promises
                     .promises
@@ -795,7 +808,7 @@ pub fn complete_code_tool_call_proposals(
             })
         && let Some(invocation) =
             super::workflow_tool::invocation_from_emit_effect(&result.effects[0])?
-        && invocation.tool_call_id == call.call_id
+        && invocation.tool_call_id() == Some(&call.call_id)
         && state
             .workflow_tools
             .emissions
@@ -841,14 +854,15 @@ pub fn complete_code_tool_call_proposals(
     validate_result(call, &result)?;
     let scope = &state.code_tools.scopes[&origin.execution_id];
     let parent = code_tool_parent(state, &scope.spec)?;
+    let batch = parent_batch(parent)?;
     crate::core::drive::code_tool_result_proposals(
         state,
         &parent.session_id,
         origin,
         ToolInvocationBatchResult {
             run_id: parent.run_id,
-            turn_id: parent.turn_id,
-            batch_id: parent.tool_batch_id,
+            turn_id: batch.turn_id,
+            batch_id: batch.tool_batch_id,
             results: vec![result],
         },
     )
@@ -1175,12 +1189,13 @@ pub fn code_tool_request(
             "code tool request session does not match its parent",
         ));
     }
+    let batch = parent_batch(parent)?;
     let mut request = crate::core::drive::tool_invocation_request(
         state,
         session_id,
         parent.run_id,
-        parent.turn_id,
-        parent.tool_batch_id,
+        batch.turn_id,
+        batch.tool_batch_id,
         call.promise_id_base,
         std::slice::from_ref(&crate::ObservedToolCall {
             call_id: call.call_id.clone(),
@@ -1335,12 +1350,13 @@ pub(crate) fn apply_code_tool_event(
                         state,
                         &state.code_tools.scopes[&origin.execution_id].spec,
                     )?;
+                    let batch = parent_batch(parent)?;
                     let expected_invocation_id = WorkflowToolInvocationId::for_call(
                         binding.session_universe_id,
                         &parent.session_id,
                         parent.run_id,
-                        parent.turn_id,
-                        parent.tool_batch_id,
+                        batch.turn_id,
+                        batch.tool_batch_id,
                         &call.call_id,
                         &binding.binding_fingerprint,
                     );

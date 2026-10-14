@@ -402,6 +402,10 @@ pub enum RunFailureKind {
     LimitExceeded,
     Cancelled,
     Internal,
+    /// The program execution failed: the program threw, diverged from its
+    /// journal, exceeded a program limit, or produced invalid output. The
+    /// message is the program failure report.
+    Program,
 }
 
 pub type RunEvent = Event;
@@ -431,8 +435,11 @@ pub fn plan_next(state: &CoreAgentState) -> Result<Vec<CoreAgentEventProposal>, 
             // completed tool-call turn whose batch has not started yet is
             // left to the tooling planner first, so its calls get cancelled
             // results before the run ends.
+            // A program run's cancellation is drained by the program
+            // planner, which first withdraws the program execution.
             if active_run.status == RunStatus::Cancelling
                 && !has_unstarted_tool_call_turn(active_run)
+                && !crate::is_program_session(state)
             {
                 let joins = CoreAgentJoins {
                     run_id: Some(active_run.run_id),

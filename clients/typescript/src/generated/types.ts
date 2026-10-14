@@ -515,9 +515,9 @@ export type SessionEventKindView =
     }
   | {
       argumentsRef: string;
-      batchId: string;
+      batchId?: string | null;
       bindingFingerprint: string;
-      callId: string;
+      callId?: string | null;
       /**
        * Keyed completion promises created atomically with the
        * invocation; absent for notify-only (accepted) invocations.
@@ -530,7 +530,11 @@ export type SessionEventKindView =
       schemaRevision: number;
       semanticType: string;
       toolId: string;
-      turnId: string;
+      /**
+       * The model-batch call the invocation was made from; absent for a
+       * run-owned invocation such as a program execution.
+       */
+      turnId?: string | null;
       type: "workflowToolEmitted";
     }
   | {
@@ -540,9 +544,9 @@ export type SessionEventKindView =
     }
   | {
       argumentsRef: string;
-      batchId: string;
+      batchId?: string | null;
       bindingFingerprint: string;
-      callId: string;
+      callId?: string | null;
       /**
        * Keyed completion promises created atomically with the start
        * intent.
@@ -560,7 +564,11 @@ export type SessionEventKindView =
       schemaRevision: number;
       semanticType: string;
       toolId: string;
-      turnId: string;
+      /**
+       * The model-batch call the invocation was made from; absent for a
+       * run-owned invocation such as a program execution.
+       */
+      turnId?: string | null;
       type: "workflowToolStartRequested";
     }
   | {
@@ -865,7 +873,8 @@ export type RunFailureKindView =
       | "cancelled"
       | "internal"
     )
-  | "request_rejected";
+  | "request_rejected"
+  | "program";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ToolAttachmentKind".

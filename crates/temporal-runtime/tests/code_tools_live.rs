@@ -52,7 +52,7 @@ async fn code_tool_updates_execute_parallel_dependent_joined_and_submit_wait_cal
             // Both invocations must be admitted before either reply. This
             // fails if the session serially blocks admission on the first wait.
             let (job, agent) = tokio::try_join!(fixture.invocation(JOB), fixture.invocation(AGENT))?;
-            assert_ne!(job.tool_call_id, agent.tool_call_id);
+            assert_ne!(job.tool_call_id(), agent.tool_call_id());
             fixture.resolve_value(JOB, json!({"job":"done"})).await?;
             fixture.resolve_value(AGENT, json!({"agent":"done"})).await
         };

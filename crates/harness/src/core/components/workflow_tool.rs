@@ -32,6 +32,7 @@ const CREATION_FINGERPRINT_DOMAIN: &str = "lightspeed.managed-session.creation.v
 /// Greenfield identity change.
 const FINGERPRINT_ENCODING_VERSION: u32 = 4;
 const INVOCATION_ID_DOMAIN: &str = "lightspeed.workflow-tool.invocation.v1";
+const RUN_INVOCATION_ID_DOMAIN: &str = "lightspeed.workflow-tool.run-invocation.v1";
 const EXECUTION_ID_DOMAIN: &str = "lightspeed.workflow-tool.execution.v1";
 /// Diagnostic endpoint kind carried by promise sources whose producer is a
 /// system-derived started execution rather than an admitted bound receiver.
@@ -393,9 +394,11 @@ pub struct WorkflowToolInvocation {
     pub session_universe_id: Uuid,
     pub session_id: SessionId,
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub tool_batch_id: ToolBatchId,
-    pub tool_call_id: ToolCallId,
+    /// Where the invocation was made from. The model-batch fields stay at
+    /// the top level of the stored record, so earlier records decode as
+    /// model-batch calls.
+    #[serde(flatten)]
+    pub context: CallContext,
     pub arguments_ref: BlobRef,
     /// Opaque, runtime-supplied context for the receiving workflow. This is
     /// separate from model-authored arguments so runtime state can be pinned
@@ -406,6 +409,59 @@ pub struct WorkflowToolInvocation {
     /// reserved key `reply`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_promises: Option<BTreeMap<String, PromiseId>>,
+}
+
+impl WorkflowToolInvocation {
+    /// The model-batch call this invocation was made from, if any.
+    pub fn model_batch(&self) -> Option<&ModelBatchCall> {
+        self.context.model_batch()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&ToolCallId> {
+        self.model_batch().map(|call| &call.tool_call_id)
+    }
+}
+
+/// Where a workflow-tool invocation was made from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum CallContext {
+    /// A call the model made in a tool batch, or a code-tool call attributed
+    /// to the parked batch of its parent.
+    ModelBatch(ModelBatchCall),
+    /// The run's own invocation: a program run's execution. There is no
+    /// turn, batch or call, and the run id alone identifies it.
+    Run {},
+}
+
+impl CallContext {
+    pub fn model_batch(&self) -> Option<&ModelBatchCall> {
+        match self {
+            Self::ModelBatch(call) => Some(call),
+            Self::Run {} => None,
+        }
+    }
+
+    /// The joins an event about this invocation carries.
+    pub fn joins(&self, run_id: RunId) -> crate::CoreAgentJoins {
+        let call = self.model_batch();
+        crate::CoreAgentJoins {
+            run_id: Some(run_id),
+            turn_id: call.map(|call| call.turn_id),
+            tool_batch_id: call.map(|call| call.tool_batch_id),
+            tool_call_id: call.map(|call| call.tool_call_id.clone()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+pub struct ModelBatchCall {
+    pub turn_id: TurnId,
+    pub tool_batch_id: ToolBatchId,
+    pub tool_call_id: ToolCallId,
 }
 
 #[derive(Debug, Error)]
@@ -911,13 +967,11 @@ impl WorkflowToolEmissionReadProjection<'_> {
                         invocation_id: invocation.invocation_id.clone(),
                         message: error.to_string(),
                     })?;
-                let expected_id = WorkflowToolInvocationId::for_call(
+                let expected_id = WorkflowToolInvocationId::for_context(
                     invocation.session_universe_id,
                     &invocation.session_id,
                     invocation.run_id,
-                    invocation.turn_id,
-                    invocation.tool_batch_id,
-                    &invocation.tool_call_id,
+                    &invocation.context,
                     &invocation.binding_fingerprint,
                 );
                 if invocation.invocation_id != expected_id {
@@ -926,10 +980,11 @@ impl WorkflowToolEmissionReadProjection<'_> {
                         message: "invocation id is not canonical".to_owned(),
                     });
                 }
-                if entry.joins.run_id != Some(invocation.run_id)
-                    || entry.joins.turn_id != Some(invocation.turn_id)
-                    || entry.joins.tool_batch_id != Some(invocation.tool_batch_id)
-                    || entry.joins.tool_call_id.as_ref() != Some(&invocation.tool_call_id)
+                let expected_joins = invocation.context.joins(invocation.run_id);
+                if entry.joins.run_id != expected_joins.run_id
+                    || entry.joins.turn_id != expected_joins.turn_id
+                    || entry.joins.tool_batch_id != expected_joins.tool_batch_id
+                    || entry.joins.tool_call_id != expected_joins.tool_call_id
                 {
                     return Err(ReadToolEmissionsError::InvocationJoinMismatch {
                         invocation_id: invocation.invocation_id.clone(),
@@ -1392,15 +1447,19 @@ pub fn workflow_tool_emit_effect(invocation: &WorkflowToolInvocation) -> ToolEff
         invocation.session_id.as_str().to_owned(),
     );
     data.insert(EFFECT_RUN_ID.to_owned(), invocation.run_id.to_string());
-    data.insert(EFFECT_TURN_ID.to_owned(), invocation.turn_id.to_string());
-    data.insert(
-        EFFECT_TOOL_BATCH_ID.to_owned(),
-        invocation.tool_batch_id.to_string(),
-    );
-    data.insert(
-        EFFECT_TOOL_CALL_ID.to_owned(),
-        invocation.tool_call_id.as_str().to_owned(),
-    );
+    // Only a model-batch call emits through a tool result; a run-owned
+    // invocation is planned directly from state and never rides an effect.
+    if let Some(call) = invocation.model_batch() {
+        data.insert(EFFECT_TURN_ID.to_owned(), call.turn_id.to_string());
+        data.insert(
+            EFFECT_TOOL_BATCH_ID.to_owned(),
+            call.tool_batch_id.to_string(),
+        );
+        data.insert(
+            EFFECT_TOOL_CALL_ID.to_owned(),
+            call.tool_call_id.as_str().to_owned(),
+        );
+    }
     data.insert(
         EFFECT_ARGUMENTS_REF.to_owned(),
         invocation.arguments_ref.as_str().to_owned(),
@@ -1560,12 +1619,14 @@ pub(crate) fn invocation_from_emit_effect(
         session_universe_id,
         session_id,
         run_id: RunId::new(parse_u64(EFFECT_RUN_ID, field(EFFECT_RUN_ID)?)?),
-        turn_id: TurnId::new(parse_u64(EFFECT_TURN_ID, field(EFFECT_TURN_ID)?)?),
-        tool_batch_id: ToolBatchId::new(parse_u64(
-            EFFECT_TOOL_BATCH_ID,
-            field(EFFECT_TOOL_BATCH_ID)?,
-        )?),
-        tool_call_id,
+        context: CallContext::ModelBatch(ModelBatchCall {
+            turn_id: TurnId::new(parse_u64(EFFECT_TURN_ID, field(EFFECT_TURN_ID)?)?),
+            tool_batch_id: ToolBatchId::new(parse_u64(
+                EFFECT_TOOL_BATCH_ID,
+                field(EFFECT_TOOL_BATCH_ID)?,
+            )?),
+            tool_call_id,
+        }),
         arguments_ref,
         execution_context_ref,
         completion_promises,
@@ -1583,11 +1644,16 @@ pub(crate) fn validate_emit_effect(
     invocation: &WorkflowToolInvocation,
     pending_emissions_for_port: u32,
 ) -> Result<(), DomainError> {
+    let Some(call) = invocation.model_batch() else {
+        return Err(DomainError::InvariantViolation(
+            "workflow tool emit effect must come from a model-batch call".to_owned(),
+        ));
+    };
     if &invocation.session_id != expected_session_id
         || invocation.run_id != expected_run_id
-        || invocation.turn_id != expected_turn_id
-        || invocation.tool_batch_id != expected_batch_id
-        || &invocation.tool_call_id != expected_call_id
+        || call.turn_id != expected_turn_id
+        || call.tool_batch_id != expected_batch_id
+        || &call.tool_call_id != expected_call_id
     {
         return Err(DomainError::InvariantViolation(
             "workflow tool emit effect does not match its session/run/turn/batch/call joins"
@@ -1641,13 +1707,11 @@ pub(crate) fn validate_emit_effect(
             ));
         }
     }
-    let expected_id = WorkflowToolInvocationId::for_call(
+    let expected_id = WorkflowToolInvocationId::for_context(
         invocation.session_universe_id,
         &invocation.session_id,
         invocation.run_id,
-        invocation.turn_id,
-        invocation.tool_batch_id,
-        &invocation.tool_call_id,
+        &invocation.context,
         &invocation.binding_fingerprint,
     );
     if invocation.invocation_id != expected_id {
@@ -1799,13 +1863,11 @@ fn validate_invocation_against_state(
     invocation: &WorkflowToolInvocation,
 ) -> Result<(), DomainError> {
     validate_invocation_binding(state, invocation)?;
-    let expected_id = WorkflowToolInvocationId::for_call(
+    let expected_id = WorkflowToolInvocationId::for_context(
         invocation.session_universe_id,
         &invocation.session_id,
         invocation.run_id,
-        invocation.turn_id,
-        invocation.tool_batch_id,
-        &invocation.tool_call_id,
+        &invocation.context,
         &invocation.binding_fingerprint,
     );
     if invocation.invocation_id != expected_id {
@@ -1828,8 +1890,13 @@ fn validate_invocation_against_state(
         .bindings
         .get(&invocation.tool_id)
         .expect("binding was validated above");
+    let Some(model_call) = invocation.model_batch() else {
+        return crate::core::components::program::validate_run_invocation(
+            state, active_run, binding, invocation,
+        );
+    };
     if let Some((scope, call)) =
-        crate::core::components::code_tool::code_tool_call_for_id(state, &invocation.tool_call_id)
+        crate::core::components::code_tool::code_tool_call_for_id(state, &model_call.tool_call_id)
     {
         validate_code_tool_invocation(state, scope, call, invocation)?;
         match (&binding.completion, &call.status) {
@@ -1839,7 +1906,7 @@ fn validate_invocation_against_state(
                     suspension: crate::ToolBatchSuspension::JoinedWorkflowCalls { calls, .. },
                 },
             ) if calls.iter().any(|joined| {
-                joined.call_id == invocation.tool_call_id
+                joined.call_id == model_call.tool_call_id
                     && joined.invocation_id == invocation.invocation_id
                     && invocation
                         .completion_promises
@@ -1861,14 +1928,14 @@ fn validate_invocation_against_state(
     } else {
         let batch = active_run
             .tool_batches
-            .get(&invocation.tool_batch_id)
+            .get(&model_call.tool_batch_id)
             .ok_or_else(|| {
                 DomainError::InvariantViolation(format!(
                     "workflow tool invocation references missing tool batch {}",
-                    invocation.tool_batch_id
+                    model_call.tool_batch_id
                 ))
             })?;
-        if batch.turn_id != invocation.turn_id {
+        if batch.turn_id != model_call.turn_id {
             return Err(DomainError::InvariantViolation(
                 "workflow tool invocation does not match its tool batch turn".to_owned(),
             ));
@@ -1876,11 +1943,11 @@ fn validate_invocation_against_state(
         let call = batch
             .calls
             .iter()
-            .find(|call| call.call.call_id == invocation.tool_call_id)
+            .find(|call| call.call.call_id == model_call.tool_call_id)
             .ok_or_else(|| {
                 DomainError::InvariantViolation(format!(
                     "workflow tool invocation references missing tool call {}",
-                    invocation.tool_call_id
+                    model_call.tool_call_id
                 ))
             })?;
         if call.call.tool_id.as_ref() != Some(&binding.definition.tool.name)
@@ -1911,9 +1978,9 @@ fn validate_invocation_against_state(
                             .to_owned(),
                     ));
                 };
-                if parked.batch_id != invocation.tool_batch_id
+                if parked.batch_id != model_call.tool_batch_id
                     || !calls.iter().any(|joined| {
-                        joined.call_id == invocation.tool_call_id
+                        joined.call_id == model_call.tool_call_id
                             && joined.invocation_id == invocation.invocation_id
                             && invocation
                                 .completion_promises
@@ -1977,9 +2044,14 @@ fn validate_code_tool_invocation(
         .bindings
         .get(&invocation.tool_id)
         .expect("binding was validated above");
+    let batch_of = |invocation: &WorkflowToolInvocation| {
+        invocation
+            .model_batch()
+            .map(|call| (call.turn_id, call.tool_batch_id))
+    };
     if invocation.run_id != parent.run_id
-        || invocation.turn_id != parent.turn_id
-        || invocation.tool_batch_id != parent.tool_batch_id
+        || batch_of(invocation).is_none()
+        || batch_of(invocation) != batch_of(parent)
         || invocation.session_id != parent.session_id
         || invocation.session_universe_id != parent.session_universe_id
         || call.spec.tool_id != binding.definition.tool.name
@@ -2042,6 +2114,48 @@ impl WorkflowToolInvocationId {
             ],
         );
         Self::new(format!("wti:sha256:{}", hex::encode(digest)))
+    }
+
+    /// The identity of a run's own invocation: one per run and binding.
+    pub fn for_run(
+        session_universe_id: Uuid,
+        session_id: &SessionId,
+        run_id: RunId,
+        binding_fingerprint: &str,
+    ) -> Self {
+        let digest = digest_fields(
+            RUN_INVOCATION_ID_DOMAIN,
+            &[
+                session_universe_id.as_bytes(),
+                session_id.as_str().as_bytes(),
+                &run_id.as_u64().to_be_bytes(),
+                binding_fingerprint.as_bytes(),
+            ],
+        );
+        Self::new(format!("wti:sha256:{}", hex::encode(digest)))
+    }
+
+    pub fn for_context(
+        session_universe_id: Uuid,
+        session_id: &SessionId,
+        run_id: RunId,
+        context: &CallContext,
+        binding_fingerprint: &str,
+    ) -> Self {
+        match context {
+            CallContext::ModelBatch(call) => Self::for_call(
+                session_universe_id,
+                session_id,
+                run_id,
+                call.turn_id,
+                call.tool_batch_id,
+                &call.tool_call_id,
+                binding_fingerprint,
+            ),
+            CallContext::Run {} => {
+                Self::for_run(session_universe_id, session_id, run_id, binding_fingerprint)
+            }
+        }
     }
 }
 
@@ -2728,9 +2842,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: RunId::new(1),
-            turn_id: TurnId::new(1),
-            tool_batch_id: ToolBatchId::new(1),
-            tool_call_id: ToolCallId::new("call-1"),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: TurnId::new(1),
+                tool_batch_id: ToolBatchId::new(1),
+                tool_call_id: ToolCallId::new("call-1"),
+            }),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             execution_context_ref: None,
             completion_promises: None,
@@ -3039,9 +3155,11 @@ mod tests {
                 session_universe_id: universe_id,
                 session_id: session_id.clone(),
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
-                tool_call_id: call.call_id.clone(),
+                context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                    turn_id: request.turn_id,
+                    tool_batch_id: request.batch_id,
+                    tool_call_id: call.call_id.clone(),
+                }),
                 arguments_ref: call.arguments_ref.clone(),
                 execution_context_ref: None,
                 completion_promises: None,
@@ -3054,12 +3172,12 @@ mod tests {
                 duration_ms: None,
                 output_bytes: None,
                 truncated: false,
-                call_id: invocation.tool_call_id.clone(),
+                call_id: invocation.tool_call_id().unwrap().clone(),
                 status: ToolCallStatus::Succeeded,
                 output_ref: Some(BlobRef::from_bytes(b"accepted")),
                 model_visible_context_entries: vec![
                     ToolInvocationResult::tool_result_context_entry(
-                        &invocation.tool_call_id,
+                        invocation.tool_call_id().unwrap(),
                         ToolCallStatus::Succeeded,
                         BlobRef::from_bytes(b"accepted"),
                     ),
