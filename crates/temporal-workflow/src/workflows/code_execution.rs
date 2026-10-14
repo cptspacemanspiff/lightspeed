@@ -439,9 +439,11 @@ mod tests {
                 session_universe_id: universe_id,
                 session_id,
                 run_id: harness::RunId::new(1),
-                turn_id: harness::TurnId::new(1),
-                tool_batch_id: harness::ToolBatchId::new(1),
-                tool_call_id: harness::ToolCallId::new("call-code"),
+                context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
+                    turn_id: harness::TurnId::new(1),
+                    tool_batch_id: harness::ToolBatchId::new(1),
+                    tool_call_id: harness::ToolCallId::new("call-code"),
+                }),
                 arguments_ref: BlobRef::from_bytes(b"{}"),
                 execution_context_ref: Some(BlobRef::from_bytes(b"pinned-context")),
                 completion_promises: Some(

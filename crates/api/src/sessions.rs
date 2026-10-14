@@ -1438,9 +1438,14 @@ pub enum SessionEventKindView {
         schema_revision: u32,
         binding_fingerprint: String,
         run_id: RunId,
-        turn_id: String,
-        batch_id: String,
-        call_id: String,
+        /// The model-batch call the invocation was made from; absent for a
+        /// run-owned invocation such as a program execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         arguments_ref: String,
         /// Keyed completion promises created atomically with the
         /// invocation; absent for notify-only (accepted) invocations.
@@ -1461,9 +1466,14 @@ pub enum SessionEventKindView {
         schema_revision: u32,
         binding_fingerprint: String,
         run_id: RunId,
-        turn_id: String,
-        batch_id: String,
-        call_id: String,
+        /// The model-batch call the invocation was made from; absent for a
+        /// run-owned invocation such as a program execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         arguments_ref: String,
         /// System-derived deterministic execution id of the started plugin
         /// workflow.
@@ -1732,6 +1742,8 @@ pub enum RunFailureKindView {
     LimitExceeded,
     Cancelled,
     Internal,
+    /// The program execution failed; `message` is the program failure report.
+    Program,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -107,7 +107,7 @@ impl CoreAgentDrive {
         observed_at_ms: u64,
         max_steps: Option<usize>,
     ) -> Result<CoreAgentAction, CoreAgentDriveError> {
-        let proposals = crate::core::planning::plan_next(&self.state)?;
+        let proposals = crate::core::planning::plan_next(&self.session_id, &self.state)?;
         if !proposals.is_empty() {
             if !self.increment_steps(max_steps) {
                 return Ok(CoreAgentAction::StepLimitReached);
@@ -8163,9 +8163,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: call.call_id.clone(),
+            }),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: None,
@@ -8216,7 +8218,7 @@ mod tests {
         let call = batch
             .calls
             .iter()
-            .find(|state| state.call.call_id == invocation.tool_call_id)
+            .find(|state| Some(&state.call.call_id) == invocation.tool_call_id())
             .expect("workflow tool call");
         assert_eq!(call.status, ToolCallStatus::Succeeded);
         assert!(call.result.as_ref().is_some_and(|result| {
@@ -8296,9 +8298,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: call.call_id.clone(),
+            }),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(BTreeMap::from([(
@@ -8669,9 +8673,11 @@ mod tests {
                 session_universe_id: universe_id,
                 session_id: session_id.clone(),
                 run_id: request.run_id,
-                turn_id: request.turn_id,
-                tool_batch_id: request.batch_id,
-                tool_call_id: call.call_id.clone(),
+                context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                    turn_id: request.turn_id,
+                    tool_batch_id: request.batch_id,
+                    tool_call_id: call.call_id.clone(),
+                }),
                 arguments_ref: call.arguments_ref.clone(),
                 execution_context_ref: None,
                 completion_promises: Some(BTreeMap::from([(
@@ -8891,9 +8897,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: workflow_call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: workflow_call.call_id.clone(),
+            }),
             arguments_ref: workflow_call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(BTreeMap::from([(
@@ -9027,9 +9035,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: call.call_id.clone(),
+            }),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(std::collections::BTreeMap::from([(
@@ -9209,9 +9219,11 @@ mod tests {
             session_universe_id: universe_id,
             session_id,
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: call.call_id.clone(),
+            }),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(std::collections::BTreeMap::from([(
@@ -10469,9 +10481,11 @@ mod tests {
             session_universe_id: binding.session_universe_id,
             session_id: request.session_id.clone(),
             run_id: request.run_id,
-            turn_id: request.turn_id,
-            tool_batch_id: request.batch_id,
-            tool_call_id: call.call_id.clone(),
+            context: crate::CallContext::ModelBatch(crate::ModelBatchCall {
+                turn_id: request.turn_id,
+                tool_batch_id: request.batch_id,
+                tool_call_id: call.call_id.clone(),
+            }),
             arguments_ref: call.arguments_ref.clone(),
             execution_context_ref: None,
             completion_promises: Some(BTreeMap::from([(
@@ -11672,10 +11686,8 @@ mod tests {
         log.extend(commit_action(&mut drive, action));
         let action = drive.next_action(30, 8).unwrap();
         log.extend(commit_action(&mut drive, action));
-        assert!(matches!(
-            drive.next_action(31, 8).unwrap(),
-            CoreAgentAction::Idle
-        ));
+        // The session has no execution binding, so the planner would fail
+        // the run next (covered separately); nothing model-shaped is planned.
         let active = drive.state().runs.active.as_ref().expect("started run");
         assert_eq!(active.status, RunStatus::Active);
         assert!(matches!(active.source, crate::RunSource::Program { .. }));
@@ -11772,6 +11784,265 @@ mod tests {
                 config: drive.state().lifecycle.config.clone().unwrap(),
                 driver: crate::SessionDriver::Agent,
             })
+        );
+    }
+
+    fn program_execute_declaration() -> crate::WorkflowToolDeclaration {
+        crate::WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: crate::WorkflowToolId::new(crate::PROGRAM_EXECUTE_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: crate::PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool: test_tool_spec(crate::PROGRAM_EXECUTE_TOOL_NAME),
+            },
+            crate::WorkflowToolTarget::Start {
+                start: crate::WorkflowStartRef {
+                    recipe_format: 1,
+                    revision: 1,
+                    recipe_ref: BlobRef::from_bytes(b"program-recipe"),
+                    recipe_fingerprint: "test-program-recipe".into(),
+                },
+            },
+            crate::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: 60_000,
+            },
+        )
+    }
+
+    /// Opens a managed program session with the program-execute binding,
+    /// submits one program run and drives it until its execution has been
+    /// requested. Returns the log so far and the run's reply promise.
+    fn started_program_run(
+        drive: &mut CoreAgentDrive,
+    ) -> (Vec<CoreAgentEntry>, crate::RunId, PromiseId) {
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(drive, action);
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(drive, action));
+        let action = drive.next_action(30, 8).unwrap();
+        log.extend(commit_action(drive, action));
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        assert!(crate::program_run_invocation(drive.state(), run_id).is_none());
+        let action = drive.next_action(31, 8).unwrap();
+        let entries = commit_action(drive, action);
+        assert!(matches!(
+            entries[0].event,
+            CoreAgentEvent::Promise(PromiseEvent::Created { .. })
+        ));
+        assert!(matches!(
+            entries[1].event,
+            CoreAgentEvent::WorkflowTool(crate::WorkflowToolEvent::StartRequested { .. })
+        ));
+        assert_eq!(entries[1].joins.run_id, Some(run_id));
+        assert_eq!(entries[1].joins.turn_id, None);
+        let stored = CoreAgentCodec.encode_entry(&entries[1]).unwrap();
+        let invocation = &stored.event.payload["workflow_tool"]["start_requested"]["invocation"];
+        assert!(invocation.get("turn_id").is_none() && invocation.get("tool_call_id").is_none());
+        log.extend(entries);
+        let invocation = crate::program_run_invocation(drive.state(), run_id)
+            .expect("run owns its execution")
+            .clone();
+        let binding = &drive.state().workflow_tools.bindings
+            [&crate::WorkflowToolId::new(crate::PROGRAM_EXECUTE_WORKFLOW_TOOL_ID)];
+        assert_eq!(invocation.context, crate::CallContext::Run {});
+        assert_eq!(
+            invocation.invocation_id,
+            crate::WorkflowToolInvocationId::for_run(
+                uuid::Uuid::from_u128(7),
+                drive.session_id(),
+                run_id,
+                &binding.binding_fingerprint,
+            )
+        );
+        assert_eq!(
+            invocation.arguments_ref,
+            BlobRef::from_bytes(b"{\"claim\":1}")
+        );
+        let promise_id =
+            invocation.completion_promises.as_ref().unwrap()[crate::REPLY_COMPLETION_KEY].clone();
+        let promise = &drive.state().promises.promises[&promise_id];
+        assert_eq!(promise.status, PromiseStatus::Pending);
+        assert_eq!(promise.ownership, PromiseOwnership::Runtime);
+        assert_eq!(promise.scope, crate::PromiseScope::Run { run_id });
+        assert!(matches!(
+            drive.next_action(32, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        (log, run_id, promise_id)
+    }
+
+    fn assert_replays_identically(drive: &CoreAgentDrive, log: &[CoreAgentEntry]) {
+        let mut replayed = CoreAgentState::new();
+        for entry in log {
+            let stored = CoreAgentCodec.encode_entry(entry).unwrap();
+            crate::apply_event(
+                &mut replayed,
+                &CoreAgentCodec.decode_entry(&stored).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(&replayed, drive.state());
+    }
+
+    #[test]
+    fn program_run_requests_its_execution_once_and_completes_on_the_reply() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-run"),
+            CoreAgentState::new(),
+            None,
+        );
+        let (mut log, run_id, promise_id) = started_program_run(&mut drive);
+        let payload = BlobRef::from_bytes(b"{\"ok\":true}");
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id,
+                    resolution: crate::PromiseResolution::Resolved {
+                        payload_ref: Some(payload.clone()),
+                    },
+                },
+                40,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive.next_action(41, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        assert!(drive.state().runs.active.is_none());
+        let record = drive.state().runs.completed.last().unwrap();
+        assert_eq!(record.run_id, run_id);
+        assert_eq!(record.status, RunStatus::Completed);
+        let output = record.output.as_ref().expect("program output");
+        assert_eq!(output.content_ref, payload);
+        assert_eq!(output.media_type.as_deref(), Some("application/json"));
+        assert!(matches!(
+            drive.next_action(42, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn program_run_cancellation_withdraws_the_execution_before_the_run_ends() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-cancel"),
+            CoreAgentState::new(),
+            None,
+        );
+        let (mut log, run_id, promise_id) = started_program_run(&mut drive);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::CancelRun {
+                    run_id,
+                    requested_by: None,
+                },
+                50,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        assert_eq!(
+            drive.state().runs.active.as_ref().unwrap().status,
+            RunStatus::Cancelling
+        );
+        let action = drive.next_action(51, 8).unwrap();
+        let entries = commit_action(&mut drive, action);
+        assert!(matches!(
+            &entries[0].event,
+            CoreAgentEvent::Promise(PromiseEvent::Cancelled { promise_id: cancelled }) if cancelled == &promise_id
+        ));
+        log.extend(entries);
+        assert_eq!(
+            drive.state().runs.active.as_ref().unwrap().status,
+            RunStatus::Cancelling,
+            "the run waits for its execution to be withdrawn"
+        );
+        let action = drive.next_action(52, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let record = drive.state().runs.completed.last().unwrap();
+        assert_eq!(
+            (record.run_id, record.status),
+            (run_id, RunStatus::Cancelled)
+        );
+        assert!(matches!(
+            drive.next_action(53, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn program_run_fails_on_a_failed_reply_or_a_missing_execution_binding() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-fail"),
+            CoreAgentState::new(),
+            None,
+        );
+        let (mut log, run_id, promise_id) = started_program_run(&mut drive);
+        let report = BlobRef::from_bytes(b"{\"error\":\"boom\"}");
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id,
+                    resolution: crate::PromiseResolution::Failed {
+                        error_ref: Some(report.clone()),
+                    },
+                },
+                40,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive.next_action(41, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let record = drive.state().runs.completed.last().unwrap();
+        assert_eq!((record.run_id, record.status), (run_id, RunStatus::Failed));
+        let failure = record.failure.as_ref().unwrap();
+        assert_eq!(failure.kind, crate::RunFailureKind::Program);
+        assert_eq!(failure.message_ref, Some(report));
+        assert_replays_identically(&drive, &log);
+
+        let mut unbound = CoreAgentDrive::from_replayed(
+            SessionId::new("program-unbound"),
+            CoreAgentState::new(),
+            None,
+        );
+        let action = unbound
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: program_driver(),
+                },
+                10,
+            )
+            .unwrap();
+        commit_action(&mut unbound, action);
+        let action = unbound
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        commit_action(&mut unbound, action);
+        let action = unbound.next_action(30, 8).unwrap();
+        commit_action(&mut unbound, action);
+        let action = unbound.next_action(31, 8).unwrap();
+        commit_action(&mut unbound, action);
+        let record = unbound.state().runs.completed.last().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(
+            record.failure.as_ref().unwrap().kind,
+            crate::RunFailureKind::Program
         );
     }
 }

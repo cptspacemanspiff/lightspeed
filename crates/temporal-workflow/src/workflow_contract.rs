@@ -235,9 +235,11 @@ fn vectors() -> Value {
         session_universe_id: universe,
         session_id: session.clone(),
         run_id,
-        turn_id: TurnId::new(8),
-        tool_batch_id: ToolBatchId::new(9),
-        tool_call_id: ToolCallId::new("call_1"),
+        context: harness::CallContext::ModelBatch(harness::ModelBatchCall {
+            turn_id: TurnId::new(8),
+            tool_batch_id: ToolBatchId::new(9),
+            tool_call_id: ToolCallId::new("call_1"),
+        }),
         arguments_ref: BlobRef::from_bytes(b"{}"),
         execution_context_ref: None,
         completion_promises: Some(BTreeMap::from([(

@@ -130,7 +130,7 @@ async fn javascript_loops_parallel_calls_and_durable_waits_use_session_tools() -
             // Serial execution of the guest or Update handlers would deadlock.
             let (job, agent) =
                 tokio::try_join!(fixture.invocation(JOB), fixture.invocation(AGENT))?;
-            assert_ne!(job.tool_call_id, agent.tool_call_id);
+            assert_ne!(job.tool_call_id(), agent.tool_call_id());
             fixture.resolve_value(JOB, json!({"job": "done"})).await?;
             fixture
                 .resolve_value(AGENT, json!({"agent": "done"}))

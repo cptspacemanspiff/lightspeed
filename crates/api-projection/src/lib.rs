@@ -760,9 +760,15 @@ impl<'a> CoreAgentProjector<'a> {
                         schema_revision: invocation.schema_revision,
                         binding_fingerprint: invocation.binding_fingerprint.clone(),
                         run_id: api_run_id(invocation.run_id),
-                        turn_id: api_turn_id(invocation.turn_id),
-                        batch_id: api_tool_batch_id(invocation.tool_batch_id),
-                        call_id: invocation.tool_call_id.as_str().to_owned(),
+                        turn_id: invocation
+                            .model_batch()
+                            .map(|call| api_turn_id(call.turn_id)),
+                        batch_id: invocation
+                            .model_batch()
+                            .map(|call| api_tool_batch_id(call.tool_batch_id)),
+                        call_id: invocation
+                            .tool_call_id()
+                            .map(|call_id| call_id.as_str().to_owned()),
                         arguments_ref: invocation.arguments_ref.as_str().to_owned(),
                         completion_promises: invocation.completion_promises.as_ref().map(
                             |promises| {
@@ -786,9 +792,15 @@ impl<'a> CoreAgentProjector<'a> {
                     schema_revision: invocation.schema_revision,
                     binding_fingerprint: invocation.binding_fingerprint.clone(),
                     run_id: api_run_id(invocation.run_id),
-                    turn_id: api_turn_id(invocation.turn_id),
-                    batch_id: api_tool_batch_id(invocation.tool_batch_id),
-                    call_id: invocation.tool_call_id.as_str().to_owned(),
+                    turn_id: invocation
+                        .model_batch()
+                        .map(|call| api_turn_id(call.turn_id)),
+                    batch_id: invocation
+                        .model_batch()
+                        .map(|call| api_tool_batch_id(call.tool_batch_id)),
+                    call_id: invocation
+                        .tool_call_id()
+                        .map(|call_id| call_id.as_str().to_owned()),
                     arguments_ref: invocation.arguments_ref.as_str().to_owned(),
                     execution_id: execution_id.clone(),
                     completion_promises: invocation
@@ -1601,6 +1613,7 @@ fn run_failure_kind_to_api(kind: RunFailureKind) -> RunFailureKindView {
         RunFailureKind::LimitExceeded => RunFailureKindView::LimitExceeded,
         RunFailureKind::Cancelled => RunFailureKindView::Cancelled,
         RunFailureKind::Internal => RunFailureKindView::Internal,
+        RunFailureKind::Program => RunFailureKindView::Program,
     }
 }
 
@@ -4421,9 +4434,9 @@ mod tests {
                 schema_revision: 1,
                 binding_fingerprint: "wtb:sha256:test".to_owned(),
                 run_id: api_run_id(RunId::new(2)),
-                turn_id: "turn_3".to_owned(),
-                batch_id: "tool_batch_4".to_owned(),
-                call_id: "call-5".to_owned(),
+                turn_id: Some("turn_3".to_owned()),
+                batch_id: Some("tool_batch_4".to_owned()),
+                call_id: Some("call-5".to_owned()),
                 arguments_ref: arguments_ref.as_str().to_owned(),
                 completion_promises: None,
             }

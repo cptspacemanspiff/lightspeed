@@ -257,6 +257,41 @@ export type RunStatus = "active" | "parked" | "cancelling" | "completed" | "fail
  */
 export type PromiseId = string;
 /**
+ * Bounded durable record of one successful workflow-tool tool call.
+ *
+ * The model arguments remain in CAS and are referenced by `arguments_ref`.
+ * Receiver-specific interpretation belongs to the receiving workflow.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "WorkflowToolInvocation".
+ */
+export type WorkflowToolInvocation = WorkflowToolInvocation1 & {
+  arguments_ref: string;
+  binding_fingerprint: string;
+  /**
+   * Keyed promise set created atomically with this invocation; `None`
+   * for notify (`Accepted`) completion. Request/reply is the single
+   * reserved key `reply`.
+   */
+  completion_promises?: {
+    [k: string]: PromiseId;
+  } | null;
+  /**
+   * Opaque, runtime-supplied context for the receiving workflow. This is
+   * separate from model-authored arguments so runtime state can be pinned
+   * without changing the tool's declared argument schema.
+   */
+  execution_context_ref?: string | null;
+  invocation_id: WorkflowToolInvocationId;
+  run_id: number;
+  schema_revision: number;
+  semantic_type: string;
+  session_id: SessionId;
+  session_universe_id: string;
+  tool_id: WorkflowToolId;
+};
+export type WorkflowToolInvocation1 = ModelBatchCall | {};
+/**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "WorkflowToolInvocationId".
  */
@@ -691,40 +726,12 @@ export interface ConversationStart {
   universeId: string;
 }
 /**
- * Bounded durable record of one successful workflow-tool tool call.
- *
- * The model arguments remain in CAS and are referenced by `arguments_ref`.
- * Receiver-specific interpretation belongs to the receiving workflow.
- *
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
- * via the `definition` "WorkflowToolInvocation".
+ * via the `definition` "ModelBatchCall".
  */
-export interface WorkflowToolInvocation {
-  arguments_ref: string;
-  binding_fingerprint: string;
-  /**
-   * Keyed promise set created atomically with this invocation; `None`
-   * for notify (`Accepted`) completion. Request/reply is the single
-   * reserved key `reply`.
-   */
-  completion_promises?: {
-    [k: string]: PromiseId;
-  } | null;
-  /**
-   * Opaque, runtime-supplied context for the receiving workflow. This is
-   * separate from model-authored arguments so runtime state can be pinned
-   * without changing the tool's declared argument schema.
-   */
-  execution_context_ref?: string | null;
-  invocation_id: WorkflowToolInvocationId;
-  run_id: number;
-  schema_revision: number;
-  semantic_type: string;
-  session_id: SessionId;
-  session_universe_id: string;
+export interface ModelBatchCall {
   tool_batch_id: number;
   tool_call_id: ToolCallId;
-  tool_id: WorkflowToolId;
   turn_id: number;
 }
 /**

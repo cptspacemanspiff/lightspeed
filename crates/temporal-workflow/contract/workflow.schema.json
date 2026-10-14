@@ -1236,6 +1236,29 @@
       ],
       "type": "string"
     },
+    "ModelBatchCall": {
+      "properties": {
+        "tool_batch_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_call_id": {
+          "$ref": "#/definitions/ToolCallId"
+        },
+        "turn_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_id",
+        "tool_batch_id",
+        "tool_call_id"
+      ],
+      "type": "object"
+    },
     "ModelConfig": {
       "properties": {
         "apiKind": {
@@ -1687,6 +1710,20 @@
       "type": "string"
     },
     "WorkflowToolInvocation": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelBatchCall"
+            }
+          ],
+          "description": "A call the model made in a tool batch, or a code-tool call attributed\nto the parked batch of its parent."
+        },
+        {
+          "description": "The run's own invocation: a program run's execution. There is no\nturn, batch or call, and the run id alone identifies it.",
+          "type": "object"
+        }
+      ],
       "description": "Bounded durable record of one successful workflow-tool tool call.\n\nThe model arguments remain in CAS and are referenced by `arguments_ref`.\nReceiver-specific interpretation belongs to the receiving workflow.",
       "properties": {
         "arguments_ref": {
@@ -1735,21 +1772,8 @@
           "format": "uuid",
           "type": "string"
         },
-        "tool_batch_id": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "tool_call_id": {
-          "$ref": "#/definitions/ToolCallId"
-        },
         "tool_id": {
           "$ref": "#/definitions/WorkflowToolId"
-        },
-        "turn_id": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
@@ -1761,9 +1785,6 @@
         "session_universe_id",
         "session_id",
         "run_id",
-        "turn_id",
-        "tool_batch_id",
-        "tool_call_id",
         "arguments_ref"
       ],
       "type": "object"
