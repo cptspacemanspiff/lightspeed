@@ -11932,6 +11932,10 @@ mod tests {
             None,
         );
         let (mut log, run_id, promise_id) = started_program_run(&mut drive);
+        assert!(
+            crate::program_run_is_waiting(drive.state()),
+            "an active run with a pending reply waits for the program"
+        );
         let payload = BlobRef::from_bytes(b"{\"ok\":true}");
         let action = drive
             .admit_command(
@@ -11948,6 +11952,7 @@ mod tests {
         let action = drive.next_action(41, 8).unwrap();
         log.extend(commit_action(&mut drive, action));
         assert!(drive.state().runs.active.is_none());
+        assert!(!crate::program_run_is_waiting(drive.state()));
         let record = drive.state().runs.completed.last().unwrap();
         assert_eq!(record.run_id, run_id);
         assert_eq!(record.status, RunStatus::Completed);
@@ -11982,6 +11987,10 @@ mod tests {
         assert_eq!(
             drive.state().runs.active.as_ref().unwrap().status,
             RunStatus::Cancelling
+        );
+        assert!(
+            !crate::program_run_is_waiting(drive.state()),
+            "a cancelling run still has its reply to withdraw"
         );
         let action = drive.next_action(51, 8).unwrap();
         let entries = commit_action(&mut drive, action);
@@ -12347,6 +12356,10 @@ mod tests {
             drive.next_action(62, 8).unwrap(),
             CoreAgentAction::Idle
         ));
+        assert!(
+            crate::program_run_is_waiting(drive.state()),
+            "a cancelling run waits for its scope to drain"
+        );
         assert_eq!(
             drive.state().runs.active.as_ref().unwrap().status,
             RunStatus::Cancelling
@@ -12376,6 +12389,10 @@ mod tests {
                 },
             },
         ));
+        assert!(
+            !crate::program_run_is_waiting(drive.state()),
+            "a drained cancelling run has its end to record"
+        );
         let action = drive.next_action(63, 8).unwrap();
         log.extend(commit_action(&mut drive, action));
         let record = drive.state().runs.completed.last().unwrap();

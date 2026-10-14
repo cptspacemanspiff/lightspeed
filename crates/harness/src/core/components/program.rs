@@ -189,6 +189,30 @@ pub fn program_run_execution_id(state: &CoreAgentState, run_id: RunId) -> Option
     ))
 }
 
+/// Whether the active run of a program session is waiting on something only
+/// the outside world can advance: an active run on its program's reply, or a
+/// cancelling run on its scope's calls draining. The planner has nothing to
+/// propose for such a run, so the session must not drive it again until an
+/// event arrives.
+pub fn program_run_is_waiting(state: &CoreAgentState) -> bool {
+    if !is_program_session(state) {
+        return false;
+    }
+    let Some(run) = state.runs.active.as_ref() else {
+        return false;
+    };
+    let reply_pending = program_run_invocation(state, run.run_id)
+        .and_then(|invocation| reply_promise(state, invocation))
+        .is_some_and(|promise| promise.status == PromiseStatus::Pending);
+    match run.status {
+        RunStatus::Active => reply_pending,
+        RunStatus::Cancelling => !reply_pending && run_scope_has_pending_calls(state, run.run_id),
+        RunStatus::Parked | RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled => {
+            false
+        }
+    }
+}
+
 /// Whether the run's scope still has calls that have not reached a terminal
 /// outcome.
 fn run_scope_has_pending_calls(state: &CoreAgentState, run_id: RunId) -> bool {
