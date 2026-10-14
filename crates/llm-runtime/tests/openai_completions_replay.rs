@@ -71,6 +71,7 @@ async fn harness_completion_history_reconstructs_one_message_and_preserves_reque
     let action = drive
         .admit_command(
             harness::CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: harness::SessionConfig {
                     model: ModelSelection {
                         api_kind: ProviderApiKind::OpenAiCompletions,

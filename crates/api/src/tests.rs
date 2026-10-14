@@ -3181,6 +3181,7 @@ fn test_session(id: SessionId, status: SessionStatus) -> SessionView {
     SessionView {
         access: test_access_summary(),
         activity: SessionActivity::Idle,
+        driver: Default::default(),
         metadata: Default::default(),
         id,
         display_name: Some("Test session".to_owned()),

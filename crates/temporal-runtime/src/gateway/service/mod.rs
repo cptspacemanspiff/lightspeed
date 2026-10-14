@@ -954,9 +954,23 @@ impl GatewayAgentApi {
         if let Some(model) = run_config.model_override.as_ref() {
             run_config.input_limit_tokens = self.model_discovery.input_limit(model).await;
         }
-        let RunStartSource::Input { items } = source;
-        let input = run_input_from_api(self.store.as_ref(), &items).await?;
-        let source = harness::RunRequestSource::Input { input };
+        let source = match source {
+            RunStartSource::Input { items } => harness::RunRequestSource::Input {
+                input: run_input_from_api(self.store.as_ref(), &items).await?,
+            },
+            RunStartSource::Program { input } => {
+                let bytes = serde_json::to_vec(&input).map_err(|error| {
+                    AgentApiError::invalid_request(format!("invalid program input: {error}"))
+                })?;
+                harness::RunRequestSource::Program {
+                    input_ref: self
+                        .store
+                        .put_bytes(bytes)
+                        .await
+                        .map_err(map_input_blob_store_error)?,
+                }
+            }
+        };
         if let Some(existing) = existing_run_submission(
             &loaded.state,
             &submission_id,

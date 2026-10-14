@@ -599,6 +599,7 @@ impl EvalRuntime {
         self.drive(
             session_id.clone(),
             CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: self.config.clone(),
             },
             10,

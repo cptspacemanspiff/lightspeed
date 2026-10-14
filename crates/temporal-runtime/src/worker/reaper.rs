@@ -1256,6 +1256,7 @@ mod tests {
         let opened = CoreAgentCodec
             .encode_event(&CoreAgentEvent::Lifecycle(
                 CoreAgentLifecycleEvent::Opened {
+                    driver: Default::default(),
                     config: default_session_config(test_model()),
                 },
             ))

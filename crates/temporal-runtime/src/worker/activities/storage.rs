@@ -976,6 +976,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: harness::CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: volume_session_config(),
                 },
                 max_steps: None,
@@ -1577,6 +1578,7 @@ mod tests {
             model: "test-model".into(),
         });
         let open = CoreAgentCommand::OpenSession {
+            driver: Default::default(),
             config: config.clone(),
         };
         config.features.environments = Some(EnvironmentsFeature {
@@ -1774,6 +1776,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenManagedSession {
+                    driver: Default::default(),
                     config: volume_session_config(),
                     session_universe_id: universe_id,
                     workflow_tools: declaration,

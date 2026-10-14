@@ -13391,6 +13391,22 @@
             "entries"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "inputRef": {
+              "type": "string"
+            },
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inputRef"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -13689,6 +13705,21 @@
             "items"
           ],
           "type": "object"
+        },
+        {
+          "description": "One invocation of a program session's program. The JSON input is\nvalidated against the pinned program's input schema at admission.",
+          "properties": {
+            "input": true,
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "input"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -13770,6 +13801,22 @@
           },
           "required": [
             "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inputRef": {
+              "type": "string"
+            },
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inputRef"
           ],
           "type": "object"
         }
@@ -13948,6 +13995,23 @@
           "required": [
             "type",
             "items"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A program run: its JSON input by content reference.",
+          "properties": {
+            "inputRef": {
+              "type": "string"
+            },
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inputRef"
           ],
           "type": "object"
         }
@@ -14187,6 +14251,55 @@
         "deletedSessionCount"
       ],
       "type": "object"
+    },
+    "SessionDriverView": {
+      "description": "What drives a session's runs: the model loop, or a program pinned at\ncreation.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "program",
+              "type": "string"
+            },
+            "programId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "semanticsVersion": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "semanticsVersion"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "SessionEnvironmentActivateParams": {
       "properties": {
@@ -16830,6 +16943,14 @@
             "string",
             "null"
           ]
+        },
+        "driver": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionDriverView"
+            }
+          ],
+          "description": "Fixed at creation. Absent means the model loop."
         },
         "id": {
           "type": "string"

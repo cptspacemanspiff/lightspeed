@@ -1348,6 +1348,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: standalone_compaction_config(),
                 },
                 max_steps: None,
@@ -1438,6 +1439,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: vfs_config_with_attachments(false, false, vec![attachment]),
                 },
                 max_steps: None,
@@ -1517,6 +1519,7 @@ mod tests {
                 session_id: source_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: session_config.clone(),
                 },
                 max_steps: None,
@@ -1686,6 +1689,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: {
                         let mut config = vfs_config_with_attachments(false, true, vec![attachment]);
                         config.features.vfs.as_mut().unwrap().skills = Some(Default::default());
@@ -1799,6 +1803,7 @@ mod tests {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
                 command: CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: vfs_config_with_attachments(true, false, vec![attachment]),
                 },
                 max_steps: None,
@@ -2075,7 +2080,10 @@ mod tests {
             .drive_command(DriveCommand {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
-                command: CoreAgentCommand::OpenSession { config: config() },
+                command: CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
                 max_steps: None,
             })
             .await
@@ -2187,7 +2195,10 @@ mod tests {
             .drive_command(DriveCommand {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
-                command: CoreAgentCommand::OpenSession { config: config() },
+                command: CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
                 max_steps: None,
             })
             .await
@@ -2415,7 +2426,10 @@ mod tests {
             .drive_command(DriveCommand {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
-                command: CoreAgentCommand::OpenSession { config: config() },
+                command: CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
                 max_steps: None,
             })
             .await
@@ -2455,7 +2469,10 @@ mod tests {
             .drive_command(DriveCommand {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
-                command: CoreAgentCommand::OpenSession { config: config() },
+                command: CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
                 max_steps: None,
             })
             .await
@@ -2512,7 +2529,10 @@ mod tests {
             .drive_command(DriveCommand {
                 session_id: session_id.clone(),
                 observed_at_ms: 10,
-                command: CoreAgentCommand::OpenSession { config: config() },
+                command: CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
                 max_steps: None,
             })
             .await

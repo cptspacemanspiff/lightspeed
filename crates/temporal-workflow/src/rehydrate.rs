@@ -114,7 +114,10 @@ mod tests {
             model: "test".to_owned(),
         });
         let events = [
-            CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config }),
+            CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened {
+                config,
+                driver: Default::default(),
+            }),
             CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Closed),
         ];
         let entries = events

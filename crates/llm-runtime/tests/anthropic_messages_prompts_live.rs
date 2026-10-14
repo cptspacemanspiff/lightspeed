@@ -211,6 +211,7 @@ async fn anthropic_messages_live_uses_vfs_prompt_instructions() {
             session_id: session_id.clone(),
             observed_at_ms: 10,
             command: CoreAgentCommand::OpenSession {
+                driver: Default::default(),
                 config: session_config(model, workspace_attachments),
             },
             max_steps: None,

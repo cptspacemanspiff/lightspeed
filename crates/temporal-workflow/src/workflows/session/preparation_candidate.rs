@@ -186,6 +186,7 @@ mod tests {
         candidate
             .push(
                 CoreAgentCommand::OpenSession {
+                    driver: Default::default(),
                     config: crate::default_session_config(harness::ModelSelection {
                         api_kind: harness::ProviderApiKind::OpenAiResponses,
                         provider_id: "openai".into(),

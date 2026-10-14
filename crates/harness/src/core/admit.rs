@@ -8,6 +8,7 @@ use crate::{
     RunSource, RunStatus, ToolConfigEvent, WorkflowToolConfigEvent,
     core::components::{
         config::{validate_config_update_for_state, validate_run_config_for_state},
+        program::require_agent_driver,
         tooling::validate_tool_map,
     },
 };
@@ -51,7 +52,7 @@ pub fn admit_command(
             cancel,
         } => crate::close_code_tool_scope_proposals(state, execution_id, cancel)
             .map_err(command_rejection_from_domain),
-        CoreAgentCommand::OpenSession { mut config } => {
+        CoreAgentCommand::OpenSession { mut config, driver } => {
             if state.lifecycle.status != CoreAgentStatus::New {
                 return reject(
                     CommandRejectionKind::CoreAgentState,
@@ -60,13 +61,15 @@ pub fn admit_command(
             }
             materialize_compaction_default(&mut config);
             config.validate().map_err(command_rejection_from_domain)?;
+            driver.validate().map_err(command_rejection_from_domain)?;
             Ok(vec![CoreAgentEventProposal::new(
                 CoreAgentJoins::default(),
-                CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config }),
+                CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config, driver }),
             )])
         }
         CoreAgentCommand::OpenManagedSession {
             mut config,
+            driver,
             session_universe_id,
             workflow_tools,
         } => {
@@ -78,13 +81,14 @@ pub fn admit_command(
             }
             materialize_compaction_default(&mut config);
             config.validate().map_err(command_rejection_from_domain)?;
+            driver.validate().map_err(command_rejection_from_domain)?;
             let admitted = workflow_tools
                 .admit(session_universe_id)
                 .map_err(command_rejection_from_domain)?;
             Ok(vec![
                 CoreAgentEventProposal::new(
                     CoreAgentJoins::default(),
-                    CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config }),
+                    CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config, driver }),
                 ),
                 CoreAgentEventProposal::new(
                     CoreAgentJoins::default(),
@@ -179,6 +183,10 @@ pub fn admit_command(
                 // Replacing with the identical document is an idempotent
                 // no-op; the revision stays untouched.
                 return Ok(Vec::new());
+            }
+            if config.model != current.model {
+                require_agent_driver(state, "model change")
+                    .map_err(command_rejection_from_domain)?;
             }
             validate_config_update_for_state(state, &config)
                 .map_err(command_rejection_from_domain)?;
@@ -287,16 +295,34 @@ pub fn admit_command(
                 ))
             })?;
             let next_run_id = crate::RunId::new(next_run_id);
-            let RunRequestSource::Input { input } = request.source;
-            if input.is_empty() {
-                return reject(
-                    CommandRejectionKind::InvariantViolation,
-                    "run input must contain at least one entry",
-                );
-            }
-            crate::core::components::context::validate_run_input_entries(&input)
-                .map_err(command_rejection_from_domain)?;
-            let source = RunSource::Input { input };
+            let source = match request.source {
+                RunRequestSource::Input { input } => {
+                    if crate::is_program_session(state) {
+                        return reject(
+                            CommandRejectionKind::UnsupportedForSessionDriver,
+                            "program sessions accept only program runs",
+                        );
+                    }
+                    if input.is_empty() {
+                        return reject(
+                            CommandRejectionKind::InvariantViolation,
+                            "run input must contain at least one entry",
+                        );
+                    }
+                    crate::core::components::context::validate_run_input_entries(&input)
+                        .map_err(command_rejection_from_domain)?;
+                    RunSource::Input { input }
+                }
+                RunRequestSource::Program { input_ref } => {
+                    if !crate::is_program_session(state) {
+                        return reject(
+                            CommandRejectionKind::UnsupportedForSessionDriver,
+                            "agent sessions accept only input runs",
+                        );
+                    }
+                    RunSource::Program { input_ref }
+                }
+            };
             let joins = CoreAgentJoins {
                 submission_id: request.submission_id.clone(),
                 run_id: Some(next_run_id),
@@ -321,6 +347,7 @@ pub fn admit_command(
             entry,
         } => {
             require_open(state)?;
+            require_agent_driver(state, "context edit").map_err(command_rejection_from_domain)?;
             require_no_pending_compaction(
                 state,
                 "context cannot be edited while context compaction is pending",
@@ -361,6 +388,7 @@ pub fn admit_command(
             entries,
         } => {
             require_open(state)?;
+            require_agent_driver(state, "context edit").map_err(command_rejection_from_domain)?;
             require_no_pending_compaction(
                 state,
                 "context cannot be edited while context compaction is pending",
@@ -400,6 +428,7 @@ pub fn admit_command(
             key,
         } => {
             require_open(state)?;
+            require_agent_driver(state, "context edit").map_err(command_rejection_from_domain)?;
             require_no_pending_compaction(
                 state,
                 "context cannot be edited while context compaction is pending",
@@ -422,6 +451,7 @@ pub fn admit_command(
             entries,
         } => {
             require_open(state)?;
+            require_agent_driver(state, "context edit").map_err(command_rejection_from_domain)?;
             require_no_pending_compaction(
                 state,
                 "context cannot be edited while context compaction is pending",
@@ -460,6 +490,8 @@ pub fn admit_command(
         }
         CoreAgentCommand::CompactContext => {
             require_open(state)?;
+            require_agent_driver(state, "context compaction")
+                .map_err(command_rejection_from_domain)?;
             crate::core::components::context::manual_compaction_requested_proposal(state)
                 .map(|proposal| vec![proposal])
                 .map_err(command_rejection_from_domain)
@@ -535,6 +567,7 @@ pub fn admit_command(
             requested_by,
         } => {
             require_open(state)?;
+            require_agent_driver(state, "run steering").map_err(command_rejection_from_domain)?;
             let active_run = active_run_for_command(state)?;
             if active_run.run_id != run_id {
                 return reject(
@@ -1076,6 +1109,9 @@ fn command_rejection_from_domain(error: DomainError) -> CommandError {
         DomainError::ProviderCompatibility(_) => CommandRejectionKind::ProviderCompatibility,
         DomainError::InvariantViolation(_) | DomainError::EventOrdering(_) => {
             CommandRejectionKind::InvariantViolation
+        }
+        DomainError::UnsupportedForSessionDriver(_) => {
+            CommandRejectionKind::UnsupportedForSessionDriver
         }
     };
     CommandError::Rejected(CommandRejection::new(kind, error.to_string()))

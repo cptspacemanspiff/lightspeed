@@ -408,7 +408,10 @@ mod tests {
                 session_id: session_id.clone(),
                 expected_head: None,
                 events: vec![stored_event(
-                    CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config }),
+                    CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened {
+                        config,
+                        driver: Default::default(),
+                    }),
                     2,
                 )],
             })

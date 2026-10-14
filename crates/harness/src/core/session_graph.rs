@@ -21,6 +21,12 @@ pub enum CoreAgentCloneError {
 
     #[error("lifecycle-managed sessions cannot be cloned")]
     LifecycleManagedSession,
+
+    /// A clone replays the source config into a fresh log; a program
+    /// session's run journal is not part of that config, so a clone could
+    /// not resume or replay its program.
+    #[error("program sessions cannot be cloned")]
+    ProgramSession,
 }
 
 /// Materializes the source state needed to open a config-only clone.
@@ -36,6 +42,9 @@ pub fn core_agent_clone_opening_events(
     if state.workflow_tools.lifecycle_controller.is_some() {
         return Err(CoreAgentCloneError::LifecycleManagedSession);
     }
+    if state.lifecycle.driver.is_program() {
+        return Err(CoreAgentCloneError::ProgramSession);
+    }
     let config = state
         .lifecycle
         .config
@@ -45,7 +54,10 @@ pub fn core_agent_clone_opening_events(
     let mut events = vec![codec.encode_uncommitted(&UncommittedCoreAgentEvent {
         observed_at_ms,
         joins: CoreAgentJoins::default(),
-        event: CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened { config }),
+        event: CoreAgentEvent::Lifecycle(CoreAgentLifecycleEvent::Opened {
+            config,
+            driver: crate::SessionDriver::Agent,
+        }),
     })?];
 
     let has_non_system_bindings = state

@@ -1589,7 +1589,10 @@ fn attachment_catalog_survives_selection_changes_and_replays() {
     append(
         &mut state,
         &mut log,
-        CoreAgentCommand::OpenSession { config },
+        CoreAgentCommand::OpenSession {
+            config,
+            driver: Default::default(),
+        },
     );
     append(
         &mut state,
@@ -1684,7 +1687,10 @@ fn environment_catalog_switch_removal_replays_without_mutating_vfs() {
     append(
         &mut state,
         &mut log,
-        CoreAgentCommand::OpenSession { config },
+        CoreAgentCommand::OpenSession {
+            config,
+            driver: Default::default(),
+        },
     );
     append(
         &mut state,
@@ -1850,7 +1856,10 @@ fn environment_prompt_switch_removal_replays_without_mutating_vfs() {
     append(
         &mut state,
         &mut log,
-        CoreAgentCommand::OpenSession { config },
+        CoreAgentCommand::OpenSession {
+            config,
+            driver: Default::default(),
+        },
     );
     append(
         &mut state,
@@ -2020,7 +2029,10 @@ fn vfs_skill_revocation_is_source_scoped_and_replays() {
     append(
         &mut state,
         &mut log,
-        CoreAgentCommand::OpenSession { config },
+        CoreAgentCommand::OpenSession {
+            config,
+            driver: Default::default(),
+        },
     );
     let key = ContextEntryKey::new("runtime.catalog.skills.vfs");
     let env_key = ContextEntryKey::new("runtime.catalog.skills.environment");

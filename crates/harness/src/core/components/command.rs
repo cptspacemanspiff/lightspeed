@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     ApprovalDecisionCommand, BlobRef, ContextEntryInput, ContextEntryKey, EnvironmentId,
     ManagedSessionWorkflowTools, PromiseId, PromiseResolution, ResumeToolBatchCommand, RunId,
-    RunRequestCommand, SessionConfig, ToolName, ToolPatch, ToolSpec, WorkflowToolDeclaration,
-    WorkflowToolInvocationId,
+    RunRequestCommand, SessionConfig, SessionDriver, ToolName, ToolPatch, ToolSpec,
+    WorkflowToolDeclaration, WorkflowToolInvocationId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,12 +15,16 @@ use crate::{
 pub enum CoreAgentCommand {
     OpenSession {
         config: SessionConfig,
+        #[serde(default)]
+        driver: SessionDriver,
     },
     /// Trusted managed-session creation path. The lifecycle controller and
     /// independently addressed workflow tools are admitted once, atomically
     /// with the lifecycle open event.
     OpenManagedSession {
         config: SessionConfig,
+        #[serde(default)]
+        driver: SessionDriver,
         session_universe_id: Uuid,
         workflow_tools: ManagedSessionWorkflowTools,
     },
