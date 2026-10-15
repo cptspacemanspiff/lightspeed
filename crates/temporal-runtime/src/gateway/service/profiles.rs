@@ -248,7 +248,7 @@ impl GatewayAgentApi {
         for requirement in &spec.requires {
             harness::validate_contract_name(&requirement.contract)
                 .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
-            if tools::program::contracts::definition(&requirement.contract).is_none() {
+            if !tools::program::contracts::is_known(&requirement.contract) {
                 return Err(AgentApiError::invalid_request(format!(
                     "program requires unknown tool contract {}",
                     requirement.contract
@@ -311,9 +311,14 @@ impl GatewayAgentApi {
         if spec.requires.is_empty() {
             return Ok(Vec::new());
         }
+        let with_mcp = spec.requires.iter().any(|requirement| {
+            requirement
+                .contract
+                .starts_with(&format!("{}.", tools::program::contracts::MCP_FAMILY))
+        });
         let available = self
             .preparation_service()
-            .program_contracts(session_config)
+            .program_contracts(session_config, with_mcp)
             .await?;
         tools::program::contracts::pin_requirements(
             &available,

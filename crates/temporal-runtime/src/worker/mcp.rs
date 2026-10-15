@@ -177,8 +177,26 @@ impl NativeMcpInventoryResolver {
         trusted_header: ConfiguratorTrustedHeaderPolicy,
         universe_id: uuid::Uuid,
     ) -> Self {
+        Self::with_discoverer(
+            Arc::new(HttpMcpToolDiscoverer::new()),
+            secrets,
+            private_networks,
+            trusted_header,
+            universe_id,
+        )
+    }
+
+    /// An inventory that lists tools through `discoverer`, as the gateway
+    /// does with its own (replaceable) discoverer.
+    pub(crate) fn with_discoverer(
+        discoverer: Arc<dyn McpToolDiscoverer>,
+        secrets: Arc<dyn SecretResolver>,
+        private_networks: McpPrivateNetworkPolicy,
+        trusted_header: ConfiguratorTrustedHeaderPolicy,
+        universe_id: uuid::Uuid,
+    ) -> Self {
         Self {
-            discoverer: Arc::new(HttpMcpToolDiscoverer::new()),
+            discoverer,
             secrets,
             private_networks,
             trusted_header,
@@ -282,7 +300,63 @@ impl NativeMcpInventoryResolver {
     }
 }
 
+/// The tools of a session's natively executed, injected MCP servers, named
+/// as a scope calls them, for binding program contracts. A server whose
+/// inventory cannot be listed is reported instead, by label and reason.
+pub(crate) async fn program_mcp_tools(
+    inventory: &dyn McpInventoryResolver,
+    tools: &[harness::ToolSpec],
+) -> (
+    Vec<tools::program::contracts::McpServerTools>,
+    Vec<(String, String)>,
+) {
+    let mut servers = Vec::new();
+    let mut failures = Vec::new();
+    let mut request_tool_count = 0;
+    for tool in tools {
+        let harness::ToolKind::RemoteMcp(spec) = &tool.kind else {
+            continue;
+        };
+        if spec.execution != harness::RemoteMcpExecution::Native
+            || spec.exposure != harness::RemoteMcpExposure::Inject
+        {
+            continue;
+        }
+        match llm_runtime::injected_native_tools(
+            inventory,
+            spec,
+            &tool.name,
+            &mut request_tool_count,
+        )
+        .await
+        {
+            Ok(native) => servers.push(tools::program::contracts::McpServerTools {
+                tool_id: tool.name.clone(),
+                server_label: spec.server_label.clone(),
+                tools: native
+                    .into_iter()
+                    .map(
+                        |(exposed_name, tool)| tools::program::contracts::McpToolShape {
+                            exposed_name,
+                            remote_name: tool.remote_name,
+                            input_schema: tool.input_schema,
+                            output_schema: tool.output_schema,
+                        },
+                    )
+                    .collect(),
+            }),
+            Err(error) => failures.push((spec.server_label.clone(), error.to_string())),
+        }
+    }
+    (servers, failures)
+}
+
 impl NativeMcpRuntime {
+    /// The inventory this runtime lists native tools through.
+    pub(crate) fn inventory(&self) -> &dyn McpInventoryResolver {
+        self.inventory.as_ref()
+    }
+
     /// Use the same injected inventory and naming rules as the model adapters
     /// when preparing an execution-scoped callable namespace.
     pub(crate) async fn injected_tools(

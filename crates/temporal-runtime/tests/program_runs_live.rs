@@ -241,11 +241,16 @@ async fn with_program_workers(
             let tools = Arc::new(SessionTools::from_pg_store(activity_store.clone()));
             Ok(WorkerActivities::for_universe(
                 activity_store.config().universe_id,
-                ActivityState::from_pg_store(activity_store, Arc::new(NoModel), tools.clone())
-                    .with_hosted_tools(tools)
-                    .with_workflow_tool_executions(client)
-                    .with_code_task_queue(activity_queue)
-                    .with_input_timeouts(input_timeouts),
+                ActivityState::from_pg_store(
+                    activity_store.clone(),
+                    Arc::new(NoModel),
+                    tools.clone(),
+                )
+                .with_hosted_tools(tools)
+                .with_workflow_tool_executions(client)
+                .with_code_task_queue(activity_queue)
+                .with_input_timeouts(input_timeouts)
+                .with_native_mcp_from_pg_store(activity_store)?,
             ))
         },
         move |client, queue, session_id| async move {
@@ -837,6 +842,293 @@ async fn an_opened_request_is_reminded_reassigned_answered_and_withdrawn() -> an
                 .await;
             api.delete_profile(api::ProfileDeleteParams { profile_id })
                 .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A Streamable HTTP MCP server on loopback whose `createIssue` input
+/// schema can change between listings, recording every call it serves.
+struct McpFixture {
+    state: Arc<tokio::sync::Mutex<McpFixtureState>>,
+    url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct McpFixtureState {
+    /// Paths whose `createIssue` takes a second required argument.
+    changed: std::collections::BTreeSet<String>,
+    calls: Vec<Value>,
+}
+
+impl McpFixture {
+    async fn start() -> anyhow::Result<Self> {
+        let state = Arc::new(tokio::sync::Mutex::new(McpFixtureState::default()));
+        let app = axum::Router::new()
+            .route("/{path}", axum::routing::post(mcp_fixture_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(Self { state, url, task })
+    }
+}
+
+impl Drop for McpFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn mcp_fixture_handler(
+    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<Arc<tokio::sync::Mutex<McpFixtureState>>>,
+    axum::Json(request): axum::Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let reply = |result: Value| {
+        axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+    };
+    match request.get("method").and_then(Value::as_str) {
+        Some("initialize") => {
+            let mut response = reply(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "program-mcp-fixture", "version": "1"}
+            }));
+            response.headers_mut().insert(
+                "mcp-session-id",
+                axum::http::HeaderValue::from_static("fixture-session"),
+            );
+            response
+        }
+        Some("notifications/initialized") => axum::http::StatusCode::ACCEPTED.into_response(),
+        Some("tools/list") => {
+            let mut required = vec!["title"];
+            if state.lock().await.changed.contains(&path) {
+                required.push("labels");
+            }
+            let schema = |required: &[&str]| {
+                json!({
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}, "labels": {"type": "array"}},
+                    "required": required,
+                })
+            };
+            reply(json!({"tools": [
+                {"name": "createIssue", "inputSchema": schema(&required)},
+                {"name": "get-file", "inputSchema": schema(&[])},
+                {"name": "get_file", "inputSchema": schema(&[])},
+            ]}))
+        }
+        Some("tools/call") => {
+            let params = request.get("params").cloned().unwrap_or(Value::Null);
+            let title = params
+                .pointer("/arguments/title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            state.lock().await.calls.push(json!({
+                "name": params.get("name"),
+                "arguments": params.get("arguments"),
+            }));
+            reply(json!({
+                "content": [{"type": "text", "text": format!("created {title}")}],
+                "structuredContent": {"number": 7, "title": title},
+            }))
+        }
+        _ => axum::http::StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+const MCP_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const created = await env.mcp[input.server].create_issue({ title: input.claim });
+            return {
+                claim: input.claim,
+                slept: 0,
+                created,
+                tools: Object.keys(env.mcp[input.server]),
+            };
+        }
+    };
+"#;
+
+/// A program profile requiring `contracts`, on a session with `server_id`
+/// attached.
+async fn mcp_program_profile(
+    api: &GatewayAgentApi,
+    fixture: &McpFixture,
+    server_id: &str,
+    contracts: &[&str],
+) -> anyhow::Result<api::ProfileId> {
+    api.put_mcp_server(api::McpServerPutParams {
+        server: api::McpServerInput {
+            server_id: server_id.to_owned(),
+            display_name: None,
+            server_url: format!("{}/{server_id}", fixture.url),
+            default_server_label: server_id.to_owned(),
+            description: None,
+            allowed_tools: None,
+            execution: api::RemoteMcpExecution::Native,
+            exposure: api::RemoteMcpExposure::Inject,
+            approval: api::RemoteMcpApprovalPolicy::Never,
+            defer_loading: None,
+            allow_private_network: true,
+            auth_policy: api::McpServerAuthPolicy::None,
+            credential: None,
+            status: api::McpServerStatus::Active,
+        },
+        expected_revision: None,
+    })
+    .await?;
+    let profile_id = api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+    let requires = contracts
+        .iter()
+        .map(|contract| (*contract, None))
+        .collect::<Vec<_>>();
+    let mut profile = program_profile(&profile_id, MCP_PROGRAM, &requires);
+    if let Some(program) = profile.document.program.as_mut() {
+        program.input_schema = Some(json!({
+            "type": "object",
+            "required": ["claim", "server"],
+            "properties": {"claim": {"type": "string"}, "server": {"type": "string"}},
+        }));
+    }
+    let features = profile
+        .document
+        .config
+        .as_mut()
+        .and_then(|config| config.features.as_mut())
+        .expect("program profile features");
+    features.mcp = Some(api::McpFeature {
+        version: api::CURRENT_FEATURE_VERSION,
+        servers: vec![api::McpServerAttachment {
+            server_id: server_id.to_owned(),
+            tools: None,
+        }],
+    });
+    api.create_profile(api::ProfileCreateParams { profile })
+        .await?;
+    Ok(profile_id)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn a_program_calls_an_mcp_tool_by_contract_and_fails_when_its_schema_changes()
+-> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let fixture = McpFixture::start().await?;
+            let stable = format!(
+                "prog_mcp_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let drifting = format!(
+                "prog_mcp_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let create = |server: &str| format!("mcp.{server}.create_issue");
+
+            // `get-file` and `get_file` both normalize to `get_file`, so
+            // neither has a contract and requiring one refuses the session.
+            let clashing = mcp_program_profile(
+                &api,
+                &fixture,
+                &stable,
+                &[&format!("mcp.{stable}.get_file")],
+            )
+            .await?;
+            let refused = start_program_session(
+                &api,
+                &SessionId::new(format!("{session_id}-clash")),
+                &clashing,
+            )
+            .await;
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("not granted to this session")),
+                "a clashing MCP tool must have no contract: {refused:?}"
+            );
+
+            // The camelCase tool is called by its snake-case contract and
+            // reaches the server under its own name.
+            let profile_id =
+                mcp_program_profile(&api, &fixture, &stable, &[&create(&stable)]).await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "first", "server": stable}),
+            )
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output = read_json(
+                &store,
+                &run.output.as_ref().expect("program output").content_ref,
+            )
+            .await?;
+            assert_eq!(output["tools"], json!(["create_issue"]), "{output}");
+            assert!(output["created"].to_string().contains("first"), "{output}");
+            assert_eq!(
+                fixture.state.lock().await.calls,
+                vec![json!({"name": "createIssue", "arguments": {"title": "first"}})]
+            );
+
+            // A session pinned before the upstream schema changed fails its
+            // next attempt instead of calling the reshaped tool.
+            let drifting_profile =
+                mcp_program_profile(&api, &fixture, &drifting, &[&create(&drifting)]).await?;
+            let drifting_session = SessionId::new(format!("{session_id}-drift"));
+            start_program_session(&api, &drifting_session, &drifting_profile).await?;
+            fixture.state.lock().await.changed.insert(drifting.clone());
+            let run = start_program_run(
+                &api,
+                &drifting_session,
+                json!({"claim": "second", "server": drifting}),
+            )
+            .await?;
+            let run = wait_for_terminal_run(&api, &drifting_session, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Failed, "{run:?}");
+            let failure = run_failure(&store, &drifting_session).await?;
+            assert_eq!(failure.kind, harness::RunFailureKind::Program);
+            let report = read_json(
+                &store,
+                failure
+                    .message_ref
+                    .as_ref()
+                    .expect("failure report")
+                    .as_str(),
+            )
+            .await?;
+            assert!(
+                report.to_string().contains(&format!(
+                    "tool contract mcp.{drifting}.create_issue changed"
+                )),
+                "the failure must name the changed contract: {report}"
+            );
+            assert_eq!(fixture.state.lock().await.calls.len(), 1);
+
+            for id in [&session_id, &drifting_session] {
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: id.to_string(),
+                        force: true,
+                    })
+                    .await;
+            }
+            for profile_id in [clashing, profile_id, drifting_profile] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
             Ok(())
         })
     })

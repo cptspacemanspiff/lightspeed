@@ -83,11 +83,128 @@ pub fn definition(name: &str) -> Option<&'static ContractDefinition> {
     CONTRACTS.iter().find(|definition| definition.name == name)
 }
 
+/// The family of contracts bound from the session's MCP servers.
+pub const MCP_FAMILY: &str = "mcp";
+
+/// Whether a contract can exist: a built-in one, or any well-formed name in
+/// the MCP family, whose members depend on the servers a session attaches.
+pub fn is_known(name: &str) -> bool {
+    definition(name).is_some() || is_mcp_contract(name)
+}
+
+fn is_mcp_contract(name: &str) -> bool {
+    let mut segments = name.split('.');
+    segments.next() == Some(MCP_FAMILY)
+        && segments.count() == 2
+        && harness::validate_contract_name(name).is_ok()
+}
+
+/// One tool of a natively executed MCP server, as the session's inventory
+/// lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpToolShape {
+    /// The scope-callable name, `<server tool id>__<remote name>`.
+    pub exposed_name: String,
+    pub remote_name: String,
+    pub input_schema: serde_json::Value,
+    /// The schema of the result's `structuredContent`, when the server
+    /// declares one.
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// An MCP server's tools, served by the session tool `tool_id`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpServerTools {
+    pub tool_id: ToolName,
+    pub server_label: String,
+    pub tools: Vec<McpToolShape>,
+}
+
+/// The contracts the session's MCP tools serve: `mcp.<server>.<tool>`, the
+/// server label lowercased and the tool name in snake case. A tool whose
+/// name has no valid contract form, or whose contract name another tool
+/// also takes, gets no contract; those are returned by name.
+pub fn bind_mcp(servers: &[McpServerTools]) -> (Vec<BoundContract>, Vec<String>) {
+    let mut claimed = BTreeMap::<String, Vec<(&McpServerTools, &McpToolShape)>>::new();
+    let mut unbindable = Vec::new();
+    for server in servers {
+        for tool in &server.tools {
+            match mcp_contract_name(&server.server_label, &tool.remote_name) {
+                Some(name) => claimed.entry(name).or_default().push((server, tool)),
+                None => unbindable.push(format!("{}/{}", server.server_label, tool.remote_name)),
+            }
+        }
+    }
+    let mut bound = Vec::new();
+    for (name, claims) in claimed {
+        let [(server, tool)] = claims.as_slice() else {
+            unbindable.extend(
+                claims
+                    .iter()
+                    .map(|(server, tool)| format!("{}/{}", server.server_label, tool.remote_name)),
+            );
+            continue;
+        };
+        let Ok(tool_name) = ToolName::try_new(tool.exposed_name.clone()) else {
+            unbindable.push(format!("{}/{}", server.server_label, tool.remote_name));
+            continue;
+        };
+        bound.push(BoundContract {
+            digest: digest(&name, &tool.input_schema, tool.output_schema.as_ref()),
+            name,
+            tool_id: server.tool_id.clone(),
+            tool_name,
+        });
+    }
+    unbindable.sort();
+    (bound, unbindable)
+}
+
+fn mcp_contract_name(server_label: &str, remote_name: &str) -> Option<String> {
+    let name = format!(
+        "{MCP_FAMILY}.{}.{}",
+        contract_segment(server_label, false)?,
+        contract_segment(remote_name, true)?
+    );
+    harness::validate_contract_name(&name).ok()?;
+    Some(name)
+}
+
+/// A name as a contract segment: lowercase, with every run of other
+/// characters one `_`. With `split_case`, a lowercase-to-uppercase step and
+/// the end of an acronym also start a new word (`getHTTPStatus` becomes
+/// `get_http_status`).
+fn contract_segment(name: &str, split_case: bool) -> Option<String> {
+    let chars = name.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    for (index, &c) in chars.iter().enumerate() {
+        if c.is_ascii_alphanumeric() {
+            if split_case && c.is_ascii_uppercase() && index > 0 {
+                let previous = chars[index - 1];
+                let next_is_lower = chars.get(index + 1).is_some_and(char::is_ascii_lowercase);
+                if previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase() && next_is_lower)
+                {
+                    out.push('_');
+                }
+            }
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let segment = out.trim_matches('_');
+    segment
+        .starts_with(|c: char| c.is_ascii_lowercase())
+        .then(|| segment.to_owned())
+}
+
 /// A contract available in a session: its digest and the session tool
 /// serving it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundContract {
-    pub name: &'static str,
+    pub name: String,
     pub digest: String,
     pub tool_id: ToolName,
     pub tool_name: ToolName,
@@ -96,7 +213,7 @@ pub struct BoundContract {
 impl BoundContract {
     pub fn pin(&self) -> ContractPin {
         ContractPin {
-            contract: self.name.to_owned(),
+            contract: self.name.clone(),
             digest: self.digest.clone(),
         }
     }
@@ -104,7 +221,7 @@ impl BoundContract {
     /// The contract's scope binding.
     pub fn binding(&self) -> ContractBinding {
         ContractBinding {
-            contract: self.name.to_owned(),
+            contract: self.name.clone(),
             digest: self.digest.clone(),
         }
     }
@@ -127,7 +244,7 @@ pub fn bind(callables: &[CallableTool]) -> Vec<BoundContract> {
                 return None;
             };
             Some(BoundContract {
-                name: definition.name,
+                name: definition.name.to_owned(),
                 digest: digest(
                     definition.name,
                     &callable.definition.input_schema,
@@ -257,7 +374,7 @@ pub fn check_pins(
 ) -> Result<(), ContractError> {
     for pin in pins {
         match bound.get(&pin.contract) {
-            None if definition(&pin.contract).is_none() => {
+            None if !is_known(&pin.contract) => {
                 return Err(ContractError::Unknown {
                     contract: pin.contract.clone(),
                 });
@@ -284,7 +401,7 @@ fn find<'a>(
     available: &'a [BoundContract],
     contract: &str,
 ) -> Result<&'a BoundContract, ContractError> {
-    if definition(contract).is_none() {
+    if !is_known(contract) {
         return Err(ContractError::Unknown {
             contract: contract.to_owned(),
         });
@@ -358,7 +475,10 @@ mod tests {
     }
 
     fn names(bound: &[BoundContract]) -> Vec<&str> {
-        bound.iter().map(|contract| contract.name).collect()
+        bound
+            .iter()
+            .map(|contract| contract.name.as_str())
+            .collect()
     }
 
     #[test]
@@ -495,6 +615,96 @@ mod tests {
             "contract_incomplete"
         );
         pin_requirements(&available, [("input.open", None), ("promise.await", None)]).unwrap();
+    }
+
+    fn mcp_tool(server: &str, remote_name: &str, input: serde_json::Value) -> McpToolShape {
+        McpToolShape {
+            exposed_name: format!("mcp_{server}__{remote_name}"),
+            remote_name: remote_name.to_owned(),
+            input_schema: input,
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn mcp_tools_bind_snake_case_contracts_and_skip_clashes() {
+        let schema = json!({ "type": "object" });
+        let servers = [
+            McpServerTools {
+                tool_id: ToolName::new("mcp_GitHub-Prod"),
+                server_label: "GitHub-Prod".into(),
+                tools: vec![
+                    mcp_tool("GitHub-Prod", "createIssue", schema.clone()),
+                    mcp_tool("GitHub-Prod", "getHTTPStatus", schema.clone()),
+                    mcp_tool("GitHub-Prod", "repo.search", schema.clone()),
+                    mcp_tool("GitHub-Prod", "get-file", schema.clone()),
+                    mcp_tool("GitHub-Prod", "get_file", schema.clone()),
+                    mcp_tool("GitHub-Prod", "9lives", schema.clone()),
+                ],
+            },
+            McpServerTools {
+                tool_id: ToolName::new("mcp_docs"),
+                server_label: "docs".into(),
+                tools: vec![mcp_tool("docs", "search", schema.clone())],
+            },
+        ];
+        let (bound, unbindable) = bind_mcp(&servers);
+        assert_eq!(
+            names(&bound),
+            [
+                "mcp.docs.search",
+                "mcp.github_prod.create_issue",
+                "mcp.github_prod.get_http_status",
+                "mcp.github_prod.repo_search",
+            ]
+        );
+        assert_eq!(
+            unbindable,
+            [
+                "GitHub-Prod/9lives",
+                "GitHub-Prod/get-file",
+                "GitHub-Prod/get_file"
+            ]
+        );
+        let create = &bound[1];
+        assert_eq!(create.tool_id.as_str(), "mcp_GitHub-Prod");
+        assert_eq!(create.tool_name.as_str(), "mcp_GitHub-Prod__createIssue");
+
+        // The digest follows the upstream schema.
+        let mut changed = servers.clone();
+        changed[1].tools[0].input_schema = json!({ "type": "object", "required": ["q"] });
+        let (rebound, _) = bind_mcp(&changed);
+        assert_ne!(bound[0].digest, rebound[0].digest);
+        assert_eq!(bound[1].digest, rebound[1].digest);
+    }
+
+    #[test]
+    fn mcp_requirements_pin_like_built_ins() {
+        let (available, _) = bind_mcp(&[McpServerTools {
+            tool_id: ToolName::new("mcp_docs"),
+            server_label: "docs".into(),
+            tools: vec![mcp_tool("docs", "search", json!({ "type": "object" }))],
+        }]);
+        let pins = pin_requirements(&available, [("mcp.docs.search", None)]).unwrap();
+        assert_eq!(pins[0].digest, available[0].digest);
+        // A server-level name is not a contract; a missing tool is
+        // unavailable, not unknown.
+        assert_eq!(
+            pin_requirements(&available, [("mcp.docs", None)])
+                .unwrap_err()
+                .kind(),
+            "contract_unknown"
+        );
+        assert_eq!(
+            pin_requirements(&available, [("mcp.docs.fetch", None)])
+                .unwrap_err()
+                .kind(),
+            "contract_unavailable"
+        );
+        assert_eq!(
+            check_pins(&pins, &BTreeMap::new()).unwrap_err().kind(),
+            "contract_unavailable"
+        );
     }
 
     #[test]
