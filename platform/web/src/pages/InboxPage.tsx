@@ -110,7 +110,7 @@ function RequestPane({
           <ListNote>
             {filter === "pending"
               ? "Nothing is waiting for an answer."
-              : "No requests yet. Programs ask questions here with input.request or input.open."}
+              : "No requests yet. Programs ask questions here with input.request or input.open, and wait here for approval of tool calls that need it."}
           </ListNote>
         )}
         <ul>
@@ -124,6 +124,9 @@ function RequestPane({
                 )}
               >
                 <span className="flex items-center gap-2">
+                  {request.kind === "approval" && (
+                    <Badge variant="outline" className="shrink-0">Approval</Badge>
+                  )}
                   <span className="truncate font-medium">{request.ask}</span>
                   {request.status !== "pending" && (
                     <span className="ml-auto shrink-0 text-xs text-muted-foreground">{STATUS_LABELS[request.status]}</span>
@@ -205,7 +208,12 @@ function RequestDetail({
               </Fact>
             </dl>
             {view.payload !== undefined && view.payload !== null && (
-              <JsonBlock title="Context" value={view.payload} />
+              <JsonBlock title={view.kind === "approval" ? "Tool call" : "Context"} value={view.payload} />
+            )}
+            {view.kind === "approval" && view.status === "pending" && (
+              <p className="text-sm text-muted-foreground">
+                Approving runs this call for the waiting program; rejecting fails it.
+              </p>
             )}
             {view.answer && (
               <section className="grid gap-1 rounded-lg border p-4 text-sm">

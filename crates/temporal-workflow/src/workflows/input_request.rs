@@ -4,6 +4,10 @@
 //! once if the request names an escalation list), a reminder is due, or
 //! the waiting call is withdrawn. The inbox row decides every race: an
 //! answer recorded before an expiry or cancellation wins.
+//!
+//! An approval request is the same wait for a program call its scope
+//! parked: once approved, the workflow runs that call itself and replies
+//! with its result; a rejection or expiry fails the call.
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -14,10 +18,10 @@ use temporalio_sdk::{
 };
 
 use crate::{
-    AgentSessionWorkflow, InputRequestOpenActivityRequest, InputRequestOpenActivityResult,
-    InputRequestSnapshot, InputRequestStep, InputRequestStepActivityRequest,
-    InputRequestStepResult, WorkflowActivities, WorkflowToolRecoveryResult, WorkflowToolStartArgs,
-    workflows::WorkflowContextExt as _,
+    AgentSessionWorkflow, InputRequestExecuteActivityRequest, InputRequestOpenActivityRequest,
+    InputRequestOpenActivityResult, InputRequestSnapshot, InputRequestStep,
+    InputRequestStepActivityRequest, InputRequestStepResult, WorkflowActivities,
+    WorkflowToolRecoveryResult, WorkflowToolStartArgs, workflows::WorkflowContextExt as _,
 };
 
 #[workflow]
@@ -70,7 +74,7 @@ impl InputRequestWorkflow {
                     state.snapshot.request_id = Some(request_id);
                     state.snapshot.deadline_at_ms = Some(deadline_at_ms);
                 });
-                wait(
+                match wait(
                     ctx,
                     &start,
                     Wait {
@@ -81,6 +85,10 @@ impl InputRequestWorkflow {
                     },
                 )
                 .await?
+                {
+                    Waited::Settled(resolution) => resolution,
+                    Waited::Approved => execute_approved(ctx, &start).await?,
+                }
             }
         };
         ctx.state_mut(|state| state.snapshot.resolution = Some(resolution.clone()));
@@ -145,6 +153,34 @@ impl InputRequestWorkflow {
     }
 }
 
+enum Waited {
+    Settled(harness::PromiseResolution),
+    Approved,
+}
+
+/// Run the approved call once: a call that failed or timed out is not
+/// retried, as for any call that is not retry-safe.
+async fn execute_approved(
+    ctx: &WorkflowContext<InputRequestWorkflow>,
+    start: &WorkflowToolStartArgs,
+) -> WorkflowResult<harness::PromiseResolution> {
+    ctx.execute_activity(
+        WorkflowActivities::input_request_execute,
+        InputRequestExecuteActivityRequest {
+            start: start.clone(),
+        },
+        crate::tool_call_activity_options(harness::ToolExecutionSpec::new(
+            harness::ToolExecutionClass::RemoteInteractive,
+            false,
+        )),
+    )
+    .await
+    .map_err(|error| {
+        temporalio_sdk::ApplicationFailure::new(anyhow::anyhow!("run approved call: {error}"))
+            .into()
+    })
+}
+
 struct Wait {
     deadline_at_ms: u64,
     deadline_after_ms: u64,
@@ -156,7 +192,7 @@ async fn wait(
     ctx: &WorkflowContext<InputRequestWorkflow>,
     start: &WorkflowToolStartArgs,
     mut wait: Wait,
-) -> WorkflowResult<harness::PromiseResolution> {
+) -> WorkflowResult<Waited> {
     let mut escalated = false;
     let mut last_reminder_at_ms = now_ms(ctx);
     loop {
@@ -192,7 +228,10 @@ async fn wait(
         };
         if let Some(step) = step {
             match run_step(ctx, start, step).await? {
-                InputRequestStepResult::Settled { resolution } => return Ok(resolution),
+                InputRequestStepResult::Settled { resolution } => {
+                    return Ok(Waited::Settled(resolution));
+                }
+                InputRequestStepResult::Approved => return Ok(Waited::Approved),
                 InputRequestStepResult::Pending {
                     deadline_at_ms,
                     escalated: now_escalated,
@@ -326,7 +365,11 @@ pub(crate) fn run_waits_on_people(state: &harness::CoreAgentState, run: &harness
 /// Mirrors the semantic types of the `input.request` (joined) and
 /// `input.open` (promise) bindings; the workflow crate cannot depend on the
 /// tools crate.
-const INPUT_SEMANTIC_TYPES: [&str; 2] = ["lightspeed.input.request.v1", "lightspeed.input.open.v1"];
+const INPUT_SEMANTIC_TYPES: [&str; 3] = [
+    "lightspeed.input.request.v1",
+    "lightspeed.input.open.v1",
+    harness::APPROVAL_WORKFLOW_SEMANTIC_TYPE,
+];
 
 #[cfg(test)]
 mod tests {

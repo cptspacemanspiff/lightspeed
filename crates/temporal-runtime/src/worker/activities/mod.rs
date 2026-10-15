@@ -309,6 +309,10 @@ mod tests {
             WorkerActivities::input_request_step.name(),
             temporal_workflow::WorkflowActivities::input_request_step.name()
         );
+        assert_eq!(
+            WorkerActivities::input_request_execute.name(),
+            temporal_workflow::WorkflowActivities::input_request_execute.name()
+        );
     }
 
     #[test]
@@ -784,6 +788,20 @@ impl WorkerActivities {
     ) -> Result<temporal_workflow::InputRequestStepResult, ActivityError> {
         let state = self.state_for_universe(request.universe_id).await?;
         input_requests::step(inbox_store(&state)?, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_INPUT_REQUEST_EXECUTE)]
+    pub async fn input_request_execute(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::InputRequestExecuteActivityRequest,
+    ) -> Result<harness::PromiseResolution, ActivityError> {
+        let state = self.state_for_universe(request.start.universe_id).await?;
+        common::cancellable(
+            &ctx,
+            input_requests::execute(inbox_store(&state)?, state.tools(), request),
+        )
+        .await
     }
 
     #[activity(name = ACTIVITY_SUBAGENT_PREPARE)]

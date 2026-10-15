@@ -237,6 +237,11 @@ pub enum RemoteMcpCallRuntime {
         target: RemoteMcpCallTarget,
         remote_tool_name: String,
         approval_decision: Option<bool>,
+        /// For a call whose program scope parks approval-required calls: the
+        /// same call addressed to the approval workflow tool, which the call
+        /// becomes instead of failing when the server asks for approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        park: Option<Box<ToolInvocationRequest>>,
     },
     Search {
         targets: Vec<RemoteMcpCallTarget>,
@@ -678,6 +683,7 @@ mod tests {
             },
             remote_tool_name: "hello".to_owned(),
             approval_decision: Some(true),
+            park: None,
         };
         batch.calls[1].remote_mcp = Some(routing.clone());
 

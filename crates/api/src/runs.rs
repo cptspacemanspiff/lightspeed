@@ -97,6 +97,10 @@ pub struct ProgramInputDefaults {
     /// unanswered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<String>,
+    /// Who decides the run's approval requests (calls to tools that need
+    /// approval), in place of the program's `approvals.assignees`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

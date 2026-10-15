@@ -137,12 +137,14 @@ impl ScopePolicy {
     }
 
     /// The policy a program run's scope runs under. Bindings are canonical
-    /// contracts, and calls are acknowledged on admission so an attempt can
-    /// release the session while they run.
+    /// contracts, calls are acknowledged on admission so an attempt can
+    /// release the session while they run, and a call that needs approval
+    /// waits for a decision.
     pub fn program(limits: ScopeLimits) -> Self {
         Self {
             binding_mode: BindingMode::Contract,
             completion: Completion::Ack,
+            approvals: ApprovalPolicy::Park,
             ..Self::code_mode(limits)
         }
     }
@@ -200,6 +202,10 @@ pub enum Retention {
 pub enum ApprovalPolicy {
     /// The call fails; the scope cannot wait for a decision.
     Reject,
+    /// The call waits through the approval workflow tool
+    /// (`APPROVAL_WORKFLOW_TOOL_ID`), which asks for the decision in the
+    /// inbox and, once approved, runs the call and replies with its result.
+    Park,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,7 +606,7 @@ pub fn code_tool_call<'a>(
         .get(&origin.request_id)
 }
 
-pub(crate) fn code_tool_call_for_id<'a>(
+pub fn code_tool_call_for_id<'a>(
     state: &'a CoreAgentState,
     call_id: &ToolCallId,
 ) -> Option<(&'a CodeToolScope, &'a CodeToolCall)> {
@@ -854,6 +860,45 @@ fn validate_bindings_current(
     }
 }
 
+/// The approval binding a scoped call waits through when its scope parks
+/// approval-required calls: only a remote MCP call, the one kind of call
+/// that can need approval, in a `Park` scope of a session that binds it.
+pub(crate) fn approval_binding_for_call<'a>(
+    state: &'a CoreAgentState,
+    scope: &CodeToolScope,
+    call: &CodeToolCall,
+) -> Option<&'a crate::WorkflowToolBinding> {
+    if scope.spec.policy.approvals != ApprovalPolicy::Park
+        || !state
+            .tooling
+            .tools
+            .get(&call.spec.tool_id)
+            .is_some_and(|tool| matches!(tool.kind, crate::ToolKind::RemoteMcp(_)))
+    {
+        return None;
+    }
+    state
+        .workflow_tools
+        .bindings
+        .get(&crate::WorkflowToolId::new(
+            crate::APPROVAL_WORKFLOW_TOOL_ID,
+        ))
+}
+
+/// The joined workflow binding a scoped call waits through: its own tool's,
+/// or the approval binding for a call its scope parks.
+fn joined_binding_for_call<'a>(
+    state: &'a CoreAgentState,
+    scope: &CodeToolScope,
+    call: &CodeToolCall,
+) -> Option<&'a crate::WorkflowToolBinding> {
+    state
+        .workflow_tools
+        .binding_for_tool_name(&call.spec.tool_id)
+        .or_else(|| approval_binding_for_call(state, scope, call))
+        .filter(|binding| matches!(binding.completion, WorkflowToolCompletion::Joined { .. }))
+}
+
 fn joins(state: &CoreAgentState, origin: &CodeToolOrigin) -> Result<CoreAgentJoins, DomainError> {
     let scope = state
         .code_tools
@@ -935,12 +980,8 @@ pub fn complete_code_tool_call_proposals(
     if !matches!(call.status, CodeToolCallStatus::Pending)
         && result.status == ToolCallStatus::Succeeded
         && result.effects.len() == 1
-        && state
-            .workflow_tools
-            .binding_for_tool_name(&call.spec.tool_id)
-            .is_some_and(|binding| {
-                matches!(binding.completion, WorkflowToolCompletion::Joined { .. })
-            })
+        && joined_binding_for_call(state, &state.code_tools.scopes[&origin.execution_id], call)
+            .is_some()
         && let Some(invocation) =
             super::workflow_tool::invocation_from_emit_effect(&result.effects[0])?
         && invocation.tool_call_id() == Some(&call.call_id)
@@ -1355,6 +1396,99 @@ pub fn code_tool_request(
         state,
         session_id,
         facts.run_id,
+        facts.dispatch.clone(),
+        call.promise_id_base,
+        std::slice::from_ref(&crate::ObservedToolCall {
+            call_id: call.call_id.clone(),
+            tool_id: Some(call.spec.tool_id.clone()),
+            tool_name: call.spec.tool_name.clone(),
+            provider_kind: None,
+            arguments_ref: call.spec.arguments_ref.clone(),
+            native_call_ref: None,
+        }),
+    )?;
+    // A run's approval of a model call never authorizes a scoped call. A
+    // scope that parks such calls gives them the same call addressed to the
+    // approval binding's tool, to wait through instead.
+    let approval = match approval_binding_for_call(state, scope, call) {
+        Some(binding) => {
+            let mut parked = crate::core::drive::tool_invocation_request(
+                state,
+                session_id,
+                facts.run_id,
+                facts.dispatch.clone(),
+                call.promise_id_base,
+                std::slice::from_ref(&crate::ObservedToolCall {
+                    call_id: call.call_id.clone(),
+                    tool_id: Some(binding.definition.tool.name.clone()),
+                    tool_name: binding.definition.tool.name.clone(),
+                    provider_kind: None,
+                    arguments_ref: call.spec.arguments_ref.clone(),
+                    native_call_ref: None,
+                }),
+            )?;
+            Some(Box::new(parked.calls.remove(0)))
+        }
+        None => None,
+    };
+    if let Some(remote) = &mut request.calls[0].remote_mcp {
+        match remote {
+            crate::RemoteMcpCallRuntime::Injected {
+                approval_decision,
+                park,
+                ..
+            } => {
+                *approval_decision = None;
+                *park = approval;
+            }
+            crate::RemoteMcpCallRuntime::Search {
+                approval_decision, ..
+            } => *approval_decision = None,
+        }
+    }
+    Ok(request)
+}
+
+/// The request that runs a parked call once its approval is granted: the
+/// call as its scope dispatches it, carrying the approval, for the approval
+/// workflow `invocation_id` to execute. The call must still wait on that
+/// approval in a live scope whose bindings are current.
+pub fn approved_code_tool_request(
+    session_id: &SessionId,
+    state: &CoreAgentState,
+    call_id: &ToolCallId,
+    invocation_id: &WorkflowToolInvocationId,
+) -> Result<crate::ToolInvocationCallRequest, DomainError> {
+    let (scope, call) =
+        code_tool_call_for_id(state, call_id).ok_or_else(|| invalid("unknown code tool call"))?;
+    let CodeToolCallStatus::Waiting {
+        suspension: ToolBatchSuspension::JoinedWorkflowCalls { calls, .. },
+    } = &call.status
+    else {
+        return Err(invalid(
+            "approved code tool call is not waiting for approval",
+        ));
+    };
+    if calls.first().map(|joined| &joined.invocation_id) != Some(invocation_id)
+        || approval_binding_for_call(state, scope, call).is_none()
+    {
+        return Err(invalid("approval does not match its parked call"));
+    }
+    if scope.cancel_requested {
+        return Err(invalid("code tool scope is cancelling"));
+    }
+    validate_live_owner(state, &scope.spec)?;
+    validate_bindings_current(state, scope)?;
+    let facts = owner_facts(state, &scope.spec)?;
+    if facts.session_id != session_id {
+        return Err(invalid(
+            "code tool request session does not match its owner",
+        ));
+    }
+    let mut request = crate::core::drive::tool_invocation_request(
+        state,
+        session_id,
+        facts.run_id,
         facts.dispatch,
         call.promise_id_base,
         std::slice::from_ref(&crate::ObservedToolCall {
@@ -1366,17 +1500,22 @@ pub fn code_tool_request(
             native_call_ref: None,
         }),
     )?;
-    if let Some(remote) = &mut request.calls[0].remote_mcp {
-        match remote {
-            crate::RemoteMcpCallRuntime::Injected {
-                approval_decision, ..
-            }
-            | crate::RemoteMcpCallRuntime::Search {
-                approval_decision, ..
-            } => *approval_decision = None,
-        }
-    }
-    Ok(request)
+    let Some(crate::RemoteMcpCallRuntime::Injected {
+        approval_decision,
+        park,
+        ..
+    }) = &mut request.calls[0].remote_mcp
+    else {
+        return Err(invalid("approved code tool call is not a native MCP call"));
+    };
+    *approval_decision = Some(true);
+    *park = None;
+    Ok(request
+        .call_request(
+            0,
+            crate::ToolExecutionSpec::new(crate::ToolExecutionClass::RemoteInteractive, false),
+        )
+        .expect("one approved call"))
 }
 
 pub(crate) fn apply_code_tool_event(
@@ -1503,13 +1642,12 @@ pub(crate) fn apply_code_tool_event(
                             "code tool joined suspension does not match its call",
                         ));
                     }
-                    let binding = state
-                        .workflow_tools
-                        .binding_for_tool_name(&call.spec.tool_id)
-                        .ok_or_else(|| invalid("code tool joined binding is missing"))?;
-                    if !matches!(binding.completion, WorkflowToolCompletion::Joined { .. }) {
-                        return Err(invalid("code tool suspension requires joined completion"));
-                    }
+                    let binding = joined_binding_for_call(
+                        state,
+                        &state.code_tools.scopes[&origin.execution_id],
+                        call,
+                    )
+                    .ok_or_else(|| invalid("code tool suspension requires a joined binding"))?;
                     let promise = state
                         .promises
                         .promises

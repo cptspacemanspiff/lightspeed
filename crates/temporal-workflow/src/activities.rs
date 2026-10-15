@@ -63,6 +63,7 @@ pub const ACTIVITY_PROGRAM_ATTEMPT: &str = "WorkflowActivities::program_attempt"
 pub const ACTIVITY_PROGRAM_FINALIZE: &str = "WorkflowActivities::program_finalize";
 pub const ACTIVITY_INPUT_REQUEST_OPEN: &str = "WorkflowActivities::input_request_open";
 pub const ACTIVITY_INPUT_REQUEST_STEP: &str = "WorkflowActivities::input_request_step";
+pub const ACTIVITY_INPUT_REQUEST_EXECUTE: &str = "WorkflowActivities::input_request_execute";
 
 pub struct WorkflowActivities;
 
@@ -129,6 +130,14 @@ impl WorkflowActivities {
         _ctx: ActivityContext,
         _request: crate::InputRequestStepActivityRequest,
     ) -> Result<crate::InputRequestStepResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_INPUT_REQUEST_EXECUTE)]
+    pub async fn input_request_execute(
+        _ctx: ActivityContext,
+        _request: crate::InputRequestExecuteActivityRequest,
+    ) -> Result<harness::PromiseResolution, ActivityError> {
         unimplemented!("workflow activity definition only")
     }
 

@@ -408,6 +408,7 @@ impl NativeMcpRuntime {
                 target,
                 remote_tool_name,
                 approval_decision,
+                ..
             } => {
                 let arguments = arguments
                     .as_object()

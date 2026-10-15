@@ -2140,13 +2140,19 @@ mod tests {
         let carried = ControllerState::new(
             BotControllerArgs {
                 config: state.config.clone(),
-                carry: Some(serde_json::from_str(&serde_json::to_string(&state.carry()).unwrap()).unwrap()),
+                carry: Some(
+                    serde_json::from_str(&serde_json::to_string(&state.carry()).unwrap()).unwrap(),
+                ),
             },
             NOW + 3,
         );
         assert_eq!(carried.waiting_runs, state.waiting_runs);
 
-        assert!(state.take_waiting_run("bot-event-terminal-v1-nope").is_none());
+        assert!(
+            state
+                .take_waiting_run("bot-event-terminal-v1-nope")
+                .is_none()
+        );
         let (session, settled) = state.take_waiting_run(&token).expect("waiting run");
         assert_eq!(session, "bot:v1:triage");
         assert_eq!(settled.run_id, "run_7");

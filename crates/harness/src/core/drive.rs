@@ -10089,6 +10089,7 @@ mod tests {
                 target,
                 remote_tool_name,
                 approval_decision,
+                ..
             }) => {
                 assert_eq!(target.server_id, "echo");
                 assert_eq!(target.approval, crate::RemoteMcpApprovalPolicy::Always);
@@ -11649,6 +11650,7 @@ mod tests {
                 output_schema: None,
                 limits: Default::default(),
                 requires: Vec::new(),
+                approvals: None,
             },
         }
     }

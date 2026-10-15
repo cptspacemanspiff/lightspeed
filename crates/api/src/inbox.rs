@@ -35,6 +35,33 @@ impl InputRequestStatus {
     }
 }
 
+/// What a request asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputRequestKind {
+    /// A question the program asked (`input.request`, `input.open`).
+    #[default]
+    Input,
+    /// A decision on a program's tool call that needs approval. The payload
+    /// names the call; approving runs it, rejecting fails it.
+    Approval,
+}
+
+impl InputRequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Approval => "approval",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Input, Self::Approval]
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+    }
+}
+
 /// The recorded answer to a request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +80,8 @@ pub struct InputRequestAnswer {
 #[serde(rename_all = "camelCase")]
 pub struct InputRequestView {
     pub request_id: String,
+    #[serde(default)]
+    pub kind: InputRequestKind,
     /// The program session whose run is waiting.
     pub session_id: String,
     pub run_id: u64,
