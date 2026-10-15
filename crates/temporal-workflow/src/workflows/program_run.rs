@@ -1,7 +1,7 @@
 //! Durable supervision of a program run: one invocation of a program
 //! session's pinned program. Session-owned activities still execute every
-//! tool effect. This phase runs a single attempt; durable re-execution with
-//! suspension comes with the replay journal.
+//! tool effect. An attempt lost with its worker is retried and replays the
+//! recorded calls; suspension between attempts comes later.
 
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use crate::{
 
 const ACTIVITY_HEARTBEAT: Duration = Duration::from_secs(15);
 const ACTIVITY_CANCELLATION_GRACE: Duration = Duration::from_secs(20);
+const RUNNER_MAXIMUM_ATTEMPTS: i32 = 5;
 
 #[workflow]
 #[derive(Default)]
@@ -353,12 +354,14 @@ fn preparation_options() -> ActivityOptions {
     bounded_options(Duration::from_secs(60), Duration::from_secs(90), 3)
 }
 
+/// An attempt lost with its worker is retried: the next one replays the
+/// run's recorded calls. Retries share the run's wall-clock budget.
 fn runner_options(timeout_ms: u64) -> ActivityOptions {
     let timeout = Duration::from_millis(timeout_ms);
     bounded_options(
         timeout.saturating_add(Duration::from_secs(30)),
         timeout.saturating_add(Duration::from_secs(60)),
-        1,
+        RUNNER_MAXIMUM_ATTEMPTS,
     )
 }
 

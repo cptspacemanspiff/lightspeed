@@ -943,6 +943,8 @@ mod tests {
         temporal_workflow::CodeToolCallOutcome {
             request_id: request_id.into(),
             call_id: harness::ToolCallId::new(format!("tool-{request_id}")),
+            binding_id: None,
+            arguments_ref: None,
             status: temporal_workflow::CodeToolCallStatus::Succeeded,
             output_ref: Some(BlobRef::from_bytes(request_id.as_bytes())),
             error_ref: None,
@@ -1333,6 +1335,8 @@ mod tests {
                     temporal_workflow::CodeToolCallOutcome {
                         request_id: "call-1".into(),
                         call_id: harness::ToolCallId::new("tool-call-1"),
+                        binding_id: None,
+                        arguments_ref: None,
                         status: temporal_workflow::CodeToolCallStatus::Failed,
                         output_ref: Some(output_ref.clone()),
                         error_ref: Some(error_ref.clone()),

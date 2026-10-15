@@ -7,10 +7,13 @@
 //! handler. Its `env` holds only the contracts it was pinned to, and every
 //! attempt re-checks those pins against the scope before the program starts.
 //!
-//! This phase runs one attempt per run and does not replay a journal yet.
+//! An attempt after a lost one replays: the program re-issues the calls an
+//! earlier attempt made, which are checked against their recorded binding
+//! and arguments instead of being admitted again, and receives the recorded
+//! outcomes in log order before any new one.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -20,8 +23,9 @@ use futures_util::{StreamExt, stream::FuturesUnordered};
 use harness::{BlobRef, storage::BlobStore};
 use serde_json::Value;
 use temporal_workflow::{
-    CodeToolClient, CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
-    MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
+    CodeToolCallOutcome, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
+    CodeToolScopeReportRequest, InvokeCodeToolRequest, MAX_RECORDED_OUTCOMES_PER_PAGE,
+    ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
 use tokio::{sync::Semaphore, time::Instant};
@@ -133,14 +137,9 @@ impl ProgramRunner {
                 "program attempt requires the run's open scope".into(),
             ));
         }
-        if !scope.calls.is_empty() {
-            // Re-execution against the recorded journal is not implemented
-            // yet; an attempt after a lost one cannot safely continue.
-            return Err(CodeRunError::Preparation(
-                "program attempt found earlier calls in its scope; replay is not supported yet"
-                    .into(),
-            ));
-        }
+        // Calls an earlier attempt of this run admitted. The program issues
+        // them again as it replays, and must issue them the same way.
+        let recorded = scope.calls.clone();
         let prepare = async {
             let permit = self
                 .capacity
@@ -249,46 +248,37 @@ impl ProgramRunner {
         };
         let completions = execution.completion_sender();
         let mut admissions = FuturesUnordered::new();
-        let mut outstanding = BTreeSet::new();
+        // Requests the program has issued whose outcomes have not been read
+        // from the recorded feed yet.
+        let mut awaited = BTreeSet::new();
+        // Completions in the order the program must receive them: the
+        // recorded feed in log order, which a replaying attempt sends ahead
+        // of the requests they answer.
+        let mut feed = VecDeque::new();
+        let mut journal_read = false;
         let mut cursor = 0u64;
         let mut poll = tokio::time::interval(OUTCOME_POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut bridge_failure: Option<codemode::ExecutionError> = None;
-        // Deliver one completion; a bridge failure is returned so the loop
-        // can record it and stop the interpreter.
-        let deliver = |completion: HostCompletion| -> Result<(), codemode::ExecutionError> {
-            let request_id = completion.request_id.clone();
-            let result = match completions.complete(completion) {
-                Err(codemode::CompletionError::TooLarge) => completions.complete(HostCompletion {
-                    request_id,
-                    outcome: Err(host_error(
-                        "payload_too_large",
-                        "host completion exceeds result budget",
-                    )),
-                    completed_at_ms: None,
-                }),
-                result => result,
-            };
-            match result {
-                Err(error) if error != codemode::CompletionError::Stopped => {
-                    Err(codemode::ExecutionError {
-                        kind: if error == codemode::CompletionError::TooLarge {
-                            codemode::ExecutionErrorKind::LimitExceeded
-                        } else {
-                            codemode::ExecutionErrorKind::Internal
-                        },
-                        message: format!("cannot deliver host completion: {error}"),
-                    })
-                }
-                _ => Ok(()),
-            }
-        };
         let report = loop {
+            if bridge_failure.is_none()
+                && let Err(error) = send_feed(&completions, &mut feed)
+            {
+                bridge_failure = Some(error);
+                execution.cancel();
+            }
             tokio::select! {
                 event = execution.next_event() => match event {
-                    Some(ExecutionEvent::Request(request)) => {
-                        admissions.push(self.admit(&code_tools, &descriptor, request));
-                    }
+                    Some(ExecutionEvent::Request(request)) => match replay_check(&recorded, &request) {
+                        // A recorded request is not admitted again: its
+                        // outcome, or the wait for it, is in the feed.
+                        Ok(true) => { awaited.insert(request.request_id); }
+                        Ok(false) => admissions.push(self.admit(&code_tools, &descriptor, request)),
+                        Err(error) => if bridge_failure.is_none() {
+                            bridge_failure = Some(error);
+                            execution.cancel();
+                        },
+                    },
                     Some(ExecutionEvent::Finished(mut report)) => {
                         if let Some(error) = bridge_failure.take() {
                             report.error = Some(error);
@@ -306,15 +296,21 @@ impl ProgramRunner {
                     },
                 },
                 Some(admitted) = admissions.next(), if !admissions.is_empty() => match admitted {
-                    // Outcomes arrive only through the recorded feed, so
-                    // every attempt sees them in the same order.
-                    Ok(request_id) => { outstanding.insert(request_id); }
-                    Err(completion) => if let Err(error) = deliver(completion) {
-                        bridge_failure = Some(error);
+                    Ok(request_id) => { awaited.insert(request_id); }
+                    Err(Admission::Rejected(completion)) => feed.push_back(completion),
+                    // The session recorded this request with another binding
+                    // or arguments: an earlier attempt issued it differently.
+                    Err(Admission::Conflict(request_id)) => if bridge_failure.is_none() {
+                        bridge_failure = Some(diverged(&request_id, "was admitted with another binding or arguments"));
                         execution.cancel();
                     },
                 },
-                _ = poll.tick(), if !outstanding.is_empty() => {
+                _ = poll.tick(), if !journal_read || !awaited.is_empty() || !feed.is_empty() => {
+                    if journal_read && awaited.is_empty() {
+                        // Only the queue is waiting for room; the loop's
+                        // next pass retries it.
+                        continue;
+                    }
                     let page = code_tools
                         .recorded_outcomes(
                             ScopeRecordedOutcomesRequest {
@@ -328,21 +324,22 @@ impl ProgramRunner {
                     let page = match page {
                         Ok(Ok(page)) => page,
                         Ok(Err(error)) => {
-                            bridge_failure = Some(codemode::ExecutionError {
-                                kind: codemode::ExecutionErrorKind::Internal,
-                                message: format!("recorded outcomes unavailable: {error}"),
-                            });
-                            execution.cancel();
+                            if bridge_failure.is_none() {
+                                bridge_failure = Some(codemode::ExecutionError {
+                                    kind: codemode::ExecutionErrorKind::Internal,
+                                    message: format!("recorded outcomes unavailable: {error}"),
+                                });
+                                execution.cancel();
+                            }
                             continue;
                         }
                         Err(_) => continue,
                     };
+                    journal_read |= page.outcomes.len() < MAX_RECORDED_OUTCOMES_PER_PAGE as usize;
                     for outcome in &page.outcomes {
                         cursor += 1;
-                        if !outstanding.remove(&outcome.request_id) {
-                            continue;
-                        }
-                        let completion = HostCompletion {
+                        awaited.remove(&outcome.request_id);
+                        feed.push_back(HostCompletion {
                             request_id: outcome.request_id.clone(),
                             outcome: materialize(
                                 self.blobs.as_ref(),
@@ -352,12 +349,7 @@ impl ProgramRunner {
                             .await
                             .map_err(structured_failure),
                             completed_at_ms: outcome.completed_at_ms,
-                        };
-                        if let Err(error) = deliver(completion) {
-                            bridge_failure = Some(error);
-                            execution.cancel();
-                            break;
-                        }
+                        });
                     }
                 }
             }
@@ -436,7 +428,7 @@ impl ProgramRunner {
         code_tools: &CodeToolClient,
         descriptor: &ProgramRunDescriptor,
         request: HostRequest,
-    ) -> Result<String, HostCompletion> {
+    ) -> Result<String, Admission> {
         let request_id = request.request_id.clone();
         let admitted: Result<(), HostError> = async {
             let bytes = serde_json::to_vec(&request.arguments)
@@ -464,19 +456,107 @@ impl ProgramRunner {
                 )
                 .await
                 .map_err(|error| host_error("transport", format!("tool outcome unknown: {error}")))?
-                .map_err(|error| host_error("admission_rejected", error.to_string()))?;
+                .map_err(|error| {
+                    if error.kind == CodeToolRejectionKind::Conflict {
+                        host_error(CONFLICT, error.to_string())
+                    } else {
+                        host_error("admission_rejected", error.to_string())
+                    }
+                })?;
             Ok(())
         }
         .await;
         match admitted {
             Ok(()) => Ok(request_id),
-            Err(error) => Err(HostCompletion {
+            Err(error) if error.kind == CONFLICT => Err(Admission::Conflict(request_id)),
+            Err(error) => Err(Admission::Rejected(HostCompletion {
                 request_id,
                 outcome: Err(error),
                 completed_at_ms: None,
-            }),
+            })),
         }
     }
+}
+
+/// Why a request was not admitted.
+enum Admission {
+    /// The program receives this failure in place of an outcome.
+    Rejected(HostCompletion),
+    /// The session holds the request with another binding or arguments.
+    Conflict(String),
+}
+
+/// Marks a conflicting admission inside `admit`; never reaches a program.
+const CONFLICT: &str = "conflict";
+
+/// Whether a request the program issued was recorded by an earlier
+/// attempt: `Ok(true)` if it was, with the same binding and arguments,
+/// `Ok(false)` if it is new, and a nondeterminism error if the program
+/// issued it differently this time.
+fn replay_check(
+    recorded: &BTreeMap<String, CodeToolCallOutcome>,
+    request: &HostRequest,
+) -> Result<bool, codemode::ExecutionError> {
+    let Some(call) = recorded.get(&request.request_id) else {
+        return Ok(false);
+    };
+    if call
+        .binding_id
+        .as_ref()
+        .is_some_and(|binding| *binding != request.binding_id)
+    {
+        return Err(diverged(&request.request_id, "names another binding"));
+    }
+    if let Some(arguments_ref) = &call.arguments_ref {
+        // Argument blobs are serde_json's serialization of a `Value`, whose
+        // objects keep their keys sorted: equal arguments give equal bytes
+        // whatever order the program built them in.
+        let bytes = serde_json::to_vec(&request.arguments)
+            .map_err(|error| diverged(&request.request_id, &error.to_string()))?;
+        if BlobRef::from_bytes(&bytes) != *arguments_ref {
+            return Err(diverged(&request.request_id, "has other arguments"));
+        }
+    }
+    Ok(true)
+}
+
+fn diverged(request_id: &str, how: &str) -> codemode::ExecutionError {
+    codemode::ExecutionError {
+        kind: codemode::ExecutionErrorKind::Nondeterminism,
+        message: format!("replayed request {request_id} {how} than the recorded run"),
+    }
+}
+
+/// Send queued completions in order until the program's completion queue
+/// is full. One too large to deliver is replaced by a failure in place.
+fn send_feed(
+    completions: &codemode::CompletionSender,
+    feed: &mut VecDeque<HostCompletion>,
+) -> Result<(), codemode::ExecutionError> {
+    while let Some(completion) = feed.front() {
+        match completions.complete(completion.clone()) {
+            Ok(()) => {
+                feed.pop_front();
+            }
+            Err(codemode::CompletionError::Full) => return Ok(()),
+            Err(codemode::CompletionError::TooLarge) => {
+                let request_id = completion.request_id.clone();
+                feed[0] = HostCompletion {
+                    request_id,
+                    outcome: Err(host_error(
+                        "payload_too_large",
+                        "host completion exceeds result budget",
+                    )),
+                    completed_at_ms: completion.completed_at_ms,
+                };
+            }
+            Err(codemode::CompletionError::Stopped) => {
+                feed.clear();
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A tool failure whose error is a `{ code, message }` document (an
@@ -653,5 +733,67 @@ mod tests {
     fn random_seeds_follow_the_execution() {
         assert_eq!(random_seed("wtx:a"), random_seed("wtx:a"));
         assert_ne!(random_seed("wtx:a"), random_seed("wtx:b"));
+    }
+
+    fn recorded(binding: &str, arguments: &Value) -> BTreeMap<String, CodeToolCallOutcome> {
+        [(
+            "call-1".to_owned(),
+            CodeToolCallOutcome {
+                request_id: "call-1".into(),
+                call_id: harness::ToolCallId::new("tool-1"),
+                binding_id: Some(binding.into()),
+                arguments_ref: Some(BlobRef::from_bytes(&serde_json::to_vec(arguments).unwrap())),
+                status: temporal_workflow::CodeToolCallStatus::Pending,
+                output_ref: None,
+                error_ref: None,
+                attachments: Vec::new(),
+                completed_at_ms: None,
+            },
+        )]
+        .into()
+    }
+
+    fn request(id: &str, binding: &str, arguments: Value) -> HostRequest {
+        HostRequest {
+            request_id: id.into(),
+            binding_id: binding.into(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn replayed_requests_must_match_their_recorded_binding_and_arguments() {
+        let journal = recorded("h-fetch", &serde_json::json!({"url": "a", "depth": 1}));
+        // Key order is not part of the arguments.
+        let same: Value = serde_json::from_str(r#"{"depth": 1, "url": "a"}"#).unwrap();
+        assert_eq!(
+            replay_check(&journal, &request("call-1", "h-fetch", same)),
+            Ok(true)
+        );
+        assert_eq!(
+            replay_check(&journal, &request("call-2", "h-other", Value::Null)),
+            Ok(false)
+        );
+        for diverged in [
+            request(
+                "call-1",
+                "h-other",
+                serde_json::json!({"url": "a", "depth": 1}),
+            ),
+            request(
+                "call-1",
+                "h-fetch",
+                serde_json::json!({"url": "b", "depth": 1}),
+            ),
+            request(
+                "call-1",
+                "h-fetch",
+                serde_json::json!({"url": "a", "depth": 1.5}),
+            ),
+        ] {
+            let error = replay_check(&journal, &diverged).unwrap_err();
+            assert_eq!(error.kind, codemode::ExecutionErrorKind::Nondeterminism);
+            assert!(error.message.contains("call-1"), "{}", error.message);
+        }
     }
 }

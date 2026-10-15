@@ -720,11 +720,24 @@
     "CodeToolCallOutcome": {
       "description": "Script-facing completion metadata. Session effects, model context, and\nactivity configuration remain private to the owning session.",
       "properties": {
+        "arguments_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "attachments": {
           "items": {
             "$ref": "#/definitions/Attachment"
           },
           "type": "array"
+        },
+        "binding_id": {
+          "description": "The binding and arguments the request was admitted with: a replaying\nprogram re-issues the request and must match both. Absent on reports\nstored before they were recorded here.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "call_id": {
           "$ref": "#/definitions/ToolCallId"

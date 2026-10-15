@@ -651,7 +651,14 @@ export interface CodeRunActivityResult {
  * via the `definition` "CodeToolCallOutcome".
  */
 export interface CodeToolCallOutcome {
+  arguments_ref?: string | null;
   attachments?: Attachment[];
+  /**
+   * The binding and arguments the request was admitted with: a replaying
+   * program re-issues the request and must match both. Absent on reports
+   * stored before they were recorded here.
+   */
+  binding_id?: string | null;
   call_id: ToolCallId;
   /**
    * When the session recorded the outcome; a program's clock advances to
