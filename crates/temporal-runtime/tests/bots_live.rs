@@ -1433,3 +1433,129 @@ async fn bots_live_program_waiting_on_people_defers_its_delivery() -> anyhow::Re
     })
     .await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_superseding_trigger_cancels_a_waiting_program_run() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, _client| async move {
+        let profile_id = ProfileId::new(unique("bots-live-asking"));
+        api.create_profile(ProfileCreateParams {
+            profile: asking_program_input(&profile_id),
+        })
+        .await?;
+        let trigger_id = BotTriggerId::new("hook");
+        let bot_id = create_bot(
+            &api,
+            &profile_id,
+            |_| {},
+            vec![BotTriggerInput {
+                trigger_id: trigger_id.clone(),
+                document: BotTriggerDocument {
+                    spec: BotTriggerSpec::Webhook {
+                        verification: WebhookVerification::Token,
+                        preset: None,
+                    },
+                    filter: None,
+                    route: Some(api::BotTriggerRoute::PerKey {
+                        key: Some("data.key".to_owned()),
+                    }),
+                    coalesce: None,
+                    deliver: Some(api::BotDeliverPolicy {
+                        when_busy: api::BotWhenBusy::Queue,
+                        while_waiting: api::BotWhileWaiting::Supersede,
+                    }),
+                    session_close_after_ms: None,
+                    enabled: true,
+                },
+                pairing_code: None,
+            }],
+        )
+        .await?;
+        let ingest_path = api
+            .read_bot_trigger(api::BotTriggerReadParams {
+                bot_id: bot_id.clone(),
+                trigger_id: trigger_id.clone(),
+            })
+            .await?
+            .result
+            .trigger
+            .ingest_path
+            .expect("webhook ingest path");
+        let token = ingest_path.rsplit('/').next().expect("token").to_owned();
+        let ingest = |note: &'static str| {
+            let api = api.clone();
+            let bot_id = bot_id.clone();
+            let trigger_id = trigger_id.clone();
+            let token = token.clone();
+            async move {
+                let body = serde_json::json!({ "kind": "pr", "key": "a", "note": note });
+                let outcome = api
+                    .ingest_bot_webhook(
+                        bot_id.as_str(),
+                        trigger_id.as_str(),
+                        &token,
+                        Default::default(),
+                        body.to_string().as_bytes(),
+                    )
+                    .await;
+                assert!(
+                    matches!(
+                        outcome,
+                        temporal_runtime::bots::hooks::WebhookIngestOutcome::Admitted { .. }
+                    ),
+                    "{outcome:?}"
+                );
+            }
+        };
+        let keyed = bots::ids::bot_keyed_session_id(&bot_id, "a");
+
+        ingest("one").await;
+        let first = pending_request(&api, &keyed).await?;
+        assert_eq!(first.ask, "Act on one?");
+        wait_for_events(&api, &bot_id, "a deferred delivery", |events| {
+            events
+                .iter()
+                .any(|event| event.outcome == Some(BotEventOutcome::Deferred))
+        })
+        .await?;
+
+        // A new event for the key replaces the run waiting on its question.
+        ingest("two").await;
+        let events = wait_for_events(&api, &bot_id, "the superseded delivery", |events| {
+            events
+                .iter()
+                .any(|event| event.seq == 1 && event.outcome == Some(BotEventOutcome::Archived))
+        })
+        .await?;
+        assert_eq!(
+            event_seq(&events, 1).outcome_detail.as_deref(),
+            Some("superseded by a later event")
+        );
+        let second = pending_request(&api, &keyed).await?;
+        assert_eq!(second.ask, "Act on two?");
+        let withdrawn = api
+            .read_inbox_request(api::InboxRequestReadParams {
+                request_id: first.request_id,
+            })
+            .await?
+            .result
+            .request;
+        assert_eq!(withdrawn.status, api::InputRequestStatus::Cancelled);
+
+        api.answer_inbox_request(api::InboxRequestAnswerParams {
+            request_id: second.request_id,
+            approved: true,
+            value: None,
+            comment: None,
+        })
+        .await?;
+        wait_for_events(&api, &bot_id, "the second verdict", |events| {
+            events
+                .iter()
+                .any(|event| event.seq == 2 && event.outcome == Some(BotEventOutcome::Handled))
+        })
+        .await?;
+        Ok(())
+    })
+    .await
+}

@@ -1178,6 +1178,7 @@ function PollRowDetail({ trigger }: { trigger: PollTrigger }) {
         {trigger.coalesce &&
           ` · batches ≤${trigger.coalesce.maxCount} over ${Math.round(trigger.coalesce.debounceMs / 1000)}s`}
         {trigger.deliver && trigger.deliver.whenBusy !== "queue" && ` · busy: ${trigger.deliver.whenBusy}`}
+        {trigger.deliver?.whileWaiting === "supersede" && " · replaces waiting runs"}
       </p>
       <p className="mt-1 text-muted-foreground">
         {stateCursor == null
@@ -1234,6 +1235,7 @@ function WebhookRowDetail({ trigger, manage }: { trigger: WebhookTrigger; manage
         {trigger.coalesce &&
           ` · batches ≤${trigger.coalesce.maxCount} over ${Math.round(trigger.coalesce.debounceMs / 1000)}s`}
         {trigger.deliver && trigger.deliver.whenBusy !== "queue" && ` · busy: ${trigger.deliver.whenBusy}`}
+        {trigger.deliver?.whileWaiting === "supersede" && " · replaces waiting runs"}
       </p>
       {trigger.filter && (
         <p className="mt-1 line-clamp-2 text-muted-foreground wrap-anywhere">
@@ -1249,6 +1251,8 @@ export interface DeliveryFormState {
   routeKey: string;
   filter: string;
   whenBusy: "queue" | "steer" | "append";
+  /** A run that waits on people: queue behind it, or cancel it for this event. */
+  whileWaiting: "queue" | "supersede";
   debounceSeconds: string;
   maxWaitSeconds: string;
   maxCount: string;
@@ -1319,6 +1323,7 @@ function ChatRowDetail({
         {trigger.coalesce &&
           ` · batches ≤${trigger.coalesce.maxCount} over ${trigger.coalesce.debounceMs / 1000}s`}
         {trigger.deliver && trigger.deliver.whenBusy !== "queue" && ` · busy: ${trigger.deliver.whenBusy}`}
+        {trigger.deliver?.whileWaiting === "supersede" && " · replaces waiting runs"}
       </p>
       {!paired ? (
         <p className="mt-1 text-muted-foreground">Open: any conversation on the account connects without pairing.</p>
@@ -1660,6 +1665,7 @@ export const defaultDeliveryForm: DeliveryFormState = {
   routeKey: "",
   filter: "",
   whenBusy: "queue",
+  whileWaiting: "queue",
   debounceSeconds: "",
   maxWaitSeconds: "",
   maxCount: "",
@@ -1694,6 +1700,7 @@ function deliveryFormFromTrigger(trigger: BotTriggerView): DeliveryFormState {
     routeKey: trigger.route?.policy === "perKey" ? (trigger.route.key ?? "") : "",
     filter: trigger.filter ?? "",
     whenBusy: trigger.deliver?.whenBusy ?? "queue",
+    whileWaiting: trigger.deliver?.whileWaiting ?? "queue",
     debounceSeconds: trigger.coalesce ? String(trigger.coalesce.debounceMs / 1000) : "",
     maxWaitSeconds: trigger.coalesce ? String(trigger.coalesce.maxWaitMs / 1000) : "",
     maxCount: trigger.coalesce ? String(trigger.coalesce.maxCount) : "",
@@ -1764,7 +1771,10 @@ export function deliveryPayload(form: DeliveryFormState) {
           maxCount: Math.round(Number(form.maxCount.trim() || "50")),
         }
       : null,
-    deliver: form.whenBusy === "queue" ? null : { whenBusy: form.whenBusy },
+    deliver:
+      form.whenBusy === "queue" && form.whileWaiting === "queue"
+        ? null
+        : { whenBusy: form.whenBusy, whileWaiting: form.whileWaiting },
     sessionCloseAfterMs: form.routePolicy === "bot" ? null : sessionCloseAfterMs(form),
   };
 }
@@ -2159,6 +2169,23 @@ function DeliveryFieldsBody<T extends DeliveryFormState>({
             <SelectItem value="queue">Queue a run for when it finishes</SelectItem>
             <SelectItem value="steer">Steer the active run</SelectItem>
             <SelectItem value="append">Append as context only (never runs)</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field>
+        <FieldLabel>While a run waits for an answer</FieldLabel>
+        <Select
+          value={form.whileWaiting}
+          onValueChange={(value) =>
+            value && setForm({ ...form, whileWaiting: value as DeliveryFormState["whileWaiting"] })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="queue">Queue a run for when it finishes</SelectItem>
+            <SelectItem value="supersede">Replace it: cancel the waiting run and its question</SelectItem>
           </SelectContent>
         </Select>
       </Field>

@@ -49,6 +49,15 @@ pub struct BotDelivery {
 }
 
 impl BotDelivery {
+    /// Whether this delivery cancels a run that waits on people instead of
+    /// queueing behind it: any of its events came from a trigger set to
+    /// supersede.
+    pub fn supersedes_waiting(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| event.while_waiting == Some(api::BotWhileWaiting::Supersede))
+    }
+
     pub fn single(event: BotEvent) -> Self {
         Self {
             id: event.id.clone(),
@@ -256,6 +265,10 @@ pub struct WaitingRun {
     pub delivery: BotDelivery,
     pub run_id: String,
     pub waiting_since_ms: i64,
+    /// A later delivery from a superseding trigger asked for the run to be
+    /// cancelled; its terminal archives this delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// A pushed `bot_*` invocation waiting for its lane.
@@ -268,6 +281,9 @@ pub struct PendingInvocation {
 /// What dispatch decided for one pending delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchAction {
+    /// The target's run waits on people and a superseding delivery is
+    /// pending for it: cancel the run.
+    Supersede { target: String, run_id: String },
     /// The target was free: the delivery owns the session's lane.
     Lane {
         delivery: BotDelivery,
@@ -871,7 +887,10 @@ impl ControllerState {
         }
         self.pending_deliveries.iter().any(|delivery| {
             let target = self.target_of(delivery);
-            if self.rotation_requests.contains(&target) || self.waiting_runs.contains_key(&target) {
+            if let Some(waiting) = self.waiting_runs.get(&target) {
+                return waiting.superseded_by.is_none() && delivery.supersedes_waiting();
+            }
+            if self.rotation_requests.contains(&target) {
                 return false;
             }
             match self.active_by_session.get(&target) {
@@ -896,8 +915,21 @@ impl ControllerState {
                 break;
             }
             let target = self.target_of(&self.pending_deliveries[index]);
-            // A session whose run waits on people is busy until it ends.
-            if self.rotation_requests.contains(&target) || self.waiting_runs.contains_key(&target) {
+            // A session whose run waits on people is busy until it ends; a
+            // superseding delivery ends it sooner.
+            if let Some(waiting) = self.waiting_runs.get_mut(&target) {
+                let delivery = &self.pending_deliveries[index];
+                if waiting.superseded_by.is_none() && delivery.supersedes_waiting() {
+                    waiting.superseded_by = Some(delivery.id.clone());
+                    actions.push(DispatchAction::Supersede {
+                        target: target.clone(),
+                        run_id: waiting.run_id.clone(),
+                    });
+                }
+                index += 1;
+                continue;
+            }
+            if self.rotation_requests.contains(&target) {
                 index += 1;
                 continue;
             }
@@ -1015,6 +1047,7 @@ impl ControllerState {
                     delivery: lane.delivery,
                     run_id: run_id.to_owned(),
                     waiting_since_ms: now_ms,
+                    superseded_by: None,
                 },
             );
             self.touch_session(session_id, now_ms);
@@ -1565,6 +1598,7 @@ mod tests {
             session: None,
             coalesce: None,
             when_busy: None,
+            while_waiting: None,
             hops: 0,
             reply: false,
             media: Vec::new(),
@@ -2118,6 +2152,35 @@ mod tests {
         assert_eq!(settled.delivery.id, "e1");
         assert!(state.dispatchable(NOW + 4));
         assert_eq!(state.dispatch(NOW + 4).len(), 1);
+    }
+
+    #[test]
+    fn a_superseding_delivery_cancels_a_waiting_run_once() {
+        let mut state = ready(fresh());
+        state.accept_event(event("e1", 1), NOW).unwrap();
+        state.dispatch(NOW);
+        assert!(state.attach_waiting(&ids::delivery_terminal_token("e1")));
+        state.park_waiting_lane("bot:v1:triage", "run_7", NOW);
+
+        let mut superseding = event("e2", 2);
+        superseding.while_waiting = Some(api::BotWhileWaiting::Supersede);
+        state.accept_event(superseding, NOW + 1).unwrap();
+        assert!(state.dispatchable(NOW + 1));
+        assert_eq!(
+            state.dispatch(NOW + 1),
+            vec![DispatchAction::Supersede {
+                target: "bot:v1:triage".to_owned(),
+                run_id: "run_7".to_owned(),
+            }]
+        );
+        assert_eq!(
+            state.waiting_runs["bot:v1:triage"].superseded_by.as_deref(),
+            Some("e2")
+        );
+        // One cancellation is enough; the delivery waits for the terminal.
+        assert!(!state.dispatchable(NOW + 2));
+        assert!(state.dispatch(NOW + 2).is_empty());
+        assert_eq!(state.pending_deliveries.len(), 1);
     }
 
     // ── Outcome ladder ──────────────────────────────────────────────────

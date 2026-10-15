@@ -256,6 +256,9 @@ async fn run_controller(ctx: &mut Ctx) -> WorkflowResult<()> {
             let now = now_ms(ctx);
             for action in ctx.state_mut(|state| state.dispatch(now)) {
                 lanes.push(match action {
+                    DispatchAction::Supersede { target, run_id } => {
+                        Box::pin(lanes::supersede_waiting_run(ctx.clone(), target, run_id))
+                    }
                     DispatchAction::Lane { delivery, target } => {
                         Box::pin(lanes::run_delivery(ctx.clone(), delivery, target))
                     }

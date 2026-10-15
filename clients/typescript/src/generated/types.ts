@@ -1096,6 +1096,14 @@ export type BotTriggerView = {
  */
 export type BotWhenBusy = "queue" | "steer" | "append";
 /**
+ * What a delivery does when its session's run waits on people (a program
+ * waiting for an answer).
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "BotWhileWaiting".
+ */
+export type BotWhileWaiting = "queue" | "supersede";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "BotTriggerDisabledReason".
  */
@@ -3643,6 +3651,7 @@ export interface PollCursorState {
  */
 export interface BotDeliverPolicy {
   whenBusy?: BotWhenBusy & string;
+  whileWaiting?: BotWhileWaiting & string;
 }
 /**
  * Leased credential for an HTTP poll source; the value never appears in

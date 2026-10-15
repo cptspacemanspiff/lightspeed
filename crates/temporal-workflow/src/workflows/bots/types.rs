@@ -134,6 +134,13 @@ pub enum BotStartRunResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotCancelRunRequest {
+    pub universe_id: Uuid,
+    pub session_id: String,
+    pub run_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BotSteerRunRequest {
     pub universe_id: Uuid,
     pub session_id: String,

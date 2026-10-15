@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   PAIRING_ALPHABET,
   chatSpecPayload,
+  defaultDeliveryForm,
   defaultTriggerForms,
+  deliveryPayload,
   inboxBotOptionIds,
   inboxSelectionSpec,
   mintPairingCode,
@@ -109,5 +111,19 @@ describe("shared trigger draft summaries", () => {
       intervalMinutes: "15",
     };
     expect(triggerDraftSummary("poll", forms)).toBe("Checks https://example.test/issues every 15 min");
+  });
+});
+
+describe("delivery policy", () => {
+  it("sends a policy only when it differs from queueing", () => {
+    expect(deliveryPayload(defaultDeliveryForm).deliver).toBeNull();
+    expect(deliveryPayload({ ...defaultDeliveryForm, whileWaiting: "supersede" }).deliver).toEqual({
+      whenBusy: "queue",
+      whileWaiting: "supersede",
+    });
+    expect(deliveryPayload({ ...defaultDeliveryForm, whenBusy: "steer" }).deliver).toEqual({
+      whenBusy: "steer",
+      whileWaiting: "queue",
+    });
   });
 });

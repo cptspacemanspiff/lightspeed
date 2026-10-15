@@ -1495,6 +1495,7 @@ mod tests {
             session: None,
             coalesce: None,
             when_busy: None,
+            while_waiting: None,
             hops: 0,
             reply: false,
             media: Vec::new(),

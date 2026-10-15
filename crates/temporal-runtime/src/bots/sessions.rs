@@ -15,7 +15,7 @@ use api::{
     ContextAppendParams, ContextAppendResponse, ContextAppendStatus, EventCursor,
     InlineAgentProfile, InputItem, ManagedSessionStartParams, ManagedSessionWorkflowToolsInput,
     ProfileApplyParams, ProfileDocument, ProfileInstructions, ProfileSource, RunStartParams,
-    RunStartSource, RunStatus, RunSteerParams, RunTerminalNotificationInput, SessionCloseParams,
+    RunCancelParams, RunStartSource, RunStatus, RunSteerParams, RunTerminalNotificationInput, SessionCloseParams,
     SessionEventKindView, SessionEventView, SessionEventsReadParams, SessionLifecycleStatus,
     SessionListParams, SessionReadParams, SessionRenameParams, SessionStatus, SessionSummaryView,
     SessionView, WorkflowEndpointInput, WorkflowToolDeclarationInput,
@@ -667,6 +667,30 @@ async fn program_input(
         })?);
     }
     Ok(program_delivery_input(events, documents))
+}
+
+/// Cancel a run the controller superseded. A run that already ended (or
+/// is already cancelling) needs nothing more: its terminal settles the
+/// delivery either way.
+pub async fn cancel_run(api: &GatewayAgentApi, request: BotCancelRunRequest) -> Result<(), ActivityError> {
+    match api
+        .cancel_run(RunCancelParams {
+            session_id: request.session_id,
+            run_id: request.run_id,
+        })
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind,
+                AgentApiErrorKind::Rejected | AgentApiErrorKind::NotFound | AgentApiErrorKind::Conflict
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(activity_error("cancel run", error)),
+    }
 }
 
 pub async fn steer_run(

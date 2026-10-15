@@ -97,6 +97,10 @@ pub struct BotEvent {
     pub coalesce: Option<BotCoalesceParams>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_busy: Option<api::BotWhenBusy>,
+    /// From the admitting trigger: whether this event supersedes a run
+    /// that waits on people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub while_waiting: Option<api::BotWhileWaiting>,
     /// Federation hop count carried into the delivery so emits from it can
     /// be bounded.
     #[serde(default)]
