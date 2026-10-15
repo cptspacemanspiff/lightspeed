@@ -20,8 +20,6 @@
     const AsyncFunction = (async function () {}).constructor;
     const reflectApply = Reflect.apply;
     const stringSplit = String.prototype.split;
-    const stringIndexOf = String.prototype.indexOf;
-    const stringSlice = String.prototype.slice;
     const arraySlice = Array.prototype.slice;
     const floor = Math.floor;
     const pending = create(null);
@@ -184,28 +182,18 @@
     }
     function buildEnv() {
         const env = create(null);
-        const composites = create(null);
         for (let i = 0; i < catalog.length; i++) {
             const binding = catalog[i];
-            const hash = reflectApply(stringIndexOf, binding.name, ["#"]);
-            if (hash >= 0) {
-                const contract = reflectApply(stringSlice, binding.name, [0, hash]);
-                if (!hasOwn(composites, contract)) composites[contract] = create(null);
-                composites[contract][reflectApply(stringSlice, binding.name, [hash + 1])] = binding.binding_id;
+            const id = binding.binding_id;
+            if (binding.name === "time.sleep") {
+                sleepId = id;
+                place(env, binding.name, freeze(async function (args) {
+                    return await sleep(args);
+                }));
                 continue;
             }
-            const id = binding.binding_id;
             place(env, binding.name, freeze(async function (args) {
                 return await invoke(id, args, "").promise;
-            }));
-        }
-        const names = keys(composites);
-        for (let i = 0; i < names.length; i++) {
-            const name = names[i];
-            if (name !== "time.sleep") throw new NativeError("Unsupported composite contract " + name);
-            sleepParts = composites[name];
-            place(env, name, freeze(async function (args) {
-                return await sleep(args);
             }));
         }
         return deepFreeze(env);
@@ -232,27 +220,14 @@
         return freeze(node);
     }
 
-    // `time.sleep` waits on a timer promise: a durable wait whose two calls
-    // are recorded like any other, so replay returns the same values.
-    let sleepParts = null;
+    // `time.sleep` is one durable call that completes once its delay has
+    // elapsed; the clock is clamped to its deadline.
+    let sleepId = null;
     async function sleep(args) {
-        if (sleepParts === null) throw new NativeError("Waiting requires the time.sleep contract");
-        const request = copy(args);
-        if (request === null || typeof request !== "object" || isArray(request)
-            || keys(request).length !== 1 || !hasOwn(request, "ms")
-            || typeof request.ms !== "number" || !(request.ms >= 0) || request.ms % 1 !== 0) {
-            throw new NativeTypeError("time.sleep takes { ms } with a non-negative integer delay");
-        }
-        const timer = await invoke(sleepParts.timer, { ms: request.ms }, "").promise;
-        const waited = await invoke(sleepParts.await, { promises: [timer.promise], mode: "all" }, "").promise;
-        const result = waited.results && waited.results[0];
-        if (!result || result.status !== "resolved") {
-            const error = new NativeError("time.sleep did not complete: " + (result ? result.status : "no result"));
-            define(error, "kind", { value: "sleep_" + (result ? result.status : "unknown"), enumerable: true });
-            throw error;
-        }
-        advance(timer.fire_at_ms);
-        return { fire_at_ms: timer.fire_at_ms };
+        if (sleepId === null) throw new NativeError("Waiting requires the time.sleep contract");
+        const slept = await invoke(sleepId, args, "").promise;
+        advance(slept.fire_at_ms);
+        return slept;
     }
 
     // A seeded small fast counter generator (sfc32): every attempt of the
@@ -405,7 +380,7 @@
         const timers = create(null);
         function schedule(callback, ms, args, repeat) {
             if (typeof callback !== "function") throw new NativeTypeError("Timer callback must be a function");
-            if (sleepParts === null) throw new NativeError("Timers require the time.sleep contract");
+            if (sleepId === null) throw new NativeError("Timers require the time.sleep contract");
             let delay = +ms;
             if (!(delay >= 0)) delay = 0;
             delay = floor(delay);

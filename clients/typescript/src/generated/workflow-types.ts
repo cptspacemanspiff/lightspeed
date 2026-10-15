@@ -680,9 +680,7 @@ export interface CodeToolScopeReport {
   execution_id: string;
 }
 /**
- * A scope binding's place in a contract. A contract is usually one tool;
- * a composite contract (such as `time.sleep`, a timer and an await) binds
- * each of its tools under a named part.
+ * The contract a scope binding serves.
  *
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "ContractBinding".
@@ -690,7 +688,6 @@ export interface CodeToolScopeReport {
 export interface ContractBinding {
   contract: string;
   digest: string;
-  part?: string | null;
 }
 /**
  * Read an authoritative snapshot, including after a runner loses its waiters.

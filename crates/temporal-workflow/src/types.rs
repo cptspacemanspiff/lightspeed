@@ -374,6 +374,10 @@ pub struct AwaitMaterializationRequest {
     pub outcome: AwaitOutcome,
     #[serde(default)]
     pub results: Vec<AwaitPromiseResult>,
+    /// A durable sleep's wake: its result is the sleep's own
+    /// `{ fire_at_ms }`, not an await snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_until_ms: Option<u64>,
 }
 
 pub use harness::AwaitOutcome;

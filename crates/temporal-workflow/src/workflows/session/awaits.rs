@@ -96,7 +96,11 @@ pub(super) async fn process_satisfied_await(
         .any(|result| result.status == "resolved" && result.payload_ref.is_some());
     let resume_output = match &parked.suspension {
         harness::ToolBatchSuspension::AwaitTool { .. } => {
-            let request = AwaitMaterializationRequest { outcome, results };
+            let request = AwaitMaterializationRequest {
+                outcome,
+                results,
+                sleep_until_ms: None,
+            };
             let materialized = ctx
                 .execute_activity(
                     WorkflowActivities::materialize_await_result,

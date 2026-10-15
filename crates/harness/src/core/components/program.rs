@@ -138,31 +138,18 @@ impl ContractPin {
     }
 }
 
-/// A scope binding's place in a contract. A contract is usually one tool;
-/// a composite contract (such as `time.sleep`, a timer and an await) binds
-/// each of its tools under a named part.
+/// The contract a scope binding serves.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
 pub struct ContractBinding {
     pub contract: String,
     pub digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub part: Option<String>,
 }
 
 impl ContractBinding {
     pub fn validate(&self) -> Result<(), DomainError> {
         validate_contract_name(&self.contract)?;
-        validate_contract_digest(&self.digest)?;
-        if let Some(part) = &self.part
-            && !is_contract_segment(part)
-        {
-            return Err(DomainError::InvariantViolation(format!(
-                "contract {} has an invalid part name",
-                self.contract
-            )));
-        }
-        Ok(())
+        validate_contract_digest(&self.digest)
     }
 }
 

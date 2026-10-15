@@ -874,19 +874,13 @@
       "type": "object"
     },
     "ContractBinding": {
-      "description": "A scope binding's place in a contract. A contract is usually one tool;\na composite contract (such as `time.sleep`, a timer and an await) binds\neach of its tools under a named part.",
+      "description": "The contract a scope binding serves.",
       "properties": {
         "contract": {
           "type": "string"
         },
         "digest": {
           "type": "string"
-        },
-        "part": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [

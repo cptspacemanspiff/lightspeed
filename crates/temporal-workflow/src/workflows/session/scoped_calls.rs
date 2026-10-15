@@ -656,8 +656,9 @@ async fn reconcile_waits(ctx: &mut WorkflowContext<AgentSessionWorkflow>) -> any
             .flat_map(|scope| {
                 scope.calls.values().filter_map(|call| {
                     if let CodeToolCallStatus::Waiting { suspension } = &call.status {
+                        let sleep = call.spec.tool_id.as_str() == harness::TIME_SLEEP_TOOL_ID;
                         harness::code_tool_wake(&state.core_state, &call.spec.origin, now)
-                            .map(|wake| (call.spec.origin.clone(), suspension.clone(), wake))
+                            .map(|wake| (call.spec.origin.clone(), suspension.clone(), wake, sleep))
                     } else {
                         None
                     }
@@ -665,11 +666,28 @@ async fn reconcile_waits(ctx: &mut WorkflowContext<AgentSessionWorkflow>) -> any
             })
             .collect::<Vec<_>>()
     });
-    for (origin, suspension, wake) in ready {
+    for (origin, suspension, wake, sleep) in ready {
         let results =
             ctx.state(|state| awaits::promise_snapshot(suspension.spec(), &state.core_state));
         let result = match &suspension {
-            harness::ToolBatchSuspension::AwaitTool { call_id, .. } => {
+            // A sleep cut short by its scope's cancellation is cancelled.
+            harness::ToolBatchSuspension::AwaitTool { call_id, .. }
+                if sleep && wake == harness::WakeReason::Cancelled =>
+            {
+                harness::ToolInvocationResult {
+                    call_id: call_id.clone(),
+                    status: ToolCallStatus::Cancelled,
+                    output_ref: None,
+                    error_ref: None,
+                    effects: vec![],
+                    model_visible_context_entries: vec![],
+                    attachments: vec![],
+                    duration_ms: None,
+                    output_bytes: None,
+                    truncated: false,
+                }
+            }
+            harness::ToolBatchSuspension::AwaitTool { call_id, spec } => {
                 let materialized = ctx
                     .execute_activity(
                         WorkflowActivities::materialize_await_result,
@@ -680,6 +698,7 @@ async fn reconcile_waits(ctx: &mut WorkflowContext<AgentSessionWorkflow>) -> any
                                 harness::WakeReason::Terminal => crate::AwaitOutcome::Terminal,
                             },
                             results,
+                            sleep_until_ms: spec.deadline_at_ms.filter(|_| sleep),
                         },
                         crate::activity_options(),
                     )

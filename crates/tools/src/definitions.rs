@@ -196,14 +196,12 @@ pub fn resolve(
                 "additionalProperties": false
             }),
         ),
+        crate::concurrency::TIME_SLEEP_TOOL_ID => crate::concurrency::time_sleep_definition(),
         name if name.starts_with("concurrency.") => {
-            concurrency_tool_definitions(&ConcurrencyToolsetConfig {
-                enabled: true,
-                timer: true,
-            })?
-            .into_iter()
-            .find(|definition| format!("concurrency.{}", definition.name) == name)
-            .ok_or_else(|| unknown(id))?
+            concurrency_tool_definitions(&ConcurrencyToolsetConfig::timer())?
+                .into_iter()
+                .find(|definition| format!("concurrency.{}", definition.name) == name)
+                .ok_or_else(|| unknown(id))?
         }
         name if name.starts_with("environment.") => environment_control_tool_definitions(true)?
             .into_iter()

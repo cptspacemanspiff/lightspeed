@@ -178,6 +178,37 @@ async fn run_failure(
     }
 }
 
+/// The tool ids of every scoped call admitted on the session, in log order.
+async fn scoped_call_tools(
+    store: &store_pg::PgStore,
+    session_id: &SessionId,
+) -> anyhow::Result<Vec<String>> {
+    let mut after = None;
+    let mut tools = Vec::new();
+    loop {
+        let page = store
+            .read_after(harness::storage::ReadSessionEvents {
+                session_id: session_id.clone(),
+                after,
+                limit: 1000,
+            })
+            .await?;
+        for entry in page.entries {
+            if let harness::CoreAgentEvent::CodeTool(harness::CodeToolEvent::CallAdmitted {
+                call,
+                ..
+            }) = harness::CoreAgentCodec.decode_event(&entry.event)?
+            {
+                tools.push(call.tool_id.as_str().to_owned());
+            }
+        }
+        if page.complete {
+            return Ok(tools);
+        }
+        after = page.next_after;
+    }
+}
+
 async fn read_json(store: &store_pg::PgStore, reference: &str) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(
         &store.read_bytes(&BlobRef::parse(reference)?).await?,
@@ -296,6 +327,11 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 assert_eq!(
                     read_json(&store, &output.content_ref).await?,
                     json!({"claim": "x", "slept": 3, "clock": true, "hasOnlyItsContracts": "time"})
+                );
+                // Three sleeps and a timer: each wait is one recorded call.
+                assert_eq!(
+                    scoped_call_tools(&store, &session_id).await?,
+                    vec!["time.sleep"; 4]
                 );
 
                 // A thrown program fails the run with a program failure whose

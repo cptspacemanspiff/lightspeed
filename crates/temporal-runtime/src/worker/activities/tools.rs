@@ -117,8 +117,8 @@ pub(super) async fn prepare_code_tool_scope(
     Ok(temporal_workflow::CodeToolPrepareScopeActivityResult { bindings })
 }
 
-/// Bind a program scope: one handle per part of every canonical contract
-/// the session's tools serve. The model plays no part, so the same tools
+/// Bind a program scope: one handle per canonical contract the session's
+/// tools serve. The model plays no part, so the same tools
 /// always bind the same contracts at the same digests.
 async fn prepare_contract_scope(
     deps: &ToolActivityDeps,
@@ -129,19 +129,17 @@ async fn prepare_contract_scope(
         .map_err(activity_error)?;
     let mut bindings = BTreeMap::new();
     for contract in &contracts {
-        for part in &contract.parts {
-            let binding = contract.binding(part);
-            let input = serde_json::to_vec(&(&part.tool_id, &part.tool_name, &binding))
-                .map_err(activity_error)?;
-            bindings.insert(
-                format!("binding:{}", harness::BlobRef::from_bytes(&input)),
-                harness::CodeToolBinding {
-                    tool_id: part.tool_id.clone(),
-                    tool_name: part.tool_name.clone(),
-                    contract: Some(binding),
-                },
-            );
-        }
+        let binding = contract.binding();
+        let input = serde_json::to_vec(&(&contract.tool_id, &contract.tool_name, &binding))
+            .map_err(activity_error)?;
+        bindings.insert(
+            format!("binding:{}", harness::BlobRef::from_bytes(&input)),
+            harness::CodeToolBinding {
+                tool_id: contract.tool_id.clone(),
+                tool_name: contract.tool_name.clone(),
+                contract: Some(binding),
+            },
+        );
     }
     Ok(temporal_workflow::CodeToolPrepareScopeActivityResult { bindings })
 }
@@ -607,11 +605,12 @@ pub(super) async fn invoke_code_tool(
         }
     }
     let special = request.call.workflow_tool.is_some()
-        || request
-            .call
-            .tool_id
-            .as_ref()
-            .is_some_and(|id| id.as_str() == "concurrency.await");
+        || request.call.tool_id.as_ref().is_some_and(|id| {
+            matches!(
+                id.as_str(),
+                "concurrency.await" | harness::TIME_SLEEP_TOOL_ID
+            )
+        });
     if !special || request.call.remote_mcp.is_some() {
         return Ok(
             match invoke_call(
@@ -1165,7 +1164,7 @@ mod tests {
                 "vfs.read_file",
                 "web.fetch",
                 "web.search",
-                "concurrency.sleep",
+                "time.sleep",
                 "concurrency.await",
                 "mcp.call",
             ]
@@ -1202,21 +1201,16 @@ mod tests {
             .values()
             .map(|binding| {
                 let contract = binding.contract.as_ref().expect("contract binding");
-                (
-                    contract.contract.as_str(),
-                    contract.part.as_deref(),
-                    binding.tool_name.as_str(),
-                )
+                (contract.contract.as_str(), binding.tool_name.as_str())
             })
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             bound,
             std::collections::BTreeSet::from([
-                ("promise.await", None, "await"),
-                ("time.sleep", Some("await"), "await"),
-                ("time.sleep", Some("timer"), "sleep"),
-                ("vfs.read_file", None, "vfs_read_file"),
-                ("web.fetch", None, "web_fetch"),
+                ("promise.await", "await"),
+                ("time.sleep", "time_sleep"),
+                ("vfs.read_file", "vfs_read_file"),
+                ("web.fetch", "web_fetch"),
             ])
         );
     }

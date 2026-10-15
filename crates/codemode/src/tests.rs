@@ -1054,7 +1054,7 @@ async fn a_program_needs_a_default_export_with_run_and_compiles_before_effects()
     let (requests, report) = run_program(
         program_input(
             "setTimeout(() => {}, 1); export default { async run() { return 1 } ",
-            &["time.sleep#timer", "time.sleep#await"],
+            &["time.sleep"],
             SEED,
         ),
         |_| (Ok(Value::Null), None),
@@ -1188,24 +1188,20 @@ async fn programs_cannot_generate_code_from_strings() {
     );
 }
 
-fn sleep_outcome(
-    request: &HostRequest,
-    fire_at_ms: u64,
-) -> (Result<Value, HostError>, Option<u64>) {
-    if request.binding_id == "opaque-time.sleep#timer" {
-        let promise = format!("promise_{}", request.request_id.trim_start_matches("call-"));
-        (
-            Ok(json!({"promise": promise, "fire_at_ms": fire_at_ms})),
+/// A durable sleep as the host records it: one call that completes with its
+/// deadline. The recorded completion time here is earlier than the deadline,
+/// so the clock's clamp to the deadline is visible.
+fn sleep_outcome(request: &HostRequest) -> (Result<Value, HostError>, Option<u64>) {
+    match request.arguments["ms"].as_u64() {
+        Some(ms) => (Ok(json!({"fire_at_ms": 1_000 + ms})), Some(1_000)),
+        None => (
+            Err(HostError {
+                kind: "invalid_arguments".into(),
+                message: "ms must be a non-negative integer".into(),
+                value: None,
+            }),
             Some(1_000),
-        )
-    } else {
-        let promise = request.arguments["promises"][0].clone();
-        (
-            Ok(
-                json!({"outcome": "completed", "results": [{"promise_id": promise, "status": "resolved"}]}),
-            ),
-            Some(fire_at_ms + 2),
-        )
+        ),
     }
 }
 
@@ -1225,34 +1221,34 @@ async fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
             }
         };
     "#;
-    let (requests, report) = run_program(
-        program_input(source, &["time.sleep#timer", "time.sleep#await"], SEED),
-        |request| {
-            let ms = request.arguments["ms"].as_u64().unwrap_or(0);
-            sleep_outcome(request, 1_000 + ms)
-        },
-    )
-    .await;
+    let (requests, report) =
+        run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome).await;
     assert_eq!(report.error, None);
+    // Each wait, timer or explicit sleep, is exactly one recorded call.
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.binding_id == "opaque-time.sleep")
+    );
     assert_eq!(
         requests
             .iter()
-            .map(|request| request.binding_id.trim_start_matches("opaque-time.sleep#"))
+            .map(|request| request.arguments.clone())
             .collect::<Vec<_>>(),
-        ["timer", "timer", "await", "await", "timer", "await"]
-    );
-    assert_eq!(requests[0].arguments, json!({"ms": 5}));
-    assert_eq!(
-        requests[2].arguments,
-        json!({"promises": ["promise_1"], "mode": "all"})
+        [
+            json!({"ms": 5}),
+            json!({"ms": 20}),
+            json!({"ms": 30}),
+            json!({"ms": -1})
+        ]
     );
     assert_eq!(
         report.return_value,
         Some(json!({
             "order": ["fired"],
             "slept": {"fire_at_ms": 1_030},
-            // The await completed at 1_002 here; the clock is clamped to the
-            // later timer deadline.
+            // The sleep was recorded at 1_000; the clock is clamped to its
+            // later deadline.
             "now": 1_030,
             "rejected": true,
         }))
@@ -1269,11 +1265,8 @@ async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
             }
         };
     "#;
-    let (_, report) = run_program(
-        program_input(source, &["time.sleep#timer", "time.sleep#await"], SEED),
-        |request| sleep_outcome(request, 1_001),
-    )
-    .await;
+    let (_, report) =
+        run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome).await;
     assert_eq!(report.error.unwrap().message, "timer failed");
 
     let (_, report) = run_program(
@@ -1307,12 +1300,8 @@ async fn module_code_cannot_tamper_with_env_construction() {
         };
     "#;
     let (_, report) = run_program(
-        program_input(
-            source,
-            &["web.fetch", "time.sleep#timer", "time.sleep#await"],
-            SEED,
-        ),
-        |request| sleep_outcome(request, 1_001),
+        program_input(source, &["web.fetch", "time.sleep"], SEED),
+        sleep_outcome,
     )
     .await;
     assert_eq!(report.error, None);

@@ -1934,12 +1934,21 @@ impl SessionTools {
                 .await
                 .map(CodeToolCallExecution::Completed);
         }
-        if call
-            .tool_id
-            .as_ref()
-            .is_some_and(|id| id.as_str() == "concurrency.await")
-        {
+        let tool_id = call.tool_id.as_ref().map(|id| id.as_str());
+        if matches!(
+            tool_id,
+            Some("concurrency.await" | harness::TIME_SLEEP_TOOL_ID)
+        ) {
             let prepared = async {
+                if tool_id == Some(harness::TIME_SLEEP_TOOL_ID) {
+                    // A sleep waits in the session for its deadline alone.
+                    let args: SleepArgs = self.read_tool_args(call).await?;
+                    return Ok(harness::AwaitSpec {
+                        promise_ids: Vec::new(),
+                        mode: harness::AwaitMode::All,
+                        deadline_at_ms: Some(now_unix_ms()?.saturating_add(args.ms)),
+                    });
+                }
                 let args: AwaitArgs = self.read_tool_args(call).await?;
                 await_spec_from_args(args, now_unix_ms()?).map_err(io_error)
             }
@@ -1981,10 +1990,12 @@ impl SessionTools {
         // Batch-unit tools never arrive here: the workflow routes batches
         // containing them through the batch activity.
         if call.workflow_tool.is_some()
-            || call
-                .tool_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == "concurrency.await")
+            || call.tool_id.as_ref().is_some_and(|id| {
+                matches!(
+                    id.as_str(),
+                    "concurrency.await" | harness::TIME_SLEEP_TOOL_ID
+                )
+            })
         {
             return failed_result(
                 self.blobs.as_ref(),
