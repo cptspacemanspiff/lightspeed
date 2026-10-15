@@ -397,7 +397,7 @@ pub(super) fn ensure_request(
     BotEnsureSessionRequest {
         universe_id: state.config.universe_id,
         bot_id: state.config.bot_id.clone(),
-        session_id,
+        session_id: session_id.clone(),
         session_key: routed_session.and_then(|session| session.session_key.clone()),
         session_label: routed_session.map(|session| session.label.clone()),
         display_name: Some(display_name),
@@ -411,8 +411,16 @@ pub(super) fn ensure_request(
             workflow_kind: BOT_CONTROLLER_WORKFLOW_KIND.to_owned(),
         },
         tools_ref,
+        previous_generations: bots::ids::previous_generation_ids(
+            &session_id,
+            PROGRAM_CONTEXT_GENERATIONS,
+        ),
     }
 }
+
+/// How many earlier generations a new session looks back through for the
+/// newest program context of its key.
+const PROGRAM_CONTEXT_GENERATIONS: u32 = 4;
 
 // ── Emissions ───────────────────────────────────────────────────────────────
 

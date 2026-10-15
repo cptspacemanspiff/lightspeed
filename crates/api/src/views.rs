@@ -531,6 +531,9 @@ pub enum ContextEntryKindView {
     McpApprovalResponse {
         approve: bool,
     },
+    /// A program session's program context: the JSON value a completed run
+    /// kept for later runs. The newest is what the next run reads.
+    ProgramState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -650,6 +653,10 @@ pub enum ContextEntrySourceView {
     },
     Runtime {
         label: String,
+    },
+    /// The program context a completed program run kept.
+    ProgramRun {
+        run_id: String,
     },
 }
 

@@ -103,5 +103,5 @@ is distinct from a successfully admitted tool returning a failed outcome.
 
 ## Schema inventory
 
-The schema bundle contains 75 definitions. Its public roots
+The schema bundle contains 76 definitions. Its public roots
 are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.

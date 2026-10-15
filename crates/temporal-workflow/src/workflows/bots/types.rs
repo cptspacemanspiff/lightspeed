@@ -44,6 +44,10 @@ pub struct BotEnsureSessionRequest {
     /// (a chat conversation's `message_*` tools).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_ref: Option<String>,
+    /// Earlier generations of this session's key, newest first. A new
+    /// program session starts from the newest program context among them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_generations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

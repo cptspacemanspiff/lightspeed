@@ -216,6 +216,9 @@ export type ContextEntryKindView =
   | {
       approve: boolean;
       type: "mcpApprovalResponse";
+    }
+  | {
+      type: "programState";
     };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -265,6 +268,10 @@ export type ContextEntrySourceView =
   | {
       label: string;
       type: "runtime";
+    }
+  | {
+      runId: string;
+      type: "programRun";
     };
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -6232,6 +6239,12 @@ export interface ProgramApprovals {
  * via the `definition` "ProgramLimitsInput".
  */
 export interface ProgramLimitsInput {
+  /**
+   * How many runs' program contexts (`ctx.setContext`) stay in the
+   * session's active context; older ones leave it as runs complete. The
+   * session log keeps them all. 10 when omitted.
+   */
+  contextRetained?: number | null;
   /**
    * How long a human-input request waits when the call sets no deadline,
    * within the deployment's bounds (by default 1 second to 30 days); the

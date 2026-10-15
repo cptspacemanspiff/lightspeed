@@ -758,6 +758,9 @@ async fn materialize_message(
         | ContextEntryKind::McpApprovalResponse { .. } => {
             unreachable!("handled by materialize_messages")
         }
+        ContextEntryKind::ProgramState => Err(LlmAdapterError::InvalidProviderRequest {
+            message: "a program context is never sent to a model".to_owned(),
+        }),
     }
 }
 

@@ -237,6 +237,51 @@ impl GatewayAgentApi {
         Ok(())
     }
 
+    /// Start a fresh program session from its key's program context: the
+    /// newest one among `previous` (earlier sessions of the same key,
+    /// newest first). Does nothing once the session has a context or has
+    /// run, or when no earlier session kept one.
+    pub async fn seed_program_context(
+        &self,
+        session_id: &SessionId,
+        previous: &[String],
+    ) -> Result<(), AgentApiError> {
+        let current = self.load_session_state(session_id).await?;
+        let state = &current.state;
+        if !harness::is_program_session(state)
+            || harness::program_context(state).is_some()
+            || state.runs.active.is_some()
+            || !state.runs.completed.is_empty()
+        {
+            return Ok(());
+        }
+        for previous in previous {
+            let Ok(previous) = SessionId::try_new(previous.clone()) else {
+                continue;
+            };
+            let loaded = match self.load_session_state(&previous).await {
+                Ok(loaded) => loaded,
+                Err(error) if matches!(error.kind, api::AgentApiErrorKind::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(entry) = harness::program_context(&loaded.state) else {
+                continue;
+            };
+            return self
+                .submit_core_command(
+                    session_id,
+                    CoreAgentCommand::SeedProgramContext {
+                        context: harness::ProgramContextInput {
+                            content_ref: entry.content.content_ref.clone(),
+                            preview: entry.preview.clone(),
+                        },
+                    },
+                )
+                .await;
+        }
+        Ok(())
+    }
+
     pub(super) async fn start_session_internal(
         &self,
         params: SessionStartParams,

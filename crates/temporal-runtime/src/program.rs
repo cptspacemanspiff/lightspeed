@@ -32,6 +32,9 @@ use crate::code::{
     cancellable_preparation, engine_limits, host_error, materialize, read_bounded,
 };
 
+/// Bytes of a program context's JSON shown as its preview.
+const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
+
 /// How often an attempt with calls in flight asks the session for outcomes.
 const OUTCOME_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -163,6 +166,21 @@ impl ProgramRunner {
             let input: Value = serde_json::from_slice(&input).map_err(|error| {
                 CodeRunError::Preparation(format!("input is not JSON: {error}"))
             })?;
+            let context = match &descriptor.context_ref {
+                Some(context_ref) => {
+                    let bytes = read_bounded(
+                        self.blobs.as_ref(),
+                        context_ref,
+                        codemode::MAX_PROGRAM_CONTEXT_BYTES as u64,
+                    )
+                    .await
+                    .map_err(|error| CodeRunError::Preparation(error.message))?;
+                    Some(serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+                        CodeRunError::Preparation(format!("program context is not JSON: {error}"))
+                    })?)
+                }
+                None => None,
+            };
             let catalog = read_bounded(
                 self.blobs.as_ref(),
                 &descriptor.catalog_ref,
@@ -182,9 +200,9 @@ impl ProgramRunner {
             if cancellation.is_cancelled() {
                 return Err(CodeRunError::Cancelled);
             }
-            Ok((permit, source, input, catalog))
+            Ok((permit, source, input, context, catalog))
         };
-        let (_permit, source, input, catalog) =
+        let (_permit, source, input, context, catalog) =
             match cancellable_preparation(deadline, &cancellation, prepare).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -217,6 +235,7 @@ impl ProgramRunner {
                     input,
                     started_at_ms: descriptor.started_at_ms,
                     random_seed: random_seed(&descriptor.execution_id),
+                    context,
                 }),
             },
             cancellation,
@@ -278,6 +297,7 @@ impl ProgramRunner {
                     }
                     None => break codemode::ExecutionReport {
                         output: Vec::new(), selections: Vec::new(), return_value: None,
+                        program_context: None,
                         error: Some(codemode::ExecutionError {
                             kind: codemode::ExecutionErrorKind::Internal,
                             message: "interpreter stopped without a report; consult scope outcomes".into(),
@@ -344,13 +364,51 @@ impl ProgramRunner {
         };
         drop(admissions);
         drop(execution);
-        let (scope, cleanup_error) = self
-            .cleanup(&code_tools, &descriptor.execution_id, Some(scope))
+        // A program that returned keeps its context with the scope's close;
+        // the session writes it only if the run completes.
+        let mut cleanup_error = None;
+        let program_context = match (&report.error, &report.program_context) {
+            (None, Some(value)) => match self.keep_context(value).await {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    cleanup_error = Some(format!("program context not stored: {error}"));
+                    None
+                }
+            },
+            _ => None,
+        };
+        let (scope, close_error) = self
+            .code_runner()
+            .close_scope(
+                &code_tools,
+                &descriptor.execution_id,
+                Some(scope),
+                program_context,
+            )
             .await;
+        let cleanup_error = cleanup_error.or(close_error);
         Ok(CodeRunReport {
             execution: report,
             scope,
             cleanup_error,
+        })
+    }
+
+    async fn keep_context(&self, value: &Value) -> Result<harness::ProgramContextInput, String> {
+        let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
+        let mut end = json.len().min(PROGRAM_CONTEXT_PREVIEW_CHARS);
+        while !json.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = json[..end].to_owned();
+        let content_ref = self
+            .blobs
+            .put_bytes(json.into_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(harness::ProgramContextInput {
+            content_ref,
+            preview: Some(preview),
         })
     }
 

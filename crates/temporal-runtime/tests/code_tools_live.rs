@@ -75,7 +75,7 @@ async fn code_tool_updates_execute_parallel_dependent_joined_and_submit_wait_cal
         let denied = InvokeCodeToolRequest { execution_id: fixture.execution_id.clone(), request_id: "guessed".to_owned(),
             binding_id: "guessed-admin-tool".to_owned(), arguments_ref: BlobRef::from_bytes(b"{}") };
         assert_eq!(fixture.bridge.invoke(denied, Default::default()).await?.unwrap_err().kind, CodeToolRejectionKind::PermissionDenied);
-        let report = fixture.bridge.close_scope(CloseCodeToolScopeRequest { execution_id: fixture.execution_id.clone(), cancel_pending: false }, Default::default()).await??;
+        let report = fixture.bridge.close_scope(CloseCodeToolScopeRequest { execution_id: fixture.execution_id.clone(), cancel_pending: false, program_context: None }, Default::default()).await??;
         assert!(report.closed);
         assert_eq!(report.calls.len(), 8);
         assert!(report.calls.values().all(|call| call.status.is_terminal()));
@@ -157,6 +157,7 @@ async fn code_tool_failure_preserves_siblings_and_scope_cancellation_reports_out
                     CloseCodeToolScopeRequest {
                         execution_id: fixture.execution_id.clone(),
                         cancel_pending: true,
+                        program_context: None,
                     },
                     Default::default(),
                 )

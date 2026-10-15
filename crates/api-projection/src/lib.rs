@@ -1806,7 +1806,8 @@ pub fn context_entry_run_id(entry: &ContextEntry) -> Option<RunId> {
         | ContextEntrySource::AssistantOutput { run_id, .. }
         | ContextEntrySource::ApprovalDecision { run_id, .. }
         | ContextEntrySource::Tool { run_id, .. }
-        | ContextEntrySource::Reasoning { run_id, .. } => Some(*run_id),
+        | ContextEntrySource::Reasoning { run_id, .. }
+        | ContextEntrySource::ProgramRun { run_id } => Some(*run_id),
         ContextEntrySource::ContextEdit | ContextEntrySource::Runtime { .. } => None,
     }
 }
@@ -1963,6 +1964,9 @@ pub fn context_entry_source_to_api(source: &ContextEntrySource) -> ContextEntryS
         ContextEntrySource::Runtime { label } => ContextEntrySourceView::Runtime {
             label: label.clone(),
         },
+        ContextEntrySource::ProgramRun { run_id } => ContextEntrySourceView::ProgramRun {
+            run_id: api_run_id(*run_id),
+        },
     }
 }
 
@@ -2051,6 +2055,7 @@ fn context_removal_reason_to_api(reason: &ContextRemovalReason) -> &'static str 
     match reason {
         ContextRemovalReason::Pruned => "pruned",
         ContextRemovalReason::ProviderCompacted => "providerCompacted",
+        ContextRemovalReason::ProgramContextRetention => "programContextRetention",
     }
 }
 
@@ -2672,6 +2677,7 @@ fn context_entry_kind_to_api(kind: &ContextEntryKind) -> ContextEntryKindView {
         ContextEntryKind::McpApprovalResponse { approve, .. } => {
             ContextEntryKindView::McpApprovalResponse { approve: *approve }
         }
+        ContextEntryKind::ProgramState => ContextEntryKindView::ProgramState,
     }
 }
 

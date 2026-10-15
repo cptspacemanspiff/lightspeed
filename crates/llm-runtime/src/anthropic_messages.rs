@@ -1081,6 +1081,9 @@ async fn materialize_block(
                 message: "Anthropic provider-hosted MCP does not support approval responses; use native MCP execution or an OpenAI Responses model".to_owned(),
             })
         }
+        ContextEntryKind::ProgramState => Err(LlmAdapterError::InvalidProviderRequest {
+            message: "a program context is never sent to a model".to_owned(),
+        }),
     }
 }
 

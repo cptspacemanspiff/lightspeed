@@ -913,6 +913,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "contextRetained": {
+              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "format": "uint32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "inputDeadlineMs": {
               "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
               "format": "uint64",
@@ -4826,6 +4836,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "contextRetained": {
+              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "format": "uint32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "inputDeadlineMs": {
               "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
               "format": "uint64",
@@ -7228,6 +7248,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "contextRetained": {
+              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "format": "uint32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "inputDeadlineMs": {
               "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
               "format": "uint64",
@@ -8571,6 +8601,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "contextRetained": {
+              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "format": "uint32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "inputDeadlineMs": {
               "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
               "format": "uint64",

@@ -448,6 +448,17 @@
         },
         "execution_id": {
           "type": "string"
+        },
+        "program_context": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProgramContextInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The program context a program run's scope keeps as it closes;\nwritten as the session's newest only if the run completes."
         }
       },
       "required": [
@@ -1444,6 +1455,24 @@
         "blobRef",
         "kind",
         "mime"
+      ],
+      "type": "object"
+    },
+    "ProgramContextInput": {
+      "description": "A program context to keep: the JSON value in the content store, and a\nshort display preview. A run passes one when it closes its scope; it\nbecomes a context entry only if the run completes.",
+      "properties": {
+        "content_ref": {
+          "type": "string"
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "content_ref"
       ],
       "type": "object"
     },

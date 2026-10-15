@@ -131,6 +131,7 @@ mod tests {
                 event: CoreAgentEvent::CodeTool(harness::CodeToolEvent::ScopeClosed {
                     execution_id: "execution-hidden".to_owned(),
                     cancel: false,
+                    program_context: None,
                 }),
             })
             .unwrap();

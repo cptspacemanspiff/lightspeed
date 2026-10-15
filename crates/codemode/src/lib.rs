@@ -54,7 +54,15 @@ pub struct ProgramExecution {
     /// Seeds `Math.random` and `crypto`: the same seed draws the same values.
     #[serde(rename = "seed")]
     pub random_seed: [u32; 4],
+    /// The session's newest program context, `ctx.context`. Absent before
+    /// any run has set one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
 }
+
+/// The largest program context `ctx.setContext` accepts, in serialized
+/// JSON bytes.
+pub const MAX_PROGRAM_CONTEXT_BYTES: usize = 64 * 1024;
 
 /// Every budget is positive; there are intentionally no deployment defaults.
 #[derive(Clone, Debug)]
@@ -138,6 +146,9 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selections: Vec<OutputSelection>,
     pub return_value: Option<Value>,
+    /// The value a program last passed to `ctx.setContext`, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_context: Option<Value>,
     pub error: Option<ExecutionError>,
     /// Requests issued before script termination, whose completions have not
     /// entered this interpreter. Only the host knows their durable outcomes.

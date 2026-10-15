@@ -58,6 +58,10 @@ pub struct ProgramRunDescriptor {
     /// When the run started, as the session recorded it: the program's
     /// clock before its first completion.
     pub started_at_ms: u64,
+    /// The session's newest program context when the run started: the
+    /// program's `ctx.context`. Absent before any run has kept one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_ref: Option<BlobRef>,
 }
 
 impl ProgramRunDescriptor {

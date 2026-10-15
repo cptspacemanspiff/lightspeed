@@ -425,6 +425,10 @@ pub struct CodeToolScope {
     /// order a replaying executor is fed outcomes in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed: Vec<String>,
+    /// The program context a run-owned scope's program kept, passed when
+    /// the scope closed. It is written only if the run completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_context: Option<crate::ProgramContextInput>,
 }
 
 impl CodeToolScope {
@@ -467,6 +471,8 @@ pub enum CodeToolEvent {
     ScopeClosed {
         execution_id: String,
         cancel: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program_context: Option<crate::ProgramContextInput>,
     },
 }
 
@@ -1318,12 +1324,23 @@ pub fn close_code_tool_scope_proposals(
     state: &CoreAgentState,
     execution_id: String,
     cancel: bool,
+    program_context: Option<crate::ProgramContextInput>,
 ) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
     let scope = state
         .code_tools
         .scopes
         .get(&execution_id)
         .ok_or_else(|| invalid("unknown code tool execution scope"))?;
+    // A context that arrives after the run stopped being active, or after
+    // its scope closed, could never be written: it is dropped, not refused,
+    // so the close itself still goes through.
+    let program_context = match program_context {
+        Some(context) => {
+            validate_program_context_owner(state, scope, &context)?;
+            program_context_keepable(state, scope).then_some(context)
+        }
+        None => None,
+    };
     if scope.closed && (!cancel || scope.cancel_requested) {
         return Ok(Vec::new());
     }
@@ -1332,6 +1349,7 @@ pub fn close_code_tool_scope_proposals(
         CoreAgentEvent::CodeTool(CodeToolEvent::ScopeClosed {
             execution_id,
             cancel,
+            program_context,
         }),
     )];
     if cancel {
@@ -1518,6 +1536,35 @@ pub fn approved_code_tool_request(
         .expect("one approved call"))
 }
 
+/// Only a program run's scope carries a program context.
+fn validate_program_context_owner(
+    state: &CoreAgentState,
+    scope: &CodeToolScope,
+    context: &crate::ProgramContextInput,
+) -> Result<(), DomainError> {
+    context.validate()?;
+    if !matches!(scope.spec.owner, ScopeOwner::Run { .. }) || !crate::is_program_session(state) {
+        return Err(invalid(
+            "only a program run's scope keeps a program context",
+        ));
+    }
+    Ok(())
+}
+
+/// The context is kept once, as the scope of a still-active run closes.
+fn program_context_keepable(state: &CoreAgentState, scope: &CodeToolScope) -> bool {
+    let ScopeOwner::Run { run_id } = scope.spec.owner else {
+        return false;
+    };
+    !scope.closed
+        && scope.program_context.is_none()
+        && state
+            .runs
+            .active
+            .as_ref()
+            .is_some_and(|run| run.run_id == run_id && run.status == crate::RunStatus::Active)
+}
+
 pub(crate) fn apply_code_tool_event(
     state: &mut CoreAgentState,
     event: &CodeToolEvent,
@@ -1556,6 +1603,7 @@ pub(crate) fn apply_code_tool_event(
                     cancel_requested: false,
                     calls: BTreeMap::new(),
                     completed: Vec::new(),
+                    program_context: None,
                 },
             );
         }
@@ -1699,14 +1747,31 @@ pub(crate) fn apply_code_tool_event(
         CodeToolEvent::ScopeClosed {
             execution_id,
             cancel,
+            program_context,
         } => {
             let scope = state
                 .code_tools
                 .scopes
-                .get_mut(execution_id)
+                .get(execution_id)
                 .ok_or_else(|| invalid("unknown code tool execution scope"))?;
+            if let Some(context) = program_context {
+                validate_program_context_owner(state, scope, context)?;
+                if !program_context_keepable(state, scope) {
+                    return Err(invalid(
+                        "program context is kept only as an active run's scope closes",
+                    ));
+                }
+            }
+            let scope = state
+                .code_tools
+                .scopes
+                .get_mut(execution_id)
+                .expect("validated scope");
             scope.closed = true;
             scope.cancel_requested |= cancel;
+            if program_context.is_some() {
+                scope.program_context = program_context.clone();
+            }
         }
     }
     Ok(())

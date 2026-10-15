@@ -721,6 +721,9 @@ async fn materialize_input_item(
             "approval_request_id": approval_request_id,
             "approve": approve,
         }))),
+        ContextEntryKind::ProgramState => Err(LlmAdapterError::InvalidProviderRequest {
+            message: "a program context is never sent to a model".to_owned(),
+        }),
     }
 }
 

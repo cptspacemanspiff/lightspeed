@@ -424,7 +424,8 @@ async fn bots_live_manual_event_runs_and_records_outcome() -> anyhow::Result<()>
 }
 
 /// A program profile whose program reports which version ran and what it
-/// was given. From version 2 it also decides its delivery: ignored.
+/// was given, and keeps every note it has seen as its program context.
+/// From version 2 it also decides its delivery: ignored.
 fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileInput {
     let verdict = if version >= 2 {
         "outcome: \"ignored\", summary: \"nothing to do\", "
@@ -439,10 +440,12 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
             program: Some(api::ProgramSpec {
                 source: api::ProgramSource::Text {
                     text: format!(
-                        "export default {{ async run(input) {{ \
+                        "export default {{ async run(input, env, ctx) {{ \
+                         const notes = input.events.map(e => e.event.data.note); \
+                         const seen = ctx.context?.notes ?? []; \
+                         ctx.setContext({{ notes: [...seen, ...notes] }}); \
                          return {{ {verdict}version: {version}, seqs: input.events.map(e => e.seq), \
-                         kinds: input.events.map(e => e.event.kind), \
-                         notes: input.events.map(e => e.event.data.note) }}; }} }};"
+                         kinds: input.events.map(e => e.event.kind), notes, seen }}; }} }};"
                     ),
                 },
                 semantics_version: 1,
@@ -531,11 +534,13 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
             event_program_output(&api, &store, &main, &events[0]).await?,
             serde_json::json!({
                 "version": 1, "seqs": [1], "kinds": ["test.ping"], "notes": ["first ping"],
+                "seen": [],
             })
         );
 
         // A new program revision cannot apply to the pinned session, so the
-        // bot rotates its main session and the next event runs the new one.
+        // bot rotates its main session and the next event runs the new one,
+        // starting from the program context the old session kept.
         api.put_profile(api::ProfilePutParams {
             profile: program_profile_input(&profile_id, 2),
             expected_revision: Some(1),
@@ -560,6 +565,7 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
             serde_json::json!({
                 "outcome": "ignored", "summary": "nothing to do",
                 "version": 2, "seqs": [2], "kinds": ["test.ping"], "notes": ["second ping"],
+                "seen": ["first ping"],
             })
         );
         // Its output's verdict decides the delivery.
@@ -653,7 +659,8 @@ async fn bots_live_routed_program_session_moves_to_a_new_program_revision() -> a
 
         // The key's session pinned revision 1. After the profile moves on,
         // the next event for the key retires it and runs the new program in
-        // the key's next generation.
+        // the key's next generation, which carries on from the program
+        // context the key's last session kept.
         api.put_profile(api::ProfilePutParams {
             profile: program_profile_input(&profile_id, 2),
             expected_revision: Some(1),
@@ -672,6 +679,7 @@ async fn bots_live_routed_program_session_moves_to_a_new_program_revision() -> a
             serde_json::json!({
                 "outcome": "ignored", "summary": "nothing to do",
                 "version": 2, "seqs": [2], "kinds": ["pr"], "notes": ["two"],
+                "seen": ["one"],
             })
         );
         let retired = api
