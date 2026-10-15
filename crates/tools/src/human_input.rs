@@ -22,10 +22,85 @@ pub const DEFAULT_INPUT_DEADLINE_MS: u64 = 7 * DAY_MS;
 /// The longest deadline a request may ask for, so a two-week absence fits.
 pub const MAX_INPUT_DEADLINE_MS: u64 = 30 * DAY_MS;
 pub const MIN_INPUT_DEADLINE_MS: u64 = 1_000;
-pub const MIN_REMIND_AFTER_MS: u64 = 60 * 1_000;
-/// The binding's joined ceiling: a request may wait out its own deadline
-/// and, once escalated, a fresh one.
-pub const INPUT_REQUEST_DEADLINE_CEILING_MS: u64 = 2 * MAX_INPUT_DEADLINE_MS + DAY_MS;
+/// Reminders at most hourly keep a 30-day wait's workflow history small.
+pub const MIN_REMIND_AFTER_MS: u64 = 60 * 60 * 1_000;
+
+pub const INPUT_DEFAULT_DEADLINE_ENV: &str = "LIGHTSPEED_INPUT_DEFAULT_DEADLINE_MS";
+pub const INPUT_MIN_DEADLINE_ENV: &str = "LIGHTSPEED_INPUT_MIN_DEADLINE_MS";
+pub const INPUT_MAX_DEADLINE_ENV: &str = "LIGHTSPEED_INPUT_MAX_DEADLINE_MS";
+pub const INPUT_MIN_REMIND_AFTER_ENV: &str = "LIGHTSPEED_INPUT_MIN_REMIND_AFTER_MS";
+
+/// The deployment's bounds on how long requests wait and how often they
+/// remind. The defaults suit production; each can be overridden from the
+/// environment, e.g. for tests that need a request to expire in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputTimeouts {
+    pub default_deadline_ms: u64,
+    pub min_deadline_ms: u64,
+    pub max_deadline_ms: u64,
+    pub min_remind_after_ms: u64,
+}
+
+impl Default for InputTimeouts {
+    fn default() -> Self {
+        Self {
+            default_deadline_ms: DEFAULT_INPUT_DEADLINE_MS,
+            min_deadline_ms: MIN_INPUT_DEADLINE_MS,
+            max_deadline_ms: MAX_INPUT_DEADLINE_MS,
+            min_remind_after_ms: MIN_REMIND_AFTER_MS,
+        }
+    }
+}
+
+impl InputTimeouts {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// The defaults with every override `lookup` supplies; an empty value
+    /// keeps the default.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let read = |name: &str, default: u64| -> Result<u64, String> {
+            match lookup(name).filter(|value| !value.trim().is_empty()) {
+                None => Ok(default),
+                Some(value) => value
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|millis| *millis > 0)
+                    .ok_or_else(|| format!("{name} must be a positive number of milliseconds")),
+            }
+        };
+        let defaults = Self::default();
+        let timeouts = Self {
+            default_deadline_ms: read(INPUT_DEFAULT_DEADLINE_ENV, defaults.default_deadline_ms)?,
+            min_deadline_ms: read(INPUT_MIN_DEADLINE_ENV, defaults.min_deadline_ms)?,
+            max_deadline_ms: read(INPUT_MAX_DEADLINE_ENV, defaults.max_deadline_ms)?,
+            min_remind_after_ms: read(INPUT_MIN_REMIND_AFTER_ENV, defaults.min_remind_after_ms)?,
+        };
+        if !(timeouts.min_deadline_ms..=timeouts.max_deadline_ms)
+            .contains(&timeouts.default_deadline_ms)
+        {
+            return Err(format!(
+                "{INPUT_DEFAULT_DEADLINE_ENV} ({}) must lie between {INPUT_MIN_DEADLINE_ENV} ({}) and {INPUT_MAX_DEADLINE_ENV} ({})",
+                timeouts.default_deadline_ms, timeouts.min_deadline_ms, timeouts.max_deadline_ms
+            ));
+        }
+        Ok(timeouts)
+    }
+
+    pub fn allows_deadline(&self, deadline_ms: u64) -> bool {
+        (self.min_deadline_ms..=self.max_deadline_ms).contains(&deadline_ms)
+    }
+
+    /// The binding's joined ceiling: a request may wait out its own deadline
+    /// and, once escalated, a fresh one.
+    pub fn deadline_ceiling_ms(&self) -> u64 {
+        self.max_deadline_ms
+            .saturating_mul(2)
+            .saturating_add(DAY_MS)
+    }
+}
 
 pub const MAX_ASK_BYTES: usize = 4 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -58,14 +133,16 @@ pub struct InputRequestArgs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<String>,
     /// How long to wait for an answer, in milliseconds. Defaults to the
-    /// program's input deadline, at most 30 days.
+    /// program's input deadline; the deployment bounds it, by default to 1
+    /// second through 30 days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1000, max = 2592000000_u64))]
+    #[schemars(range(min = 1))]
     pub deadline_ms: Option<u64>,
     /// Remind the assignees on this interval until the request is answered
-    /// or its deadline passes. At least one minute.
+    /// or its deadline passes. The deployment sets the shortest interval,
+    /// by default one hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 60000))]
+    #[schemars(range(min = 1))]
     pub remind_after_ms: Option<u64>,
     /// Who takes the request over, once and with a fresh deadline, when the
     /// deadline passes unanswered. Without it the call fails with
@@ -75,7 +152,7 @@ pub struct InputRequestArgs {
 }
 
 impl InputRequestArgs {
-    pub fn validate(&self) -> ToolResult<()> {
+    pub fn validate(&self, timeouts: &InputTimeouts) -> ToolResult<()> {
         if self.ask.trim().is_empty() || self.ask.len() > MAX_ASK_BYTES {
             return Err(invalid(format!(
                 "ask must be non-empty and at most {MAX_ASK_BYTES} bytes"
@@ -105,30 +182,32 @@ impl InputRequestArgs {
             validate_people(field, people)?;
         }
         if let Some(deadline) = self.deadline_ms
-            && !(MIN_INPUT_DEADLINE_MS..=MAX_INPUT_DEADLINE_MS).contains(&deadline)
+            && !timeouts.allows_deadline(deadline)
         {
             return Err(invalid(format!(
-                "deadline_ms must be between {MIN_INPUT_DEADLINE_MS} and {MAX_INPUT_DEADLINE_MS}"
+                "deadline_ms must be between {} and {}",
+                timeouts.min_deadline_ms, timeouts.max_deadline_ms
             )));
         }
         if self
             .remind_after_ms
-            .is_some_and(|interval| interval < MIN_REMIND_AFTER_MS)
+            .is_some_and(|interval| interval < timeouts.min_remind_after_ms)
         {
             return Err(invalid(format!(
-                "remind_after_ms must be at least {MIN_REMIND_AFTER_MS}"
+                "remind_after_ms must be at least {}",
+                timeouts.min_remind_after_ms
             )));
         }
         Ok(())
     }
 
     /// The request's wait: its own deadline, else the program's default,
-    /// never beyond the cap.
-    pub fn deadline_after_ms(&self, program_default: Option<u64>) -> u64 {
+    /// else the deployment's, never outside the deployment's bounds.
+    pub fn deadline_after_ms(&self, program_default: Option<u64>, timeouts: &InputTimeouts) -> u64 {
         self.deadline_ms
             .or(program_default)
-            .unwrap_or(DEFAULT_INPUT_DEADLINE_MS)
-            .clamp(MIN_INPUT_DEADLINE_MS, MAX_INPUT_DEADLINE_MS)
+            .unwrap_or(timeouts.default_deadline_ms)
+            .clamp(timeouts.min_deadline_ms, timeouts.max_deadline_ms)
     }
 }
 
@@ -265,7 +344,7 @@ mod tests {
 
     #[test]
     fn requests_are_bounded() {
-        args().validate().unwrap();
+        args().validate(&InputTimeouts::default()).unwrap();
         for broken in [
             InputRequestArgs {
                 ask: " ".into(),
@@ -280,7 +359,7 @@ mod tests {
                 ..args()
             },
             InputRequestArgs {
-                remind_after_ms: Some(1_000),
+                remind_after_ms: Some(MIN_REMIND_AFTER_MS - 1),
                 ..args()
             },
             InputRequestArgs {
@@ -288,7 +367,10 @@ mod tests {
                 ..args()
             },
         ] {
-            assert!(broken.validate().is_err(), "{broken:?}");
+            assert!(
+                broken.validate(&InputTimeouts::default()).is_err(),
+                "{broken:?}"
+            );
         }
     }
 
@@ -299,15 +381,90 @@ mod tests {
                 deadline_ms: Some(5_000),
                 ..args()
             }
-            .deadline_after_ms(Some(9_000)),
+            .deadline_after_ms(Some(9_000), &InputTimeouts::default()),
             5_000
         );
-        assert_eq!(args().deadline_after_ms(Some(9_000)), 9_000);
-        assert_eq!(args().deadline_after_ms(None), DEFAULT_INPUT_DEADLINE_MS);
         assert_eq!(
-            args().deadline_after_ms(Some(u64::MAX)),
+            args().deadline_after_ms(Some(9_000), &InputTimeouts::default()),
+            9_000
+        );
+        assert_eq!(
+            args().deadline_after_ms(None, &InputTimeouts::default()),
+            DEFAULT_INPUT_DEADLINE_MS
+        );
+        assert_eq!(
+            args().deadline_after_ms(Some(u64::MAX), &InputTimeouts::default()),
             MAX_INPUT_DEADLINE_MS
         );
+    }
+
+    fn timeouts_from(vars: &[(&str, &str)]) -> Result<InputTimeouts, String> {
+        InputTimeouts::from_lookup(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        })
+    }
+
+    #[test]
+    fn timeouts_default_without_overrides() {
+        assert_eq!(timeouts_from(&[]).unwrap(), InputTimeouts::default());
+        assert_eq!(
+            timeouts_from(&[(INPUT_MIN_REMIND_AFTER_ENV, " ")]).unwrap(),
+            InputTimeouts::default()
+        );
+    }
+
+    #[test]
+    fn the_environment_overrides_every_timeout() {
+        let timeouts = timeouts_from(&[
+            (INPUT_DEFAULT_DEADLINE_ENV, "2000"),
+            (INPUT_MIN_DEADLINE_ENV, "100"),
+            (INPUT_MAX_DEADLINE_ENV, "60000"),
+            (INPUT_MIN_REMIND_AFTER_ENV, "250"),
+        ])
+        .unwrap();
+        assert_eq!(
+            timeouts,
+            InputTimeouts {
+                default_deadline_ms: 2_000,
+                min_deadline_ms: 100,
+                max_deadline_ms: 60_000,
+                min_remind_after_ms: 250,
+            }
+        );
+        let short = InputRequestArgs {
+            deadline_ms: Some(100),
+            remind_after_ms: Some(250),
+            ..args()
+        };
+        short.validate(&timeouts).unwrap();
+        assert!(short.validate(&InputTimeouts::default()).is_err());
+        assert!(
+            InputRequestArgs {
+                deadline_ms: Some(60_001),
+                ..args()
+            }
+            .validate(&timeouts)
+            .is_err()
+        );
+        assert_eq!(args().deadline_after_ms(None, &timeouts), 2_000);
+        assert_eq!(args().deadline_after_ms(Some(u64::MAX), &timeouts), 60_000);
+        assert_eq!(timeouts.deadline_ceiling_ms(), 120_000 + DAY_MS);
+    }
+
+    #[test]
+    fn invalid_timeout_overrides_are_refused() {
+        for vars in [
+            &[(INPUT_MIN_REMIND_AFTER_ENV, "soon")][..],
+            &[(INPUT_MIN_DEADLINE_ENV, "0")][..],
+            &[(INPUT_MAX_DEADLINE_ENV, "-5")][..],
+            // The default must lie within the bounds.
+            &[(INPUT_MAX_DEADLINE_ENV, "1000")][..],
+            &[(INPUT_DEFAULT_DEADLINE_ENV, "500")][..],
+        ] {
+            assert!(timeouts_from(vars).is_err(), "{vars:?}");
+        }
     }
 
     #[test]

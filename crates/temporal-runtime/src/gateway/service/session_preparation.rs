@@ -8,6 +8,7 @@ pub(crate) struct SessionPreparationService {
     pub(crate) store: Arc<PgStore>,
     pub(crate) task_queue: String,
     pub(crate) code_task_queue: String,
+    pub(crate) input_timeouts: tools::human_input::InputTimeouts,
 }
 
 impl SessionPreparationService {
@@ -412,7 +413,7 @@ impl SessionPreparationService {
             },
             WorkflowToolCompletion::Joined {
                 reply_schema_ref: Some(reply_schema_ref),
-                deadline_after_ms: tools::human_input::INPUT_REQUEST_DEADLINE_CEILING_MS,
+                deadline_after_ms: self.input_timeouts.deadline_ceiling_ms(),
             },
         ))
     }
@@ -675,6 +676,7 @@ impl GatewayAgentApi {
             store: self.store.clone(),
             task_queue: self.task_queue.clone(),
             code_task_queue: self.code_task_queue.clone(),
+            input_timeouts: self.input_timeouts,
         }
     }
 }

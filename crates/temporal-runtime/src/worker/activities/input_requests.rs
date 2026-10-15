@@ -13,7 +13,8 @@ use temporal_workflow::{
 };
 use temporalio_sdk::activities::ActivityError;
 use tools::human_input::{
-    DEADLINE_EXCEEDED_CODE, INPUT_CANCELLED_CODE, InputAnswer, InputRequestArgs, failure_document,
+    DEADLINE_EXCEEDED_CODE, INPUT_CANCELLED_CODE, InputAnswer, InputRequestArgs, InputTimeouts,
+    failure_document,
 };
 
 use super::common::activity_error;
@@ -26,11 +27,12 @@ pub(crate) fn input_request_id(execution_id: &str) -> String {
 
 pub(super) async fn open(
     store: &PgStore,
+    timeouts: &InputTimeouts,
     request: InputRequestOpenActivityRequest,
 ) -> Result<InputRequestOpenActivityResult, ActivityError> {
     let start = request.start;
     validate_start(&start)?;
-    let args = match read_args(store, &start.invocation.arguments_ref).await? {
+    let args = match read_args(store, timeouts, &start.invocation.arguments_ref).await? {
         Ok(args) => args,
         Err(message) => {
             return Ok(InputRequestOpenActivityResult::Rejected {
@@ -38,7 +40,8 @@ pub(super) async fn open(
             });
         }
     };
-    let deadline_after_ms = args.deadline_after_ms(program_input_deadline(store, &start).await?);
+    let deadline_after_ms =
+        args.deadline_after_ms(program_input_deadline(store, &start).await?, timeouts);
     let now = now_ms()?;
     let record = store
         .open_input_request(NewInputRequest {
@@ -211,6 +214,7 @@ fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), ActivityError> {
 
 async fn read_args(
     store: &PgStore,
+    timeouts: &InputTimeouts,
     arguments_ref: &BlobRef,
 ) -> Result<Result<InputRequestArgs, String>, ActivityError> {
     let bytes = store
@@ -220,7 +224,7 @@ async fn read_args(
     Ok(serde_json::from_slice::<InputRequestArgs>(&bytes)
         .map_err(|error| format!("invalid input request: {error}"))
         .and_then(|args| {
-            args.validate()
+            args.validate(timeouts)
                 .map(|()| args)
                 .map_err(|error| error.to_string())
         }))

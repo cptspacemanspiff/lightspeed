@@ -773,7 +773,7 @@ impl WorkerActivities {
         request: temporal_workflow::InputRequestOpenActivityRequest,
     ) -> Result<temporal_workflow::InputRequestOpenActivityResult, ActivityError> {
         let state = self.state_for_universe(request.start.universe_id).await?;
-        input_requests::open(inbox_store(&state)?, request).await
+        input_requests::open(inbox_store(&state)?, &state.input_timeouts, request).await
     }
 
     #[activity(name = temporal_workflow::ACTIVITY_INPUT_REQUEST_STEP)]
@@ -850,6 +850,7 @@ fn preparation_service(
             store,
             task_queue: ctx.info().task_queue.clone(),
             code_task_queue: state.code_task_queue.clone(),
+            input_timeouts: state.input_timeouts,
         },
     )
 }

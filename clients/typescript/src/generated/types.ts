@@ -6155,8 +6155,9 @@ export interface ProgramSpec {
  */
 export interface ProgramLimitsInput {
   /**
-   * How long a human-input request waits when the call sets no deadline:
-   * 1 second to 30 days, 7 days when omitted.
+   * How long a human-input request waits when the call sets no deadline,
+   * within the deployment's bounds (by default 1 second to 30 days); the
+   * deployment's default (7 days unless overridden) when omitted.
    */
   inputDeadlineMs?: number | null;
   maxCalls?: number | null;
