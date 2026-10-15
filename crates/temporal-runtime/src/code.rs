@@ -96,6 +96,8 @@ pub enum CodeRunError {
     PreparationTimedOut,
     #[error(transparent)]
     Start(#[from] codemode::StartError),
+    #[error(transparent)]
+    ProgramStart(#[from] program_engine::StartError),
     #[error("{source}; scope cleanup failed: {cleanup_error}")]
     Cleanup {
         #[source]
@@ -278,7 +280,6 @@ impl CodeRunner {
                 source,
                 bindings: catalog.bindings,
                 limits,
-                program: None,
             },
             cancellation,
         ) {
@@ -306,7 +307,6 @@ impl CodeRunner {
                     }
                     None => break codemode::ExecutionReport {
                         output: Vec::new(), selections: Vec::new(), return_value: None,
-                        program_context: None,
                         error: Some(codemode::ExecutionError {
                             kind: codemode::ExecutionErrorKind::Internal,
                             message: "interpreter stopped without a report; consult scope outcomes".into(),
@@ -320,7 +320,6 @@ impl CodeRunner {
                         Err(codemode::CompletionError::TooLarge) => completions.complete(HostCompletion {
                             request_id,
                             outcome: Err(host_error("payload_too_large", "host completion exceeds result budget")),
-                            completed_at_ms: None,
                         }),
                         result => result,
                     };
@@ -413,7 +412,6 @@ impl CodeRunner {
         HostCompletion {
             request_id: request.request_id,
             outcome,
-            completed_at_ms: None,
         }
     }
 

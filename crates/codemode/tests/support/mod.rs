@@ -31,7 +31,6 @@ pub fn input(source: &str, bindings: &[(&str, &str)]) -> ExecutionInput {
             max_tool_calls: 64,
             max_outstanding_tool_calls: 8,
         },
-        program: None,
     }
 }
 

@@ -62,7 +62,7 @@ async fn selected_file_receipts_survive_a_later_media_rejection_and_script_failu
                 }
                 binding => panic!("ungranted binding: {binding}"),
             };
-            sender.complete(HostCompletion {request_id:request.request_id,outcome, completed_at_ms: None }).unwrap();
+            sender.complete(HostCompletion {request_id:request.request_id,outcome}).unwrap();
         };
         assert_eq!(report.error.as_ref().unwrap().message,"failure after selected output");
         assert_eq!(report.output,vec![json!({"kind":"unsupported_media"})]);

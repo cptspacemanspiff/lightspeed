@@ -18,9 +18,9 @@ use std::{
     time::Duration,
 };
 
-use codemode::{ExecutionEvent, HostCompletion, HostError, HostRequest};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use harness::{BlobRef, storage::BlobStore};
+use program_engine::{ExecutionEvent, HostCompletion, HostError, HostRequest};
 use serde_json::Value;
 use temporal_workflow::{
     CodeToolCallOutcome, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
@@ -31,10 +31,87 @@ use temporalio_client::Client;
 use tokio::{sync::Semaphore, time::Instant};
 use tools::program::contracts::ContractError;
 
-use crate::code::{
-    Cancellation, CodeRunError, CodeRunReport, CodeRunner, CodeToolCatalog,
-    cancellable_preparation, engine_limits, host_error, materialize, read_bounded,
-};
+use program_engine::Cancellation;
+use temporal_workflow::{CodeExecutionLimits, CodeToolCallOutcome as RecordedOutcome};
+
+use crate::code::{CodeRunError, CodeRunner, read_bounded};
+
+/// The contract bindings a program runs with, as stored by reference on
+/// its descriptor.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramCatalog {
+    pub version: u32,
+    pub bindings: Vec<program_engine::ToolBinding>,
+}
+
+/// One finished attempt: what the program did and the run's scope as it
+/// closed.
+#[derive(Debug)]
+pub struct CodeRunReport {
+    pub execution: program_engine::ExecutionReport,
+    /// Latest confirmed snapshot. It may be incomplete when cleanup failed.
+    pub scope: Option<CodeToolScopeReport>,
+    /// A missing final receipt means unfinished effect outcomes are unknown.
+    pub cleanup_error: Option<String>,
+}
+
+fn engine_limits(limits: &CodeExecutionLimits) -> program_engine::ExecutionLimits {
+    program_engine::ExecutionLimits {
+        timeout_ms: limits.timeout_ms,
+        max_memory_bytes: limits.max_memory_bytes,
+        max_stack_bytes: limits.max_stack_bytes,
+        max_source_bytes: limits.max_source_bytes,
+        max_catalog_bytes: limits.max_catalog_bytes,
+        max_request_bytes: limits.max_request_bytes,
+        max_result_bytes: limits.max_result_bytes,
+        max_output_bytes: limits.max_output_bytes,
+        max_tool_calls: limits.max_tool_calls,
+        max_outstanding_tool_calls: limits.max_outstanding_tool_calls,
+    }
+}
+
+fn host_error(kind: &str, message: impl Into<String>) -> HostError {
+    HostError {
+        kind: kind.into(),
+        message: message.into(),
+        value: None,
+    }
+}
+
+/// A recorded outcome as the value or failure the program receives.
+async fn materialize(
+    blobs: &dyn BlobStore,
+    outcome: &RecordedOutcome,
+    limit: u64,
+) -> Result<Value, HostError> {
+    crate::code::materialize(blobs, outcome, limit)
+        .await
+        .map_err(|error| HostError {
+            kind: error.kind,
+            message: error.message,
+            value: error.value,
+        })
+}
+
+async fn cancellable_preparation<T>(
+    deadline: Instant,
+    cancellation: &Cancellation,
+    work: impl std::future::Future<Output = Result<T, CodeRunError>>,
+) -> Result<T, CodeRunError> {
+    let cancelled = async {
+        while !cancellation.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancelled => Err(CodeRunError::Cancelled),
+        result = tokio::time::timeout_at(deadline, work) => {
+            result.unwrap_or(Err(CodeRunError::PreparationTimedOut))
+        }
+    }
+}
 
 /// Bytes of a program context's JSON shown as its preview.
 const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
@@ -221,7 +298,7 @@ impl ProgramRunner {
                     let bytes = read_bounded(
                         self.blobs.as_ref(),
                         context_ref,
-                        codemode::MAX_PROGRAM_CONTEXT_BYTES as u64,
+                        program_engine::MAX_PROGRAM_CONTEXT_BYTES as u64,
                     )
                     .await
                     .map_err(|error| CodeRunError::Preparation(error.message))?;
@@ -238,7 +315,7 @@ impl ProgramRunner {
             )
             .await
             .map_err(|error| CodeRunError::Preparation(error.message))?;
-            let catalog: CodeToolCatalog = serde_json::from_slice(&catalog)
+            let catalog: ProgramCatalog = serde_json::from_slice(&catalog)
                 .map_err(|error| CodeRunError::Catalog(error.to_string()))?;
             // Re-check the pins against the scope as it is now: a contract
             // that changed or was revoked fails this attempt before it runs.
@@ -276,17 +353,17 @@ impl ProgramRunner {
                 )
                 .await);
         }
-        let mut execution = match codemode::start(
-            codemode::ExecutionInput {
+        let mut execution = match program_engine::start(
+            program_engine::ExecutionInput {
                 source,
                 bindings: catalog.bindings,
                 limits,
-                program: Some(codemode::ProgramExecution {
+                program: program_engine::ProgramExecution {
                     input,
                     started_at_ms: descriptor.started_at_ms,
                     random_seed: random_seed(&descriptor.execution_id),
                     context,
-                }),
+                },
             },
             cancellation,
         ) {
@@ -310,7 +387,7 @@ impl ProgramRunner {
         let mut cursor = 0u64;
         let mut poll = tokio::time::interval(OUTCOME_POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut bridge_failure: Option<codemode::ExecutionError> = None;
+        let mut bridge_failure: Option<program_engine::ExecutionError> = None;
         // When the attempt last saw the program or the session move.
         let mut idle_since = Instant::now();
         let report = loop {
@@ -359,11 +436,11 @@ impl ProgramRunner {
                         }
                         break Some(report);
                     }
-                    None => break Some(codemode::ExecutionReport {
-                        output: Vec::new(), selections: Vec::new(), return_value: None,
+                    None => break Some(program_engine::ExecutionReport {
+                        return_value: None,
                         program_context: None,
-                        error: Some(codemode::ExecutionError {
-                            kind: codemode::ExecutionErrorKind::Internal,
+                        error: Some(program_engine::ExecutionError {
+                            kind: program_engine::ExecutionErrorKind::Internal,
                             message: "interpreter stopped without a report; consult scope outcomes".into(),
                         }),
                         pending_request_ids: Vec::new(), metrics: Default::default(),
@@ -402,8 +479,8 @@ impl ProgramRunner {
                         Ok(Ok(page)) => page,
                         Ok(Err(error)) => {
                             if bridge_failure.is_none() {
-                                bridge_failure = Some(codemode::ExecutionError {
-                                    kind: codemode::ExecutionErrorKind::Internal,
+                                bridge_failure = Some(program_engine::ExecutionError {
+                                    kind: program_engine::ExecutionErrorKind::Internal,
                                     message: format!("recorded outcomes unavailable: {error}"),
                                 });
                                 execution.cancel();
@@ -582,7 +659,7 @@ const CONFLICT: &str = "conflict";
 fn replay_check(
     recorded: &BTreeMap<String, CodeToolCallOutcome>,
     request: &HostRequest,
-) -> Result<bool, codemode::ExecutionError> {
+) -> Result<bool, program_engine::ExecutionError> {
     let Some(call) = recorded.get(&request.request_id) else {
         return Ok(false);
     };
@@ -606,9 +683,9 @@ fn replay_check(
     Ok(true)
 }
 
-fn diverged(request_id: &str, how: &str) -> codemode::ExecutionError {
-    codemode::ExecutionError {
-        kind: codemode::ExecutionErrorKind::Nondeterminism,
+fn diverged(request_id: &str, how: &str) -> program_engine::ExecutionError {
+    program_engine::ExecutionError {
+        kind: program_engine::ExecutionErrorKind::Nondeterminism,
         message: format!("replayed request {request_id} {how} than the recorded run"),
     }
 }
@@ -617,9 +694,9 @@ fn diverged(request_id: &str, how: &str) -> codemode::ExecutionError {
 /// is full, and count those sent. One too large to deliver is replaced by
 /// a failure in place.
 fn send_feed(
-    completions: &codemode::CompletionSender,
+    completions: &program_engine::CompletionSender,
     feed: &mut VecDeque<HostCompletion>,
-) -> Result<usize, codemode::ExecutionError> {
+) -> Result<usize, program_engine::ExecutionError> {
     let mut sent = 0;
     while let Some(completion) = feed.front() {
         match completions.complete(completion.clone()) {
@@ -627,8 +704,8 @@ fn send_feed(
                 feed.pop_front();
                 sent += 1;
             }
-            Err(codemode::CompletionError::Full) => return Ok(sent),
-            Err(codemode::CompletionError::TooLarge) => {
+            Err(program_engine::CompletionError::Full) => return Ok(sent),
+            Err(program_engine::CompletionError::TooLarge) => {
                 let request_id = completion.request_id.clone();
                 feed[0] = HostCompletion {
                     request_id,
@@ -639,7 +716,7 @@ fn send_feed(
                     completed_at_ms: completion.completed_at_ms,
                 };
             }
-            Err(codemode::CompletionError::Stopped) => {
+            Err(program_engine::CompletionError::Stopped) => {
                 feed.clear();
                 return Ok(sent);
             }
@@ -685,7 +762,7 @@ fn is_failure_code(code: &str) -> bool {
 pub(crate) fn program_catalog(
     scope: &CodeToolScopeReport,
     requires: &[harness::ContractPin],
-) -> Result<CodeToolCatalog, ContractError> {
+) -> Result<ProgramCatalog, ContractError> {
     let current = scope
         .contracts
         .values()
@@ -696,13 +773,13 @@ pub(crate) fn program_catalog(
         .iter()
         .map(|pin| pin.contract.as_str())
         .collect::<BTreeSet<_>>();
-    Ok(CodeToolCatalog {
+    Ok(ProgramCatalog {
         version: 1,
         bindings: scope
             .contracts
             .iter()
             .filter(|(_, binding)| required.contains(binding.contract.as_str()))
-            .map(|(handle, binding)| codemode::ToolBinding {
+            .map(|(handle, binding)| program_engine::ToolBinding {
                 name: binding.contract.clone(),
                 binding_id: handle.clone(),
             })
@@ -881,7 +958,10 @@ mod tests {
             ),
         ] {
             let error = replay_check(&journal, &diverged).unwrap_err();
-            assert_eq!(error.kind, codemode::ExecutionErrorKind::Nondeterminism);
+            assert_eq!(
+                error.kind,
+                program_engine::ExecutionErrorKind::Nondeterminism
+            );
             assert!(error.message.contains("call-1"), "{}", error.message);
         }
     }

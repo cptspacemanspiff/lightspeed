@@ -11,6 +11,7 @@ members = [
     "crates/bots",
     "crates/channels",
     "crates/codemode",
+    "crates/program-engine",
     "crates/environments",
     "crates/harness",
     "crates/mcp",

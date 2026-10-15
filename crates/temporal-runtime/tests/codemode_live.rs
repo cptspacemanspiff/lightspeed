@@ -383,7 +383,6 @@ async fn fresh_quickjs_runtime_timing() -> anyhow::Result<()> {
                     max_tool_calls: limits.max_tool_calls,
                     max_outstanding_tool_calls: limits.max_outstanding_tool_calls,
                 },
-                program: None,
             },
             Cancellation::default(),
         )?;
