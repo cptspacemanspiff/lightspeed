@@ -285,7 +285,8 @@ pub(crate) fn classify_emission(
         // child waits on people.
         harness::EmissionBody::SourceResolution { .. }
         | harness::EmissionBody::ToolInvocation { .. }
-        | harness::EmissionBody::RunWaiting { .. } => None,
+        | harness::EmissionBody::RunWaiting { .. }
+        | harness::EmissionBody::ScopeProgress { .. } => None,
     }
 }
 

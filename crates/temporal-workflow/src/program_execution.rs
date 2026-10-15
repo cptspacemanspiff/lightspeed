@@ -115,6 +115,14 @@ pub enum ProgramAttemptOutcome {
     },
     /// The handler threw or the attempt could not complete it.
     Threw { error_kind: String, message: String },
+    /// The program waited only on calls for the hold window and was
+    /// suspended with its scope open. The next attempt replays it once the
+    /// scope holds more than `recorded` outcomes.
+    Suspended {
+        recorded: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        waiting_on: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +167,8 @@ pub enum ProgramRunPhase {
     Starting,
     Preparing,
     Running,
+    /// The last attempt suspended; the run waits for its calls to progress.
+    Suspended,
     Finalizing,
     Resolved,
     Cancelled,

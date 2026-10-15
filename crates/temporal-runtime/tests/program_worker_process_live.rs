@@ -1,8 +1,11 @@
-//! Kill the code worker process running a program attempt while the program
-//! waits on a person, answer on a replacement process, and check the retried
-//! attempt replays the recorded calls instead of making them again. Session
-//! workers run in this process; the code worker is a real child process.
+//! Lose the code worker process while a program waits on a person, either
+//! during its attempt or after the attempt suspended, answer, and check a
+//! replacement process finishes the run by replaying the recorded calls
+//! instead of making them again. Session workers run in this process; the
+//! code worker is a real child process.
 
+#[path = "support/programs.rs"]
+mod programs;
 mod support;
 
 use std::{process::Stdio, sync::Arc, time::Duration};
@@ -10,25 +13,23 @@ use std::{process::Stdio, sync::Arc, time::Duration};
 use api::AgentApiService;
 use async_trait::async_trait;
 use harness::{
-    CoreAgentIoError, CoreAgentLlm, CoreAgentState, LlmGenerationRequest, LlmGenerationResult,
-    SessionId, WorkflowToolTarget,
-    storage::{BlobStore, ReadSessionEvents, SessionStore},
+    CoreAgentIoError, CoreAgentLlm, LlmGenerationRequest, LlmGenerationResult, SessionId,
+    storage::BlobStore,
 };
+use programs::{admitted_tools, attempt_activities, program_execution_id, session_state};
 use serde_json::{Value, json};
 use support::live::{
     LIVE_TEST_LOCK, require_storage_live_env, run_with_live_worker_builder, seed_agent_default,
     wait_for_terminal_run_with_timeout, wait_until,
 };
+use temporal_runtime::program::PROGRAM_HOLD_WINDOW_ENV;
 use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     worker::{ActivityState, SessionTools, WorkerActivities},
 };
-use temporal_workflow::{
-    ACTIVITY_PROGRAM_ATTEMPT, ProgramRunWorkflow, ReducedSession, reduce_session_entries_from,
-};
-use temporalio_client::WorkflowExecutionStatus;
-use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
+use temporal_workflow::{ProgramRunPhase, ProgramRunWorkflow};
+use temporalio_client::{WorkflowExecutionStatus, WorkflowQueryOptions};
 use temporalio_sdk::workflow_replayer::{WorkflowReplayer, WorkflowReplayerOptions};
 use tokio::process::{Child, Command};
 
@@ -67,7 +68,11 @@ struct CodeProcess {
 }
 
 impl CodeProcess {
-    fn start(session_queue: &str, code_queue: &str) -> anyhow::Result<Self> {
+    fn start_with(
+        session_queue: &str,
+        code_queue: &str,
+        env: &[(&str, &str)],
+    ) -> anyhow::Result<Self> {
         let log = tempfile::NamedTempFile::new()?;
         let child = Command::new(env!("CARGO_BIN_EXE_lightspeed-runtime"))
             .args([
@@ -87,6 +92,7 @@ impl CodeProcess {
                 "unused-code-test-route",
             )
             .env("RUST_LOG", "warn")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(log.as_file().try_clone()?)
             .stderr(log.as_file().try_clone()?)
@@ -107,28 +113,6 @@ impl CodeProcess {
         self.child.kill().await?;
         self.child.wait().await?;
         Ok(())
-    }
-}
-
-async fn session_state(
-    store: &store_pg::PgStore,
-    session_id: &SessionId,
-) -> anyhow::Result<CoreAgentState> {
-    let mut reduced = ReducedSession::default();
-    let mut after = None;
-    loop {
-        let page = store
-            .read_after(ReadSessionEvents {
-                session_id: session_id.clone(),
-                after,
-                limit: 1000,
-            })
-            .await?;
-        reduced = reduce_session_entries_from(reduced, &page.entries)?;
-        if page.complete {
-            return Ok(reduced.core_state);
-        }
-        after = page.next_after;
     }
 }
 
@@ -178,22 +162,21 @@ fn profile(profile_id: &api::ProfileId) -> api::AgentProfileInput {
     }
 }
 
-/// Tool ids of the scoped calls the session admitted, in log order.
-fn admitted_tools(state: &CoreAgentState) -> Vec<String> {
-    let mut calls = state
-        .code_tools
-        .scopes
-        .values()
-        .flat_map(|scope| scope.calls.values())
-        .map(|call| (call.promise_id_base, call.spec.tool_id.as_str().to_owned()))
-        .collect::<Vec<_>>();
-    calls.sort();
-    calls.into_iter().map(|(_, tool)| tool).collect()
+/// How the code worker is lost in [`resume_after_losing_the_code_worker`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Loss {
+    /// While the attempt holds the program waiting on its question.
+    DuringAttempt,
+    /// After the attempt suspended, when no attempt is running.
+    WhileSuspended,
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
-async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> anyhow::Result<()> {
+/// Run the resuming program on a child code worker, lose that worker as
+/// `loss` says, answer the question, and finish on a replacement worker.
+/// Checks the run's output and that no call was admitted twice, then
+/// returns, for each attempt activity the run scheduled, the Temporal
+/// attempts it started.
+async fn resume_after_losing_the_code_worker(loss: Loss) -> anyhow::Result<Vec<Vec<i32>>> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -201,6 +184,13 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
     let activity_store = store.clone();
     let code_queue = format!("program-process-live-{}", uuid::Uuid::new_v4().simple());
     let activity_queue = code_queue.clone();
+    // A short hold window suspends the waiting program within a second.
+    let env: &[(&str, &str)] = match loss {
+        Loss::DuringAttempt => &[],
+        Loss::WhileSuspended => &[(PROGRAM_HOLD_WINDOW_ENV, "1000")],
+    };
+    let mut attempts = Vec::new();
+    let attempts_out = &mut attempts;
     run_with_live_worker_builder(
         move |client, _| async move {
             let tools = Arc::new(SessionTools::from_pg_store(activity_store.clone()));
@@ -235,7 +225,7 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
                 config: None,
             })
             .await?;
-            let mut original = CodeProcess::start(&session_queue, &code_queue)?;
+            let mut original = CodeProcess::start_with(&session_queue, &code_queue, env)?;
             let result = async {
                 let run = api
                     .start_run(api::RunStartParams {
@@ -259,16 +249,7 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
                     Duration::from_secs(30),
                     async || {
                         original.ensure_running()?;
-                        request = api
-                            .list_inbox_requests(api::InboxRequestListParams {
-                                session: Some(session_id.to_string()),
-                                ..Default::default()
-                            })
-                            .await?
-                            .result
-                            .requests
-                            .into_iter()
-                            .next();
+                        request = inbox(&api, &session_id).await?.into_iter().next();
                         Ok(request.is_some())
                     },
                 )
@@ -277,28 +258,30 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
                 assert_eq!(request.ask, "Resume pr-9?");
                 let state = session_state(&store, &session_id).await?;
                 assert_eq!(admitted_tools(&state), ["time.sleep", "input.request"]);
-                let invocation = state
-                    .workflow_tools
-                    .start_requests
-                    .values()
-                    .find(|request| {
-                        request.tool_id.as_str() == harness::PROGRAM_EXECUTE_WORKFLOW_TOOL_ID
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("program invocation missing"))?;
-                let WorkflowToolTarget::Start { start } =
-                    &state.workflow_tools.bindings[&invocation.tool_id].target
-                else {
-                    anyhow::bail!("program invocation must have a workflow start recipe")
-                };
-                let execution_id = harness::workflow_tool_execution_id(
-                    &invocation.invocation_id,
-                    &start.recipe_fingerprint,
-                );
+                let handle =
+                    client.get_workflow_handle::<ProgramRunWorkflow>(program_execution_id(&state)?);
+                if loss == Loss::WhileSuspended {
+                    wait_until(
+                        "the attempt's suspension",
+                        Duration::from_secs(30),
+                        async || {
+                            original.ensure_running()?;
+                            let snapshot = handle
+                                .query(
+                                    ProgramRunWorkflow::snapshot,
+                                    (),
+                                    WorkflowQueryOptions::default(),
+                                )
+                                .await?;
+                            Ok(snapshot.phase == ProgramRunPhase::Suspended)
+                        },
+                    )
+                    .await?;
+                }
 
-                // Lose the attempt with its process, then answer while a
-                // replacement takes over.
+                // Lose the worker, then answer while a replacement takes over.
                 original.kill_and_reap().await?;
-                let mut replacement = CodeProcess::start(&session_queue, &code_queue)?;
+                let mut replacement = CodeProcess::start_with(&session_queue, &code_queue, env)?;
                 let resumed = async {
                     api.answer_inbox_request(api::InboxRequestAnswerParams {
                         request_id: request.request_id.clone(),
@@ -331,18 +314,9 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
                     // neither again and asked only once.
                     let state = session_state(&store, &session_id).await?;
                     assert_eq!(admitted_tools(&state), ["time.sleep", "input.request"]);
-                    let requests = api
-                        .list_inbox_requests(api::InboxRequestListParams {
-                            session: Some(session_id.to_string()),
-                            ..Default::default()
-                        })
-                        .await?
-                        .result
-                        .requests;
+                    let requests = inbox(&api, &session_id).await?;
                     assert_eq!(requests.len(), 1, "{requests:?}");
 
-                    // One attempt activity, completed on its second attempt.
-                    let handle = client.get_workflow_handle::<ProgramRunWorkflow>(execution_id);
                     wait_until(
                         "program workflow closure",
                         Duration::from_secs(15),
@@ -356,33 +330,7 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
                         .fetch_history(Default::default())
                         .into_events()
                         .await?;
-                    let scheduled = events
-                        .iter()
-                        .filter_map(|event| match &event.attributes {
-                            Some(Attributes::ActivityTaskScheduledEventAttributes(attributes))
-                                if attributes
-                                    .activity_type
-                                    .as_ref()
-                                    .is_some_and(|kind| kind.name == ACTIVITY_PROGRAM_ATTEMPT) =>
-                            {
-                                Some(event.event_id)
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    assert_eq!(scheduled.len(), 1, "one attempt activity");
-                    let attempts = events
-                        .iter()
-                        .filter_map(|event| match &event.attributes {
-                            Some(Attributes::ActivityTaskStartedEventAttributes(attributes))
-                                if attributes.scheduled_event_id == scheduled[0] =>
-                            {
-                                Some(attributes.attempt)
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    assert_eq!(attempts, [2], "the lost attempt was retried once");
+                    *attempts_out = attempt_activities(&events);
                     WorkflowReplayer::new(
                         WorkflowReplayerOptions::new()
                             .register_workflow::<ProgramRunWorkflow>()?
@@ -409,5 +357,44 @@ async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> 
             result
         },
     )
-    .await
+    .await?;
+    Ok(attempts)
+}
+
+async fn inbox(
+    api: &GatewayAgentApi,
+    session_id: &SessionId,
+) -> anyhow::Result<Vec<api::InputRequestView>> {
+    Ok(api
+        .list_inbox_requests(api::InboxRequestListParams {
+            session: Some(session_id.to_string()),
+            ..Default::default()
+        })
+        .await?
+        .result
+        .requests)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
+async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> anyhow::Result<()> {
+    // One attempt activity, completed on its retry.
+    assert_eq!(
+        resume_after_losing_the_code_worker(Loss::DuringAttempt).await?,
+        [vec![2]]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
+async fn a_suspended_program_resumes_on_a_new_worker_when_its_question_is_answered()
+-> anyhow::Result<()> {
+    // The first attempt suspended; the answer woke a second, which replayed
+    // the program on the replacement worker. Neither was retried.
+    assert_eq!(
+        resume_after_losing_the_code_worker(Loss::WhileSuspended).await?,
+        [vec![1], vec![1]]
+    );
+    Ok(())
 }

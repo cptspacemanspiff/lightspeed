@@ -1441,9 +1441,9 @@ pub fn classify_emission(
             output_ref: output.map(|output| output.content_ref),
         },
         EmissionBody::RunWaiting { token, .. } => EmissionDisposition::Waiting { token },
-        EmissionBody::SourceResolution { .. } | EmissionBody::InvocationCancellation { .. } => {
-            EmissionDisposition::Ignore
-        }
+        EmissionBody::SourceResolution { .. }
+        | EmissionBody::InvocationCancellation { .. }
+        | EmissionBody::ScopeProgress { .. } => EmissionDisposition::Ignore,
     }
 }
 

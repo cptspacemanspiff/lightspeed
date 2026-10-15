@@ -1058,6 +1058,29 @@
           "type": "object"
         },
         {
+          "description": "A call in a program run's scope completed: the scope now holds\n`completed` recorded outcomes. Wakes the run's program workflow when\nits attempt is suspended waiting on calls.",
+          "properties": {
+            "completed": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "execution_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "scope_progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "execution_id",
+            "completed"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "kind": {
               "const": "source_resolution",
