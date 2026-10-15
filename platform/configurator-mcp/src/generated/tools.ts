@@ -3415,6 +3415,19 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "string"
         },
+        "ProgramInputDefaults": {
+          "description": "Defaults for a program run's input requests.",
+          "properties": {
+            "escalateTo": {
+              "description": "Who takes over, once and with a fresh deadline, a request that\nnames no escalation list of its own when its deadline passes\nunanswered.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "RunLimitsConfig": {
           "properties": {
             "maxToolRounds": {
@@ -3497,6 +3510,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "description": "One invocation of a program session's program. The JSON input is\nvalidated against the pinned program's input schema at admission.",
               "properties": {
                 "input": {},
+                "inputDefaults": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ProgramInputDefaults"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Settings the run's input requests fall back on when a request\nleaves them out."
+                },
                 "type": {
                   "const": "program",
                   "type": "string"
@@ -10403,6 +10427,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "description": "Reversible pause: sessions and chat context stay, nothing is\ndelivered.",
               "type": "boolean"
             },
+            "escalateTo": {
+              "description": "Who takes over a program's question that nobody answered in time,\nwhen neither the question nor the event's trigger names anyone.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "profileId": {
               "$ref": "#/definitions/ProfileId"
             },
@@ -10651,6 +10682,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "enabled": {
               "default": true,
               "type": "boolean"
+            },
+            "escalateTo": {
+              "description": "Who takes over a program's question about this trigger's events that\nnobody answered in time, when the question names no one: absent\ninherits the bot's `escalateTo`.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "filter": {
               "description": "CEL over `{event, data, headers}`; a non-matching event is refused\nand never stored. Fails closed.",
@@ -11214,6 +11255,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "description": "Reversible pause: sessions and chat context stay, nothing is\ndelivered.",
               "type": "boolean"
             },
+            "escalateTo": {
+              "description": "Who takes over a program's question that nobody answered in time,\nwhen neither the question nor the event's trigger names anyone.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "profileId": {
               "$ref": "#/definitions/ProfileId"
             },
@@ -11708,6 +11756,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "enabled": {
               "default": true,
               "type": "boolean"
+            },
+            "escalateTo": {
+              "description": "Who takes over a program's question about this trigger's events that\nnobody answered in time, when the question names no one: absent\ninherits the bot's `escalateTo`.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "filter": {
               "description": "CEL over `{event, data, headers}`; a non-matching event is refused\nand never stored. Fails closed.",

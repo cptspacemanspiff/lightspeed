@@ -415,7 +415,8 @@ pub fn input_reassign_definition() -> crate::runtime::FunctionDefinition {
     .with_output_schema(crate::definitions::output_schema_for::<InputControlOutput>())
 }
 
-fn validate_people(field: &str, people: &[String]) -> ToolResult<()> {
+/// Check a list of people a request is asked of or escalates to.
+pub fn validate_people(field: &str, people: &[String]) -> ToolResult<()> {
     if people.len() > MAX_ASSIGNEES {
         return Err(invalid(format!(
             "{field} may name at most {MAX_ASSIGNEES} people"

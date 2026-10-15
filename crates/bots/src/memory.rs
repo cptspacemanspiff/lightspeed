@@ -652,6 +652,7 @@ mod tests {
             self_config: false,
             emit: false,
             enabled: true,
+            escalate_to: Vec::new(),
         }
     }
 
@@ -664,6 +665,7 @@ mod tests {
             deliver: None,
             session_close_after_ms: None,
             enabled: true,
+            escalate_to: None,
         }
     }
 

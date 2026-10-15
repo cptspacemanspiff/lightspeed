@@ -299,7 +299,7 @@ impl<'a> CoreAgentProjector<'a> {
                     preview_truncated,
                 })
             }
-            Some(RunSource::Program { input_ref }) => Ok(RunSummarySourceView::Program {
+            Some(RunSource::Program { input_ref, .. }) => Ok(RunSummarySourceView::Program {
                 input_ref: input_ref.as_str().to_owned(),
             }),
             None => Ok(RunSummarySourceView::Input {
@@ -334,7 +334,7 @@ impl<'a> CoreAgentProjector<'a> {
                 RunSource::Input { input } => RunViewSource::Input {
                     items: self.project_input_entries(input).await?,
                 },
-                RunSource::Program { input_ref } => RunViewSource::Program {
+                RunSource::Program { input_ref, .. } => RunViewSource::Program {
                     input_ref: input_ref.as_str().to_owned(),
                 },
             },
@@ -842,7 +842,7 @@ impl<'a> CoreAgentProjector<'a> {
                         RunSource::Input { input } => RunAcceptedSourceView::Input {
                             entries: project_context_entry_inputs(input),
                         },
-                        RunSource::Program { input_ref } => RunAcceptedSourceView::Program {
+                        RunSource::Program { input_ref, .. } => RunAcceptedSourceView::Program {
                             input_ref: input_ref.as_str().to_owned(),
                         },
                     },

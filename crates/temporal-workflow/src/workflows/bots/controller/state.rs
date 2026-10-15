@@ -1599,6 +1599,7 @@ mod tests {
             coalesce: None,
             when_busy: None,
             while_waiting: None,
+            escalate_to: Vec::new(),
             hops: 0,
             reply: false,
             media: Vec::new(),

@@ -320,14 +320,20 @@ pub fn admit_command(
                         .map_err(command_rejection_from_domain)?;
                     RunSource::Input { input }
                 }
-                RunRequestSource::Program { input_ref } => {
+                RunRequestSource::Program {
+                    input_ref,
+                    input_defaults,
+                } => {
                     if !crate::is_program_session(state) {
                         return reject(
                             CommandRejectionKind::UnsupportedForSessionDriver,
                             "agent sessions accept only input runs",
                         );
                     }
-                    RunSource::Program { input_ref }
+                    RunSource::Program {
+                        input_ref,
+                        input_defaults,
+                    }
                 }
             };
             let joins = CoreAgentJoins {

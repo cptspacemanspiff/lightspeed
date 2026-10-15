@@ -55,7 +55,7 @@ import { cn } from "@/lib/utils";
 import { useActionPermissions } from "@/lib/permissions";
 import { BotEnvironmentCard } from "./environment-card";
 import { BotAvatar } from "./face";
-import { botInputOf } from "./identity";
+import { botInputOf, peopleFromText } from "./identity";
 import { mergeSessionProfileFields, type SessionProfileFields } from "./session-profile";
 import { briefSummary, capabilitySummary, environmentSummary, guardrailsSummary, otherBotsSummary } from "./setup-summary";
 import { triggerSummary } from "./trigger-summary";
@@ -656,13 +656,15 @@ function GuardrailsSection({
   const [breakerWindow, setBreakerWindow] = useState(bot.breaker ? String(Math.round(bot.breaker.windowMs / 60_000)) : "");
   const [closeAfterDays, setCloseAfterDays] = useState(bot.routedSessionCloseAfterMs ? String(Math.round(bot.routedSessionCloseAfterMs / 86_400_000)) : "");
   const [selfConfig, setSelfConfig] = useState(bot.selfConfig ?? false);
+  const [escalateTo, setEscalateTo] = useState((bot.escalateTo ?? []).join(", "));
   useEffect(() => {
     setRunsPerDay(bot.runsPerDay?.toString() ?? "");
     setBreakerFires(bot.breaker?.fires.toString() ?? "");
     setBreakerWindow(bot.breaker ? String(Math.round(bot.breaker.windowMs / 60_000)) : "");
     setCloseAfterDays(bot.routedSessionCloseAfterMs ? String(Math.round(bot.routedSessionCloseAfterMs / 86_400_000)) : "");
     setSelfConfig(bot.selfConfig ?? false);
-  }, [bot.runsPerDay, bot.breaker, bot.routedSessionCloseAfterMs, bot.selfConfig]);
+    setEscalateTo((bot.escalateTo ?? []).join(", "));
+  }, [bot.runsPerDay, bot.breaker, bot.routedSessionCloseAfterMs, bot.selfConfig, bot.escalateTo]);
 
   const fields = () => ({
     runsPerDay: runsPerDay.trim() ? Number(runsPerDay) : null,
@@ -671,6 +673,7 @@ function GuardrailsSection({
       : null,
     routedSessionCloseAfterMs: closeAfterDays.trim() ? Math.round(Number(closeAfterDays) * 86_400_000) : null,
     selfConfig,
+    escalateTo: peopleFromText(escalateTo),
   });
   const botDirty =
     JSON.stringify(fields()) !==
@@ -679,6 +682,7 @@ function GuardrailsSection({
       breaker: bot.breaker ?? null,
       routedSessionCloseAfterMs: bot.routedSessionCloseAfterMs ?? null,
       selfConfig: bot.selfConfig ?? false,
+      escalateTo: bot.escalateTo ?? [],
     });
   const problem = closeAfterDays.trim() && !(Number(closeAfterDays) >= 1) ? "Idle close must be at least one day." : null;
 
@@ -756,6 +760,20 @@ function GuardrailsSection({
             A trigger exceeding this rate pauses itself until someone resumes it.
           </p>
         </div>
+        <Field className="sm:col-span-2">
+          <FieldLabel htmlFor="bot-escalate-to">Escalate unanswered questions to</FieldLabel>
+          <Input
+            id="bot-escalate-to"
+            value={escalateTo}
+            onChange={(event) => setEscalateTo(event.target.value)}
+            placeholder="Nobody"
+            disabled={readOnly}
+          />
+          <FieldDescription>
+            Comma-separated. A program's question that nobody answers by its deadline goes to these people once,
+            unless the question or its trigger names others.
+          </FieldDescription>
+        </Field>
       </div>
       <div className="grid gap-2">
         <ToggleRow

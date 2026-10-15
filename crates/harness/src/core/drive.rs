@@ -11660,6 +11660,7 @@ mod tests {
             submission_id: None,
             source: RunRequestSource::Program {
                 input_ref: BlobRef::from_bytes(b"{\"claim\":1}"),
+                input_defaults: None,
             },
             run_config,
         })

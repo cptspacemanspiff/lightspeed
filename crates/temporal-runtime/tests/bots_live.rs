@@ -202,6 +202,7 @@ fn bot_document(profile_id: &ProfileId) -> BotDocument {
         self_config: false,
         emit: false,
         enabled: true,
+        escalate_to: Vec::new(),
     }
 }
 
@@ -598,6 +599,7 @@ async fn bots_live_routed_program_session_moves_to_a_new_program_revision() -> a
                     deliver: None,
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 pairing_code: None,
             }],
@@ -795,6 +797,7 @@ async fn bots_live_hmac_webhook_verifies_without_a_caller() -> anyhow::Result<()
                     deliver: None,
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 pairing_code: None,
             }],
@@ -893,6 +896,7 @@ async fn bots_live_webhook_trigger_coalesces_events() -> anyhow::Result<()> {
                     deliver: None,
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 pairing_code: None,
             }],
@@ -1050,6 +1054,7 @@ async fn bots_live_schedule_trigger_reconciles_temporal_schedule() -> anyhow::Re
                         deliver: None,
                         session_close_after_ms: None,
                         enabled: true,
+                        escalate_to: None,
                     },
                     pairing_code: None,
                 },
@@ -1466,6 +1471,7 @@ async fn bots_live_superseding_trigger_cancels_a_waiting_program_run() -> anyhow
                     }),
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 pairing_code: None,
             }],
@@ -1553,6 +1559,110 @@ async fn bots_live_superseding_trigger_cancels_a_waiting_program_run() -> anyhow
             events
                 .iter()
                 .any(|event| event.seq == 2 && event.outcome == Some(BotEventOutcome::Handled))
+        })
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_program_questions_escalate_to_the_trigger_else_the_bot() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, _client| async move {
+        let profile_id = ProfileId::new(unique("bots-live-asking"));
+        api.create_profile(ProfileCreateParams {
+            profile: asking_program_input(&profile_id),
+        })
+        .await?;
+        let trigger_id = BotTriggerId::new("hook");
+        let bot_id = create_bot(
+            &api,
+            &profile_id,
+            |bot| bot.escalate_to = vec!["oncall".to_owned()],
+            vec![BotTriggerInput {
+                trigger_id: trigger_id.clone(),
+                document: BotTriggerDocument {
+                    spec: BotTriggerSpec::Webhook {
+                        verification: WebhookVerification::Token,
+                        preset: None,
+                    },
+                    filter: None,
+                    route: Some(api::BotTriggerRoute::PerKey {
+                        key: Some("data.key".to_owned()),
+                    }),
+                    coalesce: None,
+                    deliver: None,
+                    session_close_after_ms: None,
+                    enabled: true,
+                    escalate_to: Some(vec!["lead".to_owned()]),
+                },
+                pairing_code: None,
+            }],
+        )
+        .await?;
+        let answer = |request: api::InputRequestView| {
+            let api = api.clone();
+            async move {
+                api.answer_inbox_request(api::InboxRequestAnswerParams {
+                    request_id: request.request_id,
+                    approved: true,
+                    value: None,
+                    comment: None,
+                })
+                .await
+            }
+        };
+
+        // A manual event has no trigger: its question takes the bot's list.
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("manual"),
+        })
+        .await?;
+        let request = pending_request(&api, &bot_main_session_id(&bot_id, 1)).await?;
+        assert_eq!(request.escalate_to, vec!["oncall".to_owned()]);
+        answer(request).await?;
+
+        // A trigger's own list wins over the bot's.
+        let ingest_path = api
+            .read_bot_trigger(api::BotTriggerReadParams {
+                bot_id: bot_id.clone(),
+                trigger_id: trigger_id.clone(),
+            })
+            .await?
+            .result
+            .trigger
+            .ingest_path
+            .expect("webhook ingest path");
+        let token = ingest_path.rsplit('/').next().expect("token").to_owned();
+        let body = serde_json::json!({ "kind": "pr", "key": "a", "note": "hooked" });
+        let outcome = api
+            .ingest_bot_webhook(
+                bot_id.as_str(),
+                trigger_id.as_str(),
+                &token,
+                Default::default(),
+                body.to_string().as_bytes(),
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                temporal_runtime::bots::hooks::WebhookIngestOutcome::Admitted { .. }
+            ),
+            "{outcome:?}"
+        );
+        let keyed = bots::ids::bot_keyed_session_id(&bot_id, "a");
+        let request = pending_request(&api, &keyed).await?;
+        assert_eq!(request.escalate_to, vec!["lead".to_owned()]);
+        answer(request).await?;
+        // Deferred counts as an outcome; wait for both runs to finish.
+        wait_for_events(&api, &bot_id, "both verdicts", |events| {
+            events.len() == 2
+                && events
+                    .iter()
+                    .all(|event| event.outcome == Some(BotEventOutcome::Handled))
         })
         .await?;
         Ok(())

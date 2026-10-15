@@ -433,6 +433,7 @@ mod tests {
                     self_config: false,
                     emit: false,
                     enabled: true,
+                    escalate_to: Vec::new(),
                 },
                 event_seq: 0,
                 closed_at_ms: None,
@@ -459,6 +460,7 @@ mod tests {
                     deliver: None,
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 secrets: bots::BotTriggerSecrets {
                     webhook_token: None,

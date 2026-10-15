@@ -378,7 +378,7 @@ pub(crate) fn validate_run_invocation(
             "run-owned invocations are limited to the joined program-execute start",
         ));
     }
-    let RunSource::Program { input_ref } = &active_run.source else {
+    let RunSource::Program { input_ref, .. } = &active_run.source else {
         return Err(invalid("run-owned invocation requires a program run"));
     };
     if &invocation.arguments_ref != input_ref || invocation.execution_context_ref.is_some() {
@@ -493,7 +493,7 @@ fn start_proposals(
         run_id: Some(run.run_id),
         ..CoreAgentJoins::default()
     };
-    let RunSource::Program { input_ref } = &run.source else {
+    let RunSource::Program { input_ref, .. } = &run.source else {
         return Err(DomainError::InvariantViolation(
             "program session run has no program input".to_owned(),
         )

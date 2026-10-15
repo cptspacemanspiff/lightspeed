@@ -62,6 +62,7 @@ fn bot_document(profile: &str) -> BotDocument {
         self_config: false,
         emit: false,
         enabled: true,
+        escalate_to: Vec::new(),
     }
 }
 
@@ -74,6 +75,7 @@ fn trigger_document(spec: BotTriggerSpec) -> BotTriggerDocument {
         deliver: None,
         session_close_after_ms: None,
         enabled: true,
+        escalate_to: None,
     }
 }
 

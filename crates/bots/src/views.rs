@@ -762,6 +762,7 @@ mod tests {
                 self_config: true,
                 emit: true,
                 enabled: true,
+                escalate_to: Vec::new(),
             },
             event_seq: 17,
             closed_at_ms: None,
@@ -784,6 +785,7 @@ mod tests {
                 deliver: None,
                 session_close_after_ms: None,
                 enabled: true,
+                escalate_to: None,
             },
             secrets: BotTriggerSecrets {
                 webhook_token: Some("a".repeat(48)),
@@ -1496,6 +1498,7 @@ mod tests {
             coalesce: None,
             when_busy: None,
             while_waiting: None,
+            escalate_to: Vec::new(),
             hops: 0,
             reply: false,
             media: Vec::new(),

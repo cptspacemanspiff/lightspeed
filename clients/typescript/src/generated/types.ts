@@ -1059,6 +1059,12 @@ export type BotTriggerView = {
   disabledReason?: BotTriggerDisabledReason | null;
   enabled?: boolean;
   /**
+   * Who takes over a program's question about this trigger's events that
+   * nobody answered in time, when the question names no one: absent
+   * inherits the bot's `escalateTo`.
+   */
+  escalateTo?: string[] | null;
+  /**
    * CEL over `{event, data, headers}`; a non-matching event is refused
    * and never stored. Fails closed.
    */
@@ -1780,6 +1786,12 @@ export type BotTriggerInput = {
   deliver?: BotDeliverPolicy | null;
   enabled?: boolean;
   /**
+   * Who takes over a program's question about this trigger's events that
+   * nobody answered in time, when the question names no one: absent
+   * inherits the bot's `escalateTo`.
+   */
+  escalateTo?: string[] | null;
+  /**
    * CEL over `{event, data, headers}`; a non-matching event is refused
    * and never stored. Fails closed.
    */
@@ -1956,6 +1968,11 @@ export type RunStartSource =
     }
   | {
       input: unknown;
+      /**
+       * Settings the run's input requests fall back on when a request
+       * leaves them out.
+       */
+      inputDefaults?: ProgramInputDefaults | null;
       type: "program";
     };
 /**
@@ -3571,6 +3588,11 @@ export interface BotView {
    */
   enabled?: boolean;
   /**
+   * Who takes over a program's question that nobody answered in time,
+   * when neither the question nor the event's trigger names anyone.
+   */
+  escalateTo?: string[];
+  /**
    * Highest `#N` admitted so far.
    */
   eventSeq: number;
@@ -4026,6 +4048,11 @@ export interface BotListItem {
    * delivered.
    */
   enabled?: boolean;
+  /**
+   * Who takes over a program's question that nobody answered in time,
+   * when neither the question nor the event's trigger names anyone.
+   */
+  escalateTo?: string[];
   /**
    * Highest `#N` admitted so far.
    */
@@ -7174,6 +7201,11 @@ export interface BotInput {
    * delivered.
    */
   enabled?: boolean;
+  /**
+   * Who takes over a program's question that nobody answered in time,
+   * when neither the question nor the event's trigger names anyone.
+   */
+  escalateTo?: string[];
   profileId: ProfileId;
   /**
    * Close routed (`perKey` / `perEvent`) sessions idle longer than this;
@@ -8345,6 +8377,20 @@ export interface ProfilePutParams {
  */
 export interface ProfileReadParams {
   profileId: ProfileId;
+}
+/**
+ * Defaults for a program run's input requests.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramInputDefaults".
+ */
+export interface ProgramInputDefaults {
+  /**
+   * Who takes over, once and with a fresh deadline, a request that
+   * names no escalation list of its own when its deadline passes
+   * unanswered.
+   */
+  escalateTo?: string[];
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

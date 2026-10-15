@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/combobox";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { peopleFromText } from "./identity";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -108,6 +109,7 @@ export function triggerInputOf(trigger: BotTriggerView): BotTriggerInput {
     coalesce: trigger.coalesce ?? null,
     deliver: trigger.deliver ?? null,
     sessionCloseAfterMs: trigger.sessionCloseAfterMs ?? null,
+    escalateTo: trigger.escalateTo ?? null,
   };
   switch (trigger.kind) {
     case "schedule":
@@ -1253,6 +1255,8 @@ export interface DeliveryFormState {
   whenBusy: "queue" | "steer" | "append";
   /** A run that waits on people: queue behind it, or cancel it for this event. */
   whileWaiting: "queue" | "supersede";
+  /** Comma-separated escalation list; empty inherits the bot's. */
+  escalateTo: string;
   debounceSeconds: string;
   maxWaitSeconds: string;
   maxCount: string;
@@ -1666,6 +1670,7 @@ export const defaultDeliveryForm: DeliveryFormState = {
   filter: "",
   whenBusy: "queue",
   whileWaiting: "queue",
+  escalateTo: "",
   debounceSeconds: "",
   maxWaitSeconds: "",
   maxCount: "",
@@ -1701,6 +1706,7 @@ function deliveryFormFromTrigger(trigger: BotTriggerView): DeliveryFormState {
     filter: trigger.filter ?? "",
     whenBusy: trigger.deliver?.whenBusy ?? "queue",
     whileWaiting: trigger.deliver?.whileWaiting ?? "queue",
+    escalateTo: (trigger.escalateTo ?? []).join(", "),
     debounceSeconds: trigger.coalesce ? String(trigger.coalesce.debounceMs / 1000) : "",
     maxWaitSeconds: trigger.coalesce ? String(trigger.coalesce.maxWaitMs / 1000) : "",
     maxCount: trigger.coalesce ? String(trigger.coalesce.maxCount) : "",
@@ -1776,6 +1782,7 @@ export function deliveryPayload(form: DeliveryFormState) {
         ? null
         : { whenBusy: form.whenBusy, whileWaiting: form.whileWaiting },
     sessionCloseAfterMs: form.routePolicy === "bot" ? null : sessionCloseAfterMs(form),
+    escalateTo: peopleFromText(form.escalateTo).length > 0 ? peopleFromText(form.escalateTo) : null,
   };
 }
 
@@ -2188,6 +2195,14 @@ function DeliveryFieldsBody<T extends DeliveryFormState>({
             <SelectItem value="supersede">Replace it: cancel the waiting run and its question</SelectItem>
           </SelectContent>
         </Select>
+      </Field>
+      <Field>
+        <FieldLabel>Escalate unanswered questions to</FieldLabel>
+        <Input
+          value={form.escalateTo}
+          onChange={(event) => setForm({ ...form, escalateTo: event.target.value })}
+          placeholder="The bot's escalation list"
+        />
       </Field>
     </>
   );

@@ -81,7 +81,22 @@ pub enum RunStartSource {
     /// validated against the pinned program's input schema at admission.
     Program {
         input: serde_json::Value,
+        /// Settings the run's input requests fall back on when a request
+        /// leaves them out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_defaults: Option<ProgramInputDefaults>,
     },
+}
+
+/// Defaults for a program run's input requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramInputDefaults {
+    /// Who takes over, once and with a fresh deadline, a request that
+    /// names no escalation list of its own when its deadline passes
+    /// unanswered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

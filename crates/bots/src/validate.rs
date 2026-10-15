@@ -112,6 +112,30 @@ pub fn validate_bot_document(document: &BotDocument) -> Result<(), BotError> {
             "routedSessionCloseAfterMs must be 1000..={MAX_SESSION_CLOSE_AFTER_MS}"
         )));
     }
+    validate_escalation("escalateTo", &document.escalate_to)?;
+    Ok(())
+}
+
+/// The longest escalation list, and the longest name in one: the same
+/// bounds a program's own escalation list has.
+pub const MAX_ESCALATION_PEOPLE: usize = 32;
+pub const MAX_ESCALATION_NAME_LEN: usize = 200;
+
+/// Who a program's unanswered question escalates to: at most
+/// `MAX_ESCALATION_PEOPLE` names, none blank or padded.
+pub fn validate_escalation(field: &str, people: &[String]) -> Result<(), BotError> {
+    if people.len() > MAX_ESCALATION_PEOPLE {
+        return Err(invalid(format!(
+            "{field} may name at most {MAX_ESCALATION_PEOPLE} people"
+        )));
+    }
+    if people.iter().any(|person| {
+        person.trim().is_empty() || person.trim() != person || person.len() > MAX_ESCALATION_NAME_LEN
+    }) {
+        return Err(invalid(format!(
+            "{field} entries must be 1..={MAX_ESCALATION_NAME_LEN} bytes without surrounding whitespace"
+        )));
+    }
     Ok(())
 }
 
@@ -453,6 +477,9 @@ pub fn validate_trigger_document(
             "sessionCloseAfterMs must be at most {MAX_SESSION_CLOSE_AFTER_MS}"
         )));
     }
+    if let Some(people) = &document.escalate_to {
+        validate_escalation("escalateTo", people)?;
+    }
     Ok(())
 }
 
@@ -499,6 +526,7 @@ mod tests {
             deliver: None,
             session_close_after_ms: None,
             enabled: true,
+            escalate_to: None,
         }
     }
 
@@ -546,6 +574,7 @@ mod tests {
             deliver: None,
             session_close_after_ms: None,
             enabled: true,
+            escalate_to: None,
         };
         let error = validate_trigger_document(&document, 0).unwrap_err();
         assert!(error.to_string().contains("grantId"), "{error}");
@@ -568,6 +597,7 @@ mod tests {
             deliver: None,
             session_close_after_ms: None,
             enabled: true,
+            escalate_to: None,
         };
         assert!(validate_trigger_document(&document, 0).is_err());
         let mut per_key = document;
@@ -596,6 +626,7 @@ mod tests {
             self_config: false,
             emit: false,
             enabled: true,
+            escalate_to: Vec::new(),
         };
         assert!(validate_bot_document(&document).is_err());
         document.runs_per_day = Some(5);
@@ -605,5 +636,19 @@ mod tests {
             window_ms: 1_000,
         });
         assert!(validate_bot_document(&document).is_err());
+    }
+
+    #[test]
+    fn escalation_lists_are_bounded() {
+        validate_escalation("escalateTo", &["lead".to_owned()]).unwrap();
+        validate_escalation("escalateTo", &[]).unwrap();
+        for people in [
+            vec![" lead".to_owned()],
+            vec![String::new()],
+            vec!["x".repeat(MAX_ESCALATION_NAME_LEN + 1)],
+            vec!["p".to_owned(); MAX_ESCALATION_PEOPLE + 1],
+        ] {
+            assert!(validate_escalation("escalateTo", &people).is_err(), "{people:?}");
+        }
     }
 }
