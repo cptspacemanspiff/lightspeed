@@ -1,0 +1,266 @@
+//! The JavaScript engine of program sessions: a program is a module whose
+//! default export has a `run(input, env, ctx)` handler, reaching the world
+//! only through the contracts in `env`, over a JSON tool boundary.
+//!
+//! A program is replayable: it takes a completion only when it has no
+//! runnable job, one per such quiescent point, and the host owns its clock,
+//! randomness and timers. Fed the same completions in the same order it
+//! issues the same requests and returns the same value, however the
+//! completions were timed.
+//!
+//! [`start`] runs a program on its own thread, talking to the host over
+//! channels; [`ProgramInstance`] runs one step at a time on the caller's
+//! thread for a deterministic host.
+
+mod engine;
+mod instance;
+
+pub use instance::{ProgramInstance, Step, StepBudget};
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::mpsc;
+
+/// Cancellation is cooperative at the native engine's interrupt boundary.
+#[derive(Clone, Debug, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolBinding {
+    pub name: String,
+    pub binding_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionInput {
+    pub source: String,
+    pub bindings: Vec<ToolBinding>,
+    pub limits: ExecutionLimits,
+    pub program: ProgramExecution,
+}
+
+/// The deterministic inputs of one program execution. Everything the
+/// program can observe besides its calls' outcomes comes from here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProgramExecution {
+    /// The run input, `run`'s first argument.
+    pub input: Value,
+    /// The run's recorded start: `Date.now()` until the first completion
+    /// carrying a later timestamp is delivered.
+    pub started_at_ms: u64,
+    /// Seeds `Math.random` and `crypto`: the same seed draws the same values.
+    #[serde(rename = "seed")]
+    pub random_seed: [u32; 4],
+    /// The session's newest program context, `ctx.context`. Absent before
+    /// any run has set one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+}
+
+/// The largest program context `ctx.setContext` accepts, in serialized
+/// JSON bytes.
+pub const MAX_PROGRAM_CONTEXT_BYTES: usize = 64 * 1024;
+
+/// Every budget is positive; there are intentionally no deployment defaults.
+#[derive(Clone, Debug)]
+pub struct ExecutionLimits {
+    pub timeout_ms: u64,
+    pub max_memory_bytes: u64,
+    pub max_stack_bytes: u64,
+    pub max_source_bytes: u64,
+    pub max_catalog_bytes: u64,
+    pub max_request_bytes: u64,
+    pub max_result_bytes: u64,
+    pub max_output_bytes: u64,
+    pub max_tool_calls: u32,
+    pub max_outstanding_tool_calls: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HostRequest {
+    pub request_id: String,
+    pub binding_id: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HostError {
+    pub kind: String,
+    pub message: String,
+    pub value: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HostCompletion {
+    pub request_id: String,
+    pub outcome: Result<Value, HostError>,
+    /// When the host recorded the outcome. A program's clock advances to it
+    /// on delivery; scripts ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionErrorKind {
+    Javascript,
+    UnsupportedValue,
+    LimitExceeded,
+    TimedOut,
+    Cancelled,
+    HostDisconnected,
+    /// A program diverged from its recorded execution: a replayed
+    /// completion named a request the program did not issue.
+    Nondeterminism,
+    Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
+pub struct ExecutionError {
+    pub kind: ExecutionErrorKind,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionMetrics {
+    pub startup_micros: u64,
+    pub elapsed_micros: u64,
+    pub tool_calls: u32,
+    pub pending_jobs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionReport {
+    pub return_value: Option<Value>,
+    /// The value a program last passed to `ctx.setContext`, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_context: Option<Value>,
+    pub error: Option<ExecutionError>,
+    /// Requests issued before the program ended, whose completions have not
+    /// entered this interpreter. Only the host knows their durable outcomes.
+    pub pending_request_ids: Vec<String>,
+    pub metrics: ExecutionMetrics,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExecutionEvent {
+    Request(HostRequest),
+    Finished(ExecutionReport),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("invalid execution input: {0}")]
+    InvalidInput(String),
+    #[error("could not start interpreter thread: {0}")]
+    Thread(#[from] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CompletionError {
+    #[error("the interpreter has stopped")]
+    Stopped,
+    #[error("the completion queue is full")]
+    Full,
+    #[error("host completion exceeds the result byte limit")]
+    TooLarge,
+}
+
+#[derive(Clone)]
+pub struct CompletionSender {
+    sender: std::sync::mpsc::SyncSender<HostCompletion>,
+    max_result_bytes: u64,
+}
+
+impl CompletionSender {
+    /// Enqueue without blocking the async executor. The queue is sized for all
+    /// admitted outstanding calls; callers send each completion at most once.
+    pub fn complete(&self, completion: HostCompletion) -> Result<(), CompletionError> {
+        if serialized_len(&completion) > self.max_result_bytes {
+            return Err(CompletionError::TooLarge);
+        }
+        self.sender
+            .try_send(completion)
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => CompletionError::Full,
+                std::sync::mpsc::TrySendError::Disconnected(_) => CompletionError::Stopped,
+            })
+    }
+}
+
+pub struct Execution {
+    events: mpsc::Receiver<ExecutionEvent>,
+    completions: CompletionSender,
+    cancellation: Cancellation,
+    waiting: Arc<AtomicBool>,
+}
+
+impl Execution {
+    pub async fn next_event(&mut self) -> Option<ExecutionEvent> {
+        self.events.recv().await
+    }
+    pub fn completion_sender(&self) -> CompletionSender {
+        self.completions.clone()
+    }
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+    /// Whether the interpreter has no runnable job and is blocked waiting
+    /// for a host completion. A program found waiting can be stopped and
+    /// later replayed to the same point without losing work.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for Execution {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// Start one fresh JavaScript attempt on its own native thread. A program
+/// attempt can replay a recorded one by being sent its completions in
+/// recorded order, ahead of the requests they answer.
+/// No interpreter value or handle crosses this API.
+pub fn start(input: ExecutionInput, cancellation: Cancellation) -> Result<Execution, StartError> {
+    engine::start(input, cancellation)
+}
+
+/// Count serialization without allocating another copy of a potentially large
+/// host payload. Values have already crossed the caller's JSON boundary.
+fn serialized_len(value: &impl Serialize) -> u64 {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => u64::MAX,
+    }
+}
+
+#[cfg(test)]
+mod tests;

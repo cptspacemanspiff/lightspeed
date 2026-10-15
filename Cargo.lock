@@ -3647,6 +3647,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "program-engine"
+version = "0.1.0"
+dependencies = [
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "prometheus"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5242,6 +5253,7 @@ dependencies = [
  "mcp",
  "object_store",
  "profiles",
+ "program-engine",
  "rand 0.10.3",
  "release-info",
  "reqwest",

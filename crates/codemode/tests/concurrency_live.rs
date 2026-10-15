@@ -78,7 +78,6 @@ async fn concurrent_runtimes_isolate_request_identities_and_cancellation() {
             .complete(HostCompletion {
                 request_id: healthy_request.request_id,
                 outcome: Ok(serde_json::from_slice(&healthy_bytes).expect("host file JSON")),
-                completed_at_ms: None,
             })
             .expect("complete surviving interpreter request");
         let ExecutionEvent::Finished(healthy_report) = event(&mut healthy).await else {
@@ -146,14 +145,12 @@ async fn host_completions_progress_during_continuous_microtasks() {
             .complete(HostCompletion {
                 request_id: checkpoint_request.request_id,
                 outcome: Ok(json!(null)),
-                completed_at_ms: None,
             })
             .expect("complete microtask checkpoint");
         completions
             .complete(HostCompletion {
                 request_id: read_request.request_id,
                 outcome: Ok(serde_json::from_slice(&bytes).expect("host result JSON")),
-                completed_at_ms: None,
             })
             .expect("complete file request during microtask churn");
 

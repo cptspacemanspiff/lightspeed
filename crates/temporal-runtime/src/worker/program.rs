@@ -22,9 +22,9 @@ use super::code::{
     CodeWorkerActivities, heartbeat, non_retryable, require_activity_owner, retryable,
 };
 use crate::{
-    code::{Cancellation, CodeRunError, CodeRunReport, read_bounded},
+    code::{CodeRunError, read_bounded},
     gateway::GatewayAgentApi,
-    program::{AttemptEnd, ProgramRunner, program_catalog, put_json},
+    program::{AttemptEnd, CodeRunReport, ProgramRunner, program_catalog, put_json},
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -242,7 +242,7 @@ struct ProgramRunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     descriptor: Option<ProgramRunDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution: Option<codemode::ExecutionReport>,
+    execution: Option<program_engine::ExecutionReport>,
     scope: Option<CodeToolScopeReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interruption: Option<ProgramRunInterruption>,
@@ -304,7 +304,7 @@ pub(super) async fn attempt_activity(
     require_activity_owner(&ctx, &descriptor.execution_id)?;
     let (universe_id, _) = temporal_workflow::split_workflow_id(&descriptor.session_workflow_id)
         .ok_or_else(|| non_retryable("invalid program session identity"))?;
-    let cancellation = Cancellation::default();
+    let cancellation = program_engine::Cancellation::default();
     let work = async {
         let api = activities.universes().api_for(universe_id).await?;
         let runner = runner(activities, &api);

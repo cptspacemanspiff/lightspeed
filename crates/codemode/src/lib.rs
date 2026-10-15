@@ -1,9 +1,4 @@
-//! JavaScript execution with an explicit JSON tool boundary.
-//!
-//! A code-mode script is ephemeral. A program is replayable: it takes a
-//! completion only when it has no runnable job, one per such quiescent
-//! point, so fed the same completions in the same order it issues the same
-//! requests and returns the same value, however the completions were timed.
+//! Ephemeral JavaScript execution with an explicit JSON tool boundary.
 
 mod engine;
 
@@ -29,7 +24,7 @@ impl Cancellation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolBinding {
     pub name: String,
     pub binding_id: String,
@@ -40,34 +35,7 @@ pub struct ExecutionInput {
     pub source: String,
     pub bindings: Vec<ToolBinding>,
     pub limits: ExecutionLimits,
-    /// Present for a program: the source is then a module whose default
-    /// export has a `run(input, env, ctx)` handler, its bindings are named
-    /// by contract, and the host owns the clock, randomness and timers.
-    /// Absent for a code-mode script body.
-    pub program: Option<ProgramExecution>,
 }
-
-/// The deterministic inputs of one program execution. Everything the
-/// program can observe besides its calls' outcomes comes from here.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ProgramExecution {
-    /// The run input, `run`'s first argument.
-    pub input: Value,
-    /// The run's recorded start: `Date.now()` until the first completion
-    /// carrying a later timestamp is delivered.
-    pub started_at_ms: u64,
-    /// Seeds `Math.random` and `crypto`: the same seed draws the same values.
-    #[serde(rename = "seed")]
-    pub random_seed: [u32; 4],
-    /// The session's newest program context, `ctx.context`. Absent before
-    /// any run has set one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<Value>,
-}
-
-/// The largest program context `ctx.setContext` accepts, in serialized
-/// JSON bytes.
-pub const MAX_PROGRAM_CONTEXT_BYTES: usize = 64 * 1024;
 
 /// Every budget is positive; there are intentionally no deployment defaults.
 #[derive(Clone, Debug)]
@@ -102,10 +70,6 @@ pub struct HostError {
 pub struct HostCompletion {
     pub request_id: String,
     pub outcome: Result<Value, HostError>,
-    /// When the host recorded the outcome. A program's clock advances to it
-    /// on delivery; scripts ignore it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,9 +81,6 @@ pub enum ExecutionErrorKind {
     TimedOut,
     Cancelled,
     HostDisconnected,
-    /// A program diverged from its recorded execution: a replayed
-    /// completion named a request the program did not issue.
-    Nondeterminism,
     Internal,
 }
 
@@ -154,9 +115,6 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selections: Vec<OutputSelection>,
     pub return_value: Option<Value>,
-    /// The value a program last passed to `ctx.setContext`, if it did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub program_context: Option<Value>,
     pub error: Option<ExecutionError>,
     /// Requests issued before script termination, whose completions have not
     /// entered this interpreter. Only the host knows their durable outcomes.
@@ -214,7 +172,6 @@ pub struct Execution {
     events: mpsc::Receiver<ExecutionEvent>,
     completions: CompletionSender,
     cancellation: Cancellation,
-    waiting: Arc<AtomicBool>,
 }
 
 impl Execution {
@@ -227,12 +184,6 @@ impl Execution {
     pub fn cancel(&self) {
         self.cancellation.cancel();
     }
-    /// Whether the interpreter has no runnable job and is blocked waiting
-    /// for a host completion. A program found waiting can be stopped and
-    /// later replayed to the same point without losing work.
-    pub fn is_waiting(&self) -> bool {
-        self.waiting.load(Ordering::Acquire)
-    }
 }
 
 impl Drop for Execution {
@@ -241,9 +192,7 @@ impl Drop for Execution {
     }
 }
 
-/// Start one fresh JavaScript attempt on its own native thread. A program
-/// attempt can replay a recorded one by being sent its completions in
-/// recorded order, ahead of the requests they answer.
+/// Start one fresh, non-replayable JavaScript attempt on its own native thread.
 /// No interpreter value or handle crosses this API.
 pub fn start(input: ExecutionInput, cancellation: Cancellation) -> Result<Execution, StartError> {
     engine::start(input, cancellation)
