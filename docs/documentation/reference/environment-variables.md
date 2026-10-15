@@ -142,6 +142,22 @@ model. Session input must already be transcribed; see
 | `LIGHTSPEED_FFMPEG_PATH` | `ffmpeg` | Executable used when the FFmpeg transcoder is enabled. |
 | `LIGHTSPEED_AUDIO_TRANSCODE_TIMEOUT_MS` | `30000` | Positive transcoding timeout in milliseconds. Invalid/non-positive values fall back to the default. |
 
+### Human input
+
+These settings bound how long a program's `input.request` waits for an answer
+and how often it reminds. The gateway checks a profile's `inputDeadlineMs`
+against them and workers check each request, so give every process the same
+values. Each is a positive number of milliseconds; an empty value keeps the
+default. An invalid value, or a default deadline outside the minimum and
+maximum, stops the process at startup.
+
+| Variable | Requirement/default | Purpose |
+| --- | --- | --- |
+| `LIGHTSPEED_INPUT_DEFAULT_DEADLINE_MS` | `604800000` (7 days) | Deadline of a request when neither the call nor the profile's `inputDeadlineMs` sets one. |
+| `LIGHTSPEED_INPUT_MIN_DEADLINE_MS` | `1000` (1 second) | Shortest deadline a request or profile may set. |
+| `LIGHTSPEED_INPUT_MAX_DEADLINE_MS` | `2592000000` (30 days) | Longest deadline a request or profile may set. An escalated request may wait up to twice this. |
+| `LIGHTSPEED_INPUT_MIN_REMIND_AFTER_MS` | `3600000` (1 hour) | Shortest reminder interval a request may set. Lower it only for tests: frequent reminders grow a long wait's workflow history. |
+
 ### Split environment routing
 
 | Variable | Requirement/default | Purpose |
