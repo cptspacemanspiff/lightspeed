@@ -152,6 +152,11 @@ pub struct ManagedSession {
     /// one counts as handled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried_tool_ids: Vec<String>,
+    /// Profile revision the session was ensured under. A program session
+    /// pins its program at creation, so an older revision means it runs a
+    /// stale program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_revision: Option<u64>,
 }
 
 /// Insertion-ordered dedupe set, tail-capped so it stays bounded across
@@ -679,6 +684,28 @@ impl ControllerState {
         self.session_cursors.remove(session_id);
         let base = ids::routed_session_base(session_id).to_owned();
         self.bump_routed_generation(&base);
+    }
+
+    /// Whether a known routed program session pinned a program older than
+    /// the bot's applied profile revision. Agent sessions keep their profile
+    /// for life, so their conversation survives a profile edit; a program
+    /// session has no conversation to keep, so it should move to the new
+    /// program. A session newer than the applied revision (created from a
+    /// fresh read before the main session reconciled) is not stale.
+    pub fn routed_pin_is_stale(&self, session_id: &str) -> bool {
+        let Some(applied) = self.applied_profile_revision else {
+            return false;
+        };
+        self.program_sessions
+            && self
+                .extra_sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .is_some_and(|session| {
+                    session
+                        .profile_revision
+                        .is_none_or(|revision| revision < applied)
+                })
     }
 
     /// The idlest routed session that is not busy: the eviction candidate
@@ -2122,6 +2149,7 @@ mod tests {
             last_active_at_ms: Some(NOW),
             close_policy: RoutedSessionClosePolicy::Never,
             carried_tool_ids: Vec::new(),
+            profile_revision: None,
         });
         let summary = state.controller_summary("bot:v1:triage:k-pr-42-abcdef01-g2", NOW);
         assert_eq!(summary.hops, 3);
@@ -2150,6 +2178,7 @@ mod tests {
             last_active_at_ms: Some(last_active),
             close_policy,
             carried_tool_ids: Vec::new(),
+            profile_revision: None,
         }
     }
 
@@ -2310,6 +2339,36 @@ mod tests {
             summary.routed_session.unwrap().session_key.as_deref(),
             Some("telegram:12345")
         );
+    }
+
+    #[test]
+    fn a_routed_program_session_is_stale_when_it_pinned_an_older_revision() {
+        let mut state = ready(fresh());
+        state.mark_session_ready(3, true);
+        let mut session = managed(
+            "bot:v1:triage:k-a-1",
+            RoutedSessionClosePolicy::Inherit,
+            NOW,
+        );
+        session.profile_revision = Some(2);
+        state.extra_sessions.push(session);
+        assert!(state.routed_pin_is_stale("bot:v1:triage:k-a-1"));
+
+        // A session ensured under the applied revision, or under a newer one
+        // read before the main session reconciled, is current.
+        for current in [3, 4] {
+            state.extra_sessions[0].profile_revision = Some(current);
+            assert!(!state.routed_pin_is_stale("bot:v1:triage:k-a-1"));
+        }
+        // A session tracked before revisions were recorded is stale.
+        state.extra_sessions[0].profile_revision = None;
+        assert!(state.routed_pin_is_stale("bot:v1:triage:k-a-1"));
+        assert!(!state.routed_pin_is_stale("bot:v1:triage:k-unknown-1"));
+
+        // An agent session keeps its profile for life.
+        state.program_sessions = false;
+        state.extra_sessions[0].profile_revision = Some(2);
+        assert!(!state.routed_pin_is_stale("bot:v1:triage:k-a-1"));
     }
 
     #[test]
