@@ -2408,6 +2408,7 @@ mod tests {
                 provider_id: "test".into(),
                 model: "test".into(),
             },
+            program: false,
         }
     }
 
@@ -2670,6 +2671,7 @@ mod tests {
                                     request_id: "file".into(),
                                 },
                                 result: linked.into(),
+                                completed_at_ms: None,
                             },
                         ))
                         .unwrap(),
@@ -5248,6 +5250,7 @@ mod tests {
                             provider_id: "anthropic".into(),
                             model: "claude-test".into(),
                         },
+                        program: false,
                     }),
                     call_id: ToolCallId::new("call_1"),
                     tool_id: Some(test_tool_id("VfsRead")),

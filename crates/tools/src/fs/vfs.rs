@@ -2098,6 +2098,7 @@ mod tests {
                             provider_id: "test".into(),
                             model: "test".into(),
                         },
+                        program: false,
                     }),
                     call_id: ToolCallId::new("call_1"),
                     tool_id: Some(ToolName::new("vfs.write_file")),

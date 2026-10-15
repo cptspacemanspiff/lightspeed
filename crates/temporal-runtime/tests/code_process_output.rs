@@ -116,6 +116,7 @@ async fn javascript_parses_text_and_handles_binary_process_output_across_polls()
             max_tool_calls: 2,
             max_outstanding_tool_calls: 1,
         },
+        program: None,
     };
     let mut execution = codemode::start(input, Cancellation::default()).expect("start QuickJS");
     let sender = execution.completion_sender();
@@ -141,6 +142,7 @@ async fn javascript_parses_text_and_handles_binary_process_output_across_polls()
                         .complete(HostCompletion {
                             request_id: request.request_id,
                             outcome: Ok(value),
+                            completed_at_ms: None,
                         })
                         .expect("deliver structured output to JavaScript");
                 }

@@ -71,6 +71,33 @@ impl SessionPreparationService {
         config
     }
 
+    /// A program session's toolset: built-ins on the canonical presentation
+    /// and no provider-hosted tools, since no model presents them. Program
+    /// contracts bind to exactly these tools.
+    pub(crate) fn program_toolset_config(config: &mut ToolsetConfig) {
+        config.builtin.presentation = tools::toolset::BuiltinToolPresentation::Canonical;
+        config.web.search = None;
+    }
+
+    /// The tool contracts a program session with this configuration offers.
+    pub(crate) async fn program_contracts(
+        &self,
+        session_config: &SessionConfig,
+    ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
+        let mut config = Self::session_toolset_config(
+            session_config,
+            session_config.features.environments.is_some(),
+            false,
+        );
+        Self::program_toolset_config(&mut config);
+        let toolset = register_toolset(&config)
+            .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;
+        let tools = toolset.tools.into_values().collect::<Vec<_>>();
+        tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
+            .await
+            .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))
+    }
+
     pub(crate) async fn core_environment_job_workflow_tool_declarations(
         &self,
     ) -> Result<Vec<WorkflowToolDeclaration>, AgentApiError> {
@@ -419,6 +446,9 @@ impl SessionPreparationService {
             session_config.features.environments.is_some(),
             jobs,
         );
+        if source.driver.is_program() {
+            Self::program_toolset_config(&mut config);
+        }
         enable_concurrency_for_workflow_tools(&mut config, materialized.iter().copied());
         let mut toolset = register_toolset(&config)
             .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;

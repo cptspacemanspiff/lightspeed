@@ -372,6 +372,7 @@ mod tests {
                     crate::CodeToolBinding {
                         tool_id: crate::ToolName::new("local_echo"),
                         tool_name: crate::ToolName::new("local_echo"),
+                        contract: None,
                     },
                 )]
                 .into(),

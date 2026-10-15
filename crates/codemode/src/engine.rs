@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rquickjs::{Context, Ctx, Exception, Function, Object, Promise, Runtime, Value as JsValue};
+use rquickjs::{
+    Context, Ctx, Exception, Function, Module, Object, Promise, Runtime, Value as JsValue,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -109,6 +111,13 @@ fn validate(input: &ExecutionInput) -> Result<(), StartError> {
     if input.source.len() as u64 > limits.max_source_bytes {
         return Err(StartError::InvalidInput(
             "source exceeds source byte limit".into(),
+        ));
+    }
+    if let Some(program) = &input.program
+        && serialized_len(&program.input) > limits.max_request_bytes
+    {
+        return Err(StartError::InvalidInput(
+            "program input exceeds request byte limit".into(),
         ));
     }
     if serialized_len(&input.bindings) > limits.max_catalog_bytes {
@@ -467,11 +476,13 @@ fn run_context<'js>(
         .map_err(|failure| js_error(&ctx, failure))?;
     let catalog = serde_json::to_string(&input.bindings)
         .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()))?;
+    let program = match &input.program {
+        Some(program) => serde_json::to_string(program)
+            .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()))?,
+        None => String::new(),
+    };
     let controls: Object = prelude
-        .call((send, emit, select, catalog))
-        .map_err(|failure| js_error(&ctx, failure))?;
-    let compile: Function = controls
-        .get("compile")
+        .call((send, emit, select, catalog, program))
         .map_err(|failure| js_error(&ctx, failure))?;
     let deliver: Function = controls
         .get("deliver")
@@ -479,14 +490,24 @@ fn run_context<'js>(
     let serialize: Function = controls
         .get("serialize")
         .map_err(|failure| js_error(&ctx, failure))?;
-    // Compile the complete function before any guest statement can emit effects.
-    let program: Function = compile
-        .call((&input.source,))
-        .map_err(|failure| js_error(&ctx, failure))?;
-    state.borrow_mut().startup_micros = elapsed_micros(started);
-    let promise: Promise = program
-        .call(())
-        .map_err(|failure| js_error(&ctx, failure))?;
+    let promise = if input.program.is_some() {
+        start_program(&ctx, &controls, &input.source)?
+    } else {
+        // Compile the complete function before any guest statement can emit effects.
+        let compile: Function = controls
+            .get("compile")
+            .map_err(|failure| js_error(&ctx, failure))?;
+        let program: Function = compile
+            .call((&input.source,))
+            .map_err(|failure| js_error(&ctx, failure))?;
+        state.borrow_mut().startup_micros = elapsed_micros(started);
+        program
+            .call(())
+            .map_err(|failure| js_error(&ctx, failure))?
+    };
+    if input.program.is_some() {
+        state.borrow_mut().startup_micros = elapsed_micros(started);
+    }
     loop {
         if let Some(reason) = stop_reason(cancellation, deadline) {
             return Err(reason);
@@ -557,6 +578,35 @@ fn run_context<'js>(
     }
 }
 
+/// Compile the program module before any guest statement runs, build its
+/// `env` and disable code generation from strings, then evaluate the module
+/// and call its handler. The returned promise settles with the handler's
+/// result.
+fn start_program<'js>(
+    ctx: &Ctx<'js>,
+    controls: &Object<'js>,
+    source: &str,
+) -> Result<Promise<'js>, ExecutionError> {
+    let module = Module::declare(ctx.clone(), "program.js", source)
+        .map_err(|failure| js_error(ctx, failure))?;
+    let prepare: Function = controls
+        .get("prepare")
+        .map_err(|failure| js_error(ctx, failure))?;
+    prepare
+        .call::<_, ()>(())
+        .map_err(|failure| js_error(ctx, failure))?;
+    let (module, evaluation) = module.eval().map_err(|failure| js_error(ctx, failure))?;
+    let namespace = module
+        .namespace()
+        .map_err(|failure| js_error(ctx, failure))?;
+    let program: Function = controls
+        .get("program")
+        .map_err(|failure| js_error(ctx, failure))?;
+    program
+        .call((namespace, evaluation))
+        .map_err(|failure| js_error(ctx, failure))
+}
+
 fn apply_completion<'js>(
     ctx: &Ctx<'js>,
     deliver: &Function<'js>,
@@ -586,8 +636,10 @@ fn apply_completion<'js>(
             state.helper_calls.remove(&completion.request_id);
         }
     }
+    // Millisecond timestamps are exact in a double well past year 275000.
+    let completed_at = completion.completed_at_ms.map(|at| at as f64);
     deliver
-        .call::<_, ()>((&completion.request_id, success, json))
+        .call::<_, ()>((&completion.request_id, success, json, completed_at))
         .map_err(|failure| js_error(ctx, failure))?;
     state.borrow_mut().pending.remove(&completion.request_id);
     Ok(())

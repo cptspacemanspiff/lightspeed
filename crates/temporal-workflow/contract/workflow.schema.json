@@ -718,6 +718,15 @@
         "call_id": {
           "$ref": "#/definitions/ToolCallId"
         },
+        "completed_at_ms": {
+          "description": "When the session recorded the outcome; a program's clock advances to\nit on delivery.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "error_ref": {
           "type": [
             "string",
@@ -807,6 +816,13 @@
         "closed": {
           "type": "boolean"
         },
+        "contracts": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ContractBinding"
+          },
+          "description": "Under contract binding, the contract each handle serves.",
+          "type": "object"
+        },
         "execution_id": {
           "type": "string"
         }
@@ -854,6 +870,28 @@
       },
       "required": [
         "content_ref"
+      ],
+      "type": "object"
+    },
+    "ContractBinding": {
+      "description": "A scope binding's place in a contract. A contract is usually one tool;\na composite contract (such as `time.sleep`, a timer and an await) binds\neach of its tools under a named part.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "part": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "contract",
+        "digest"
       ],
       "type": "object"
     },

@@ -528,7 +528,11 @@ async fn admit_open(
             request.allowed_tools.as_ref(),
         )?;
         Ok::<_, CodeToolRejection>((
-            crate::CodeToolPrepareScopeActivityRequest { tools, model },
+            crate::CodeToolPrepareScopeActivityRequest {
+                tools,
+                model,
+                binding_mode: scope_policy_request(&request, &owner).binding_mode,
+            },
             state.core_state.tooling.revision,
         ))
     });
@@ -1170,6 +1174,7 @@ mod tests {
                 harness::CodeToolBinding {
                     tool_id: tool_id.clone(),
                     tool_name: tool_id.clone(),
+                    contract: None,
                 },
             );
             let origin = CodeToolOrigin {
@@ -1189,6 +1194,7 @@ mod tests {
                     },
                     promise_id_base: base,
                     status: CodeToolCallStatus::Pending,
+                    completed_at_ms: None,
                 },
             );
         }

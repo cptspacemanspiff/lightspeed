@@ -51,6 +51,13 @@ pub struct ProgramRunDescriptor {
     pub output_schema_ref: Option<BlobRef>,
     pub semantics_version: u32,
     pub limits: CodeExecutionLimits,
+    /// The contracts the program was pinned to; every attempt re-checks
+    /// them against the scope before it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<harness::ContractPin>,
+    /// When the run started, as the session recorded it: the program's
+    /// clock before its first completion.
+    pub started_at_ms: u64,
 }
 
 impl ProgramRunDescriptor {

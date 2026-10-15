@@ -6044,6 +6044,13 @@ export interface ProgramSpec {
     [k: string]: unknown;
   };
   /**
+   * The tool contracts the program calls, such as `vfs.read_file` or
+   * `time.sleep`. Only these reach the program's `env`. A session created
+   * from the profile pins each to its digest and is refused if one is not
+   * granted by the session's configuration.
+   */
+  requires?: ProgramContractRequirement[];
+  /**
    * The guest API version the program was written against.
    */
   semanticsVersion?: number;
@@ -6059,6 +6066,25 @@ export interface ProgramLimitsInput {
   maxCalls?: number | null;
   maxInFlight?: number | null;
   maxWallClockMs?: number | null;
+}
+/**
+ * One tool contract a program calls.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramContractRequirement".
+ */
+export interface ProgramContractRequirement {
+  /**
+   * Canonical contract name: dotted lowercase identifiers, for example
+   * `vfs.read_file`.
+   */
+  contract: string;
+  /**
+   * The digest (`contract-sha256:<hex>`) of the contract the program was written
+   * against. When given, a session whose contract has a different digest
+   * is refused; when omitted, the session pins the current digest.
+   */
+  digest?: string | null;
 }
 /**
  * Root-session retention policy supplied by a profile at session creation.

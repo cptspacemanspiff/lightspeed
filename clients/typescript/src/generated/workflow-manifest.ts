@@ -204,6 +204,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
       },
       "outcome": {
         "call_id": "code-tool:vector",
+        "completed_at_ms": 1760000000000,
         "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
         "request_id": "request:vector",
         "status": "succeeded"
@@ -216,6 +217,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "outcomes": [
           {
             "call_id": "code-tool:vector",
+            "completed_at_ms": 1760000000000,
             "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
             "request_id": "request:vector",
             "status": "succeeded"
@@ -241,6 +243,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "calls": {
           "request:vector": {
             "call_id": "code-tool:vector",
+            "completed_at_ms": 1760000000000,
             "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
             "request_id": "request:vector",
             "status": "succeeded"
