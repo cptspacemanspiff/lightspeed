@@ -5,6 +5,7 @@ import { and, desc, eq, or } from "drizzle-orm";
 import { schema } from "@lightspeed-ai/platform-db";
 import type { AppContext, ApiVariables } from "./context.js";
 import { botRoutes } from "./routes/bots.js";
+import { inboxRoutes } from "./routes/inbox.js";
 import { channelAccountAdminRoutes, channelUniverseRoutes } from "./routes/channel-accounts.js";
 import { apiKeyAdminRoutes } from "./routes/api-keys-admin.js";
 import { environmentDeploymentRoutes } from "./routes/environment-deployment.js";
@@ -94,6 +95,7 @@ export function buildApp(ctx: AppContext) {
   api.route("/universes", setupRoutes(ctx));
   api.route("/universes", gatewayRoutes(ctx));
   api.route("/universes", botRoutes(ctx));
+  api.route("/universes", inboxRoutes(ctx));
   api.route("/universes", channelUniverseRoutes(ctx));
   api.route("/admin", sessionAdminRoutes(ctx));
   api.route("/admin", environmentDeploymentRoutes(ctx));

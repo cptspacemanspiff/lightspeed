@@ -8,6 +8,7 @@ it.each([
   "/u/team/bots/bot_1/chat/session_1",
   "/u/team/bots/bot_1/activity",
   "/u/team/profiles/profile_1",
+  "/u/team/inbox/inp_1",
   "/u/team/workspaces/workspace_1/files/README.md",
   "/u/team/workspaces/workspace_1/files/src/main.rs",
 ])("hides the mobile shell header for detail %s", (path) => {
@@ -15,7 +16,7 @@ it.each([
 });
 it.each([
   "/u/team/sessions", "/u/team/sessions/", "/u/team/bots",
-  "/u/team/profiles", "/u/team/workspaces",
+  "/u/team/profiles", "/u/team/workspaces", "/u/team/inbox",
   "/u/team/workspaces/workspace_1", "/u/team/workspaces/workspace_1/files/",
   "/u/team/environments", "/u/team/settings/general", "/admin/users", "/account",
 ])("keeps navigation for list or top-level page %s", (path) => {

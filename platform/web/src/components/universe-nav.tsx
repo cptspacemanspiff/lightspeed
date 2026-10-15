@@ -3,6 +3,7 @@ import {
   Boxes,
   BrainCircuit,
   FolderGit2,
+  Inbox,
   KeyRound,
   LockKeyhole,
   MessagesSquare,
@@ -60,6 +61,7 @@ export const UNIVERSE_NAV: UniverseNavGroup[] = [
     items: [
       { path: "bots", label: "Bots", icon: BotFaceIcon, action: "read", feature: "bots" },
       { path: "sessions", label: "Sessions", icon: MessagesSquare, action: "read" },
+      { path: "inbox", label: "Inbox", icon: Inbox, action: "read" },
     ],
   },
   {

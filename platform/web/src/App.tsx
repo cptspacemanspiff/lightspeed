@@ -22,6 +22,7 @@ import { CredentialsPage } from "@/pages/CredentialsPage";
 import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { GeneralSettingsPage } from "@/pages/GeneralSettingsPage";
 import { HomeRedirect } from "@/pages/HomeRedirect";
+import { InboxPage } from "@/pages/InboxPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { McpServersPage } from "@/pages/McpServersPage";
 import { MembersPage } from "@/pages/MembersPage";
@@ -126,6 +127,8 @@ export function App() {
           path="u/:slug/bots/:botId/activity"
           element={<FeatureGate feature="bots"><BotsPage admin={admin} view="activity" /></FeatureGate>}
         />
+        <Route path="u/:slug/inbox" element={<InboxPage admin={admin} />} />
+        <Route path="u/:slug/inbox/:requestId" element={<InboxPage admin={admin} />} />
         <Route path="u/:slug/blobs/:digest" element={<BlobPage admin={admin} />} />
         <Route path="u/:slug/profiles" element={<ProfilesPage admin={admin} />} />
         <Route

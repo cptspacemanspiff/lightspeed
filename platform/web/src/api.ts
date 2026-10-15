@@ -1,5 +1,12 @@
 import type { FeatureStates, UniverseRole, UniverseIconName, UniverseIconColor } from "@lightspeed-ai/platform-shared";
 export type { ToolAttachmentView, ModelConfig, ModelDefaults, ModelDefaultsPutParams } from "@lightspeed-ai/sdk";
+export type {
+  Attribution,
+  InboxRequestListResponse,
+  InboxRequestResponse,
+  InputRequestStatus,
+  InputRequestView,
+} from "@lightspeed-ai/sdk";
 import type {
   Attribution,
   ResourceAccessSummary,

@@ -56,6 +56,7 @@ const universeReads = [
   "api-keys",
   "members",
   "bots",
+  "inbox/requests",
   "channel-accounts",
   "channel-pairings",
   "integrations/github",
