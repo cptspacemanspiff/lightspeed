@@ -124,9 +124,29 @@ async fn prepare_contract_scope(
     deps: &ToolActivityDeps,
     request: temporal_workflow::CodeToolPrepareScopeActivityRequest,
 ) -> Result<temporal_workflow::CodeToolPrepareScopeActivityResult, ActivityError> {
-    let contracts = tools::program::contracts::bind_toolset(deps.blobs.as_ref(), &request.tools)
-        .await
-        .map_err(activity_error)?;
+    let mut contracts =
+        tools::program::contracts::bind_toolset(deps.blobs.as_ref(), &request.tools)
+            .await
+            .map_err(activity_error)?;
+    // A server that cannot be listed binds no contracts: a program pinned to
+    // one of its tools then fails its attempt as `contract_unavailable`,
+    // and one that uses none of them still runs.
+    if let Some(native) = deps.native_mcp.as_ref() {
+        let (servers, failures) =
+            crate::worker::mcp::program_mcp_tools(native.inventory(), &request.tools).await;
+        for (server, error) in failures {
+            tracing::warn!(
+                server,
+                error,
+                "MCP server tools not bound as program contracts"
+            );
+        }
+        let (mcp, unbindable) = tools::program::contracts::bind_mcp(&servers);
+        if !unbindable.is_empty() {
+            tracing::warn!(?unbindable, "MCP tools with no program contract name");
+        }
+        contracts.extend(mcp);
+    }
     let mut bindings = BTreeMap::new();
     for contract in &contracts {
         let binding = contract.binding();

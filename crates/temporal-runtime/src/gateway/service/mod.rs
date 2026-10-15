@@ -735,6 +735,18 @@ impl GatewayAgentApiBuilder {
                 )),
             ),
         );
+        let mcp_inventory: Arc<dyn llm_runtime::McpInventoryResolver> = Arc::new(
+            crate::worker::mcp::NativeMcpInventoryResolver::with_discoverer(
+                mcp_tool_discoverer.clone(),
+                Arc::new(crate::worker::secrets::BrokerSecretResolver::new(
+                    auth_token_broker.clone(),
+                    self.store.clone() as Arc<dyn mcp::McpRegistryStore>,
+                )),
+                mcp_private_networks.clone(),
+                configurator_trusted_header.clone(),
+                self.store.config().universe_id,
+            ),
+        );
         let discovery_openai = self.model_discovery_openai.unwrap_or_else(|| {
             Arc::new(
                 openai::Client::new(openai::Config::from_env_allow_missing_key())
@@ -773,6 +785,7 @@ impl GatewayAgentApiBuilder {
             auth_token_broker,
             mcp_oauth,
             mcp_tool_discoverer,
+            mcp_inventory,
             mcp_private_networks,
             configurator_trusted_header,
             mcp_discovery_gate,
@@ -801,6 +814,8 @@ pub struct GatewayAgentApi {
     auth_token_broker: Arc<dyn AuthTokenBroker>,
     mcp_oauth: McpOAuthDriver,
     mcp_tool_discoverer: Arc<dyn McpToolDiscoverer>,
+    /// Cached tool listings that program contracts pin against.
+    mcp_inventory: Arc<dyn llm_runtime::McpInventoryResolver>,
     mcp_private_networks: crate::worker::mcp::McpPrivateNetworkPolicy,
     configurator_trusted_header: ConfiguratorTrustedHeaderPolicy,
     mcp_discovery_gate: Arc<McpDiscoveryGate>,

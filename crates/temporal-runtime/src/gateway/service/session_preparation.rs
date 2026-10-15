@@ -9,6 +9,9 @@ pub(crate) struct SessionPreparationService {
     pub(crate) task_queue: String,
     pub(crate) code_task_queue: String,
     pub(crate) input_timeouts: tools::human_input::InputTimeouts,
+    /// Lists MCP server tools to pin program contracts against; absent
+    /// where nothing pins programs.
+    pub(crate) mcp_inventory: Option<Arc<dyn llm_runtime::McpInventoryResolver>>,
 }
 
 impl SessionPreparationService {
@@ -86,9 +89,12 @@ impl SessionPreparationService {
     }
 
     /// The tool contracts a program session with this configuration offers.
+    /// MCP contracts are listed from the servers only `with_mcp`, since
+    /// that reaches every attached server.
     pub(crate) async fn program_contracts(
         &self,
         session_config: &SessionConfig,
+        with_mcp: bool,
     ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
         let mut config = Self::session_toolset_config(
             session_config,
@@ -102,9 +108,32 @@ impl SessionPreparationService {
         // Every program session binds the input workflow tools.
         tools.push(tools::human_input::input_request_tool_spec());
         tools.push(tools::human_input::input_open_tool_spec());
-        tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
+        let mut contracts = tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
             .await
-            .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))
+            .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))?;
+        if with_mcp {
+            let inventory = self.mcp_inventory.as_ref().ok_or_else(|| {
+                AgentApiError::internal("MCP inventory is not configured for program contracts")
+            })?;
+            let mcp_tools = self
+                .desired_mcp_tools(&session_config.features)
+                .await?
+                .into_values()
+                .collect::<Vec<_>>();
+            let (servers, failures) =
+                crate::worker::mcp::program_mcp_tools(inventory.as_ref(), &mcp_tools).await;
+            if let Some((server, error)) = failures.into_iter().next() {
+                return Err(AgentApiError::rejected(format!(
+                    "list MCP server {server} tools for program contracts: {error}"
+                )));
+            }
+            let (mcp, unbindable) = tools::program::contracts::bind_mcp(&servers);
+            if !unbindable.is_empty() {
+                tracing::warn!(?unbindable, "MCP tools with no program contract name");
+            }
+            contracts.extend(mcp);
+        }
+        Ok(contracts)
     }
 
     pub(crate) async fn core_environment_job_workflow_tool_declarations(
@@ -704,6 +733,7 @@ impl GatewayAgentApi {
             task_queue: self.task_queue.clone(),
             code_task_queue: self.code_task_queue.clone(),
             input_timeouts: self.input_timeouts,
+            mcp_inventory: Some(self.mcp_inventory.clone()),
         }
     }
 }
