@@ -682,3 +682,160 @@ async fn environment_overrides_shorten_input_deadlines_and_reminders() -> anyhow
     })
     .await
 }
+
+const OPENING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const ask = await env.input.open({ ask: "Ship " + input.claim + "?", assignees: ["alice"] });
+            if (input.claim === "withdrawn") {
+                await ask.cancel();
+                try {
+                    await ask.answer();
+                    return { claim: input.claim, slept: 0, kind: "answered" };
+                } catch (error) {
+                    return { claim: input.claim, slept: 0, kind: error.kind };
+                }
+            }
+            const answer = await ask.withReminders({ every_ms: 1000, max: 1, then: "reassign", to: ["lead"] });
+            return { claim: input.claim, slept: 0, id: ask.id, answer };
+        }
+    };
+"#;
+
+const OPENING_CONTRACTS: &[(&str, Option<&str>)] = &[
+    ("input.open", None),
+    ("input.remind", None),
+    ("input.reassign", None),
+    ("promise.await", None),
+    ("promise.cancel", None),
+    ("time.sleep", None),
+];
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn an_opened_request_is_reminded_reassigned_answered_and_withdrawn() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            // Opening a request is no use without awaiting its answer, so
+            // a session cannot pin one without the other.
+            let incomplete_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&incomplete_id, OPENING_PROGRAM, &[("input.open", None)]),
+            })
+            .await?;
+            let incomplete = start_program_session(
+                &api,
+                &SessionId::new(format!("{session_id}-incomplete")),
+                &incomplete_id,
+            )
+            .await;
+            assert!(
+                incomplete.as_ref().is_err_and(|error| error
+                    .downcast_ref::<api::AgentApiError>()
+                    .is_some_and(|error| error.kind == api::AgentApiErrorKind::InvalidRequest)),
+                "{incomplete:?}"
+            );
+            api.delete_profile(api::ProfileDeleteParams {
+                profile_id: incomplete_id,
+            })
+            .await?;
+
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, OPENING_PROGRAM, OPENING_CONTRACTS),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // The program reminds alice once, then hands the request to lead.
+            let run = start_program_run(&api, &session_id, json!({"claim": "pr-9"})).await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let request = loop {
+                let [request] =
+                    <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?).map_err(
+                        |requests| anyhow::anyhow!("one request expected: {requests:?}"),
+                    )?;
+                if request.assignees == ["lead".to_owned()] {
+                    break request;
+                }
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the request was never reassigned: {request:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            };
+            assert_eq!(request.status, api::InputRequestStatus::Pending);
+            assert_eq!(request.ask, "Ship pr-9?");
+            assert_eq!(request.reminder_count, 1, "{request:?}");
+
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: request.request_id.clone(),
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+            assert!(
+                output["id"].as_str().is_some_and(|id| id.starts_with("wtx:")),
+                "{output}"
+            );
+            let tools = scoped_call_tools(&store, &session_id).await?;
+            for expected in [
+                "input.open",
+                "concurrency.await",
+                "time.sleep",
+                "input.remind",
+                "input.reassign",
+            ] {
+                assert!(tools.iter().any(|tool| tool == expected), "{tools:?}");
+            }
+
+            // Cancelling the promise withdraws the request.
+            let run = start_program_run(&api, &session_id, json!({"claim": "withdrawn"})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                json!({"claim": "withdrawn", "slept": 0, "kind": "input_cancelled"})
+            );
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let cancelled = api
+                    .list_inbox_requests(api::InboxRequestListParams {
+                        status: Some(api::InputRequestStatus::Cancelled),
+                        session: Some(session_id.to_string()),
+                        limit: None,
+                    })
+                    .await?
+                    .result
+                    .requests;
+                if cancelled.len() == 1 {
+                    break;
+                }
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the withdrawn request was never cancelled: {cancelled:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}

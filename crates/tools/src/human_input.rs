@@ -3,6 +3,11 @@
 //! joined reply: the input-request workflow records the request in the
 //! universe's inbox, waits durably for an answer or its deadline, and
 //! resolves the call. Only program sessions bind it; no model presents it.
+//!
+//! `input.open` starts the same workflow but returns at once with the
+//! request's promise, which the program awaits for the answer or cancels
+//! to withdraw the request. `input.remind` and `input.reassign` act on an
+//! open request through its inbox row while it waits.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +19,14 @@ pub const INPUT_REQUEST_TOOL_NAME: &str = "input_request";
 pub const INPUT_REQUEST_WORKFLOW_TOOL_ID: &str = "input-request";
 pub const INPUT_REQUEST_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.input.request.v1";
 pub const INPUT_REQUEST_WORKFLOW_TYPE: &str = "InputRequestWorkflow";
+pub const INPUT_OPEN_TOOL_ID: &str = "input.open";
+pub const INPUT_OPEN_TOOL_NAME: &str = "input_open";
+pub const INPUT_OPEN_WORKFLOW_TOOL_ID: &str = "input-open";
+pub const INPUT_OPEN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.input.open.v1";
+pub const INPUT_REMIND_TOOL_ID: &str = "input.remind";
+pub const INPUT_REMIND_TOOL_NAME: &str = "input_remind";
+pub const INPUT_REASSIGN_TOOL_ID: &str = "input.reassign";
+pub const INPUT_REASSIGN_TOOL_NAME: &str = "input_reassign";
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 /// How long a request waits when neither the call nor the program sets a
@@ -293,9 +306,113 @@ pub fn input_request_tool_spec() -> harness::ToolSpec {
     )
 }
 
+/// Whether a workflow invocation is a program's `input.request` or
+/// `input.open`: both start the input-request workflow.
 pub fn is_input_request_binding(tool_id: &str, semantic_type: &str) -> bool {
-    tool_id == INPUT_REQUEST_WORKFLOW_TOOL_ID
-        && semantic_type == INPUT_REQUEST_WORKFLOW_SEMANTIC_TYPE
+    (tool_id == INPUT_REQUEST_WORKFLOW_TOOL_ID
+        && semantic_type == INPUT_REQUEST_WORKFLOW_SEMANTIC_TYPE)
+        || (tool_id == INPUT_OPEN_WORKFLOW_TOOL_ID
+            && semantic_type == INPUT_OPEN_WORKFLOW_SEMANTIC_TYPE)
+}
+
+/// The `input.open` definition: the arguments of `input.request`, and the
+/// acknowledgement that carries the request's promise. Its output schema
+/// is the one the binding's promise completion gives the call, so the
+/// contract's digest is the same at pinning and in the scope.
+pub fn input_open_definition() -> crate::runtime::FunctionDefinition {
+    let mut definition = crate::runtime::FunctionDefinition::new(
+        INPUT_OPEN_TOOL_NAME,
+        "Ask people a question without waiting. Returns at once with the request's execution id and the promise that resolves with the answer; await the promise for the answer (it fails with kind deadline_exceeded once the deadline and any escalation pass) or cancel it to withdraw the request.",
+        crate::definitions::input_schema_for::<InputRequestArgs>(),
+    );
+    if let Some(schema) = crate::workflow_tool::acknowledgement_result_schema(
+        &input_open_completion(None, 1),
+        true,
+    ) {
+        definition = definition.with_output_schema(schema);
+    }
+    definition
+}
+
+/// The completion of the `input.open` binding: one model-owned promise
+/// under the reply key.
+pub fn input_open_completion(
+    reply_schema_ref: Option<harness::BlobRef>,
+    deadline_after_ms: u64,
+) -> harness::WorkflowToolCompletion {
+    harness::WorkflowToolCompletion::Promises {
+        reply_schema_ref,
+        deadline_after_ms: Some(deadline_after_ms),
+        max_promises: 1,
+        key_source: harness::WorkflowToolCompletionKeySource::Reply,
+    }
+}
+
+/// The session tool behind the `input.open` binding.
+pub fn input_open_tool_spec() -> harness::ToolSpec {
+    crate::definitions::register(
+        INPUT_OPEN_TOOL_ID,
+        Default::default(),
+        harness::ToolParallelism::ParallelSafe,
+        Default::default(),
+    )
+}
+
+/// An open request, named by the execution id `input.open` returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputRemindArgs {
+    /// The request's execution id, from `input.open`.
+    pub id: String,
+}
+
+/// An open request and the people who should answer it instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputReassignArgs {
+    /// The request's execution id, from `input.open`.
+    pub id: String,
+    /// Who should answer from now on; replaces the assignees.
+    pub to: Vec<String>,
+}
+
+impl InputReassignArgs {
+    pub fn validate(&self) -> ToolResult<()> {
+        if self.to.is_empty() {
+            return Err(invalid("to must name at least one person"));
+        }
+        validate_people("to", &self.to)
+    }
+}
+
+/// Where a request stands after a reminder or a reassignment. Acting on a
+/// request that is no longer pending changes nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InputControlOutput {
+    /// The request's inbox id.
+    pub request_id: String,
+    /// pending, answered, expired or cancelled.
+    pub status: String,
+    pub assignees: Vec<String>,
+    pub reminder_count: u32,
+}
+
+pub fn input_remind_definition() -> crate::runtime::FunctionDefinition {
+    crate::runtime::FunctionDefinition::new(
+        INPUT_REMIND_TOOL_NAME,
+        "Remind the assignees of an open input request. A request that is no longer pending is left as it is.",
+        crate::definitions::input_schema_for::<InputRemindArgs>(),
+    )
+    .with_output_schema(crate::definitions::output_schema_for::<InputControlOutput>())
+}
+
+pub fn input_reassign_definition() -> crate::runtime::FunctionDefinition {
+    crate::runtime::FunctionDefinition::new(
+        INPUT_REASSIGN_TOOL_NAME,
+        "Replace the assignees of an open input request. A request that is no longer pending is left as it is.",
+        crate::definitions::input_schema_for::<InputReassignArgs>(),
+    )
+    .with_output_schema(crate::definitions::output_schema_for::<InputControlOutput>())
 }
 
 fn validate_people(field: &str, people: &[String]) -> ToolResult<()> {

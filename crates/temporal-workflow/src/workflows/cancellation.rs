@@ -54,9 +54,10 @@ pub(crate) fn signal_options() -> SignalWorkflowOptions {
         .build()
 }
 
-/// Whether an emission is the holder session withdrawing a joined call's
-/// reply: its own invocation and reply promise, from its own session.
-pub(crate) fn is_joined_holder_cancellation(
+/// Whether an emission is the holder session withdrawing a call's reply
+/// (joined, or a promise it handed out): its own invocation and reply
+/// promise, from its own session.
+pub(crate) fn is_holder_reply_cancellation(
     start: &crate::WorkflowToolStartArgs,
     envelope: &harness::EmissionEnvelope,
 ) -> bool {

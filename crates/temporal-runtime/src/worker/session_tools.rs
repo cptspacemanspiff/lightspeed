@@ -66,6 +66,7 @@ pub struct SessionTools {
     environment_resolver: Option<crate::environments::resolver::EnvironmentResolver>,
     environment_credentials: Option<EnvironmentCredentialResolver>,
     environment_gateway: Option<crate::environments::gateway::EnvironmentGatewayClientConfig>,
+    input_requests: Option<Arc<PgStore>>,
 }
 
 impl SessionTools {
@@ -81,6 +82,7 @@ impl SessionTools {
             environment_resolver: None,
             environment_credentials: None,
             environment_gateway: None,
+            input_requests: None,
         }
     }
 
@@ -136,7 +138,9 @@ impl SessionTools {
         let credentials = EnvironmentCredentialResolver::from_pg_store(store.clone());
         let resolver =
             crate::environments::resolver::EnvironmentResolver::from_pg_store(store.clone());
-        Self::new(blobs, workspace_store)
+        let mut tools = Self::new(blobs, workspace_store);
+        tools.input_requests = Some(store.clone());
+        tools
             .with_session_store(store)
             .with_blob_graph(blob_graph)
             .with_environment_store(environments)
@@ -914,6 +918,93 @@ impl SessionTools {
             error_ref: None,
             effects: Vec::new(),
         })
+    }
+
+    /// `input.remind` and `input.reassign`: act on one of this session's
+    /// open input requests through its inbox row. The request's workflow
+    /// keeps deciding its deadline and escalation.
+    async fn invoke_input_control_call(
+        &self,
+        session_id: &harness::SessionId,
+        call: &harness::ToolInvocationRequest,
+    ) -> Result<ToolInvocationResult, CoreAgentIoError> {
+        let Some(store) = self.input_requests.as_ref() else {
+            return failed_result(
+                self.blobs.as_ref(),
+                call.call_id.clone(),
+                "input requests are unavailable in this runtime",
+            )
+            .await;
+        };
+        let reassign = call
+            .tool_id
+            .as_ref()
+            .is_some_and(|id| id.as_str() == tools::human_input::INPUT_REASSIGN_TOOL_ID);
+        let (execution_id, assignees) = if reassign {
+            match self
+                .read_tool_args::<tools::human_input::InputReassignArgs>(call)
+                .await
+                .and_then(|args| args.validate().map(|()| args).map_err(io_error))
+            {
+                Ok(args) => (args.id, Some(args.to)),
+                Err(error) => {
+                    return failed_result(
+                        self.blobs.as_ref(),
+                        call.call_id.clone(),
+                        error.to_string(),
+                    )
+                    .await;
+                }
+            }
+        } else {
+            match self
+                .read_tool_args::<tools::human_input::InputRemindArgs>(call)
+                .await
+            {
+                Ok(args) => (args.id, None),
+                Err(error) => {
+                    return failed_result(
+                        self.blobs.as_ref(),
+                        call.call_id.clone(),
+                        error.to_string(),
+                    )
+                    .await;
+                }
+            }
+        };
+        // A program reaches only its own session's requests; any other id
+        // is unknown to it.
+        let owned = store
+            .read_input_request_by_execution(&execution_id)
+            .await
+            .map_err(io_error)?
+            .is_some_and(|record| record.view.session_id == session_id.as_str());
+        if !owned {
+            return failed_result(
+                self.blobs.as_ref(),
+                call.call_id.clone(),
+                format!("unknown input request {execution_id}"),
+            )
+            .await;
+        }
+        let record = match assignees {
+            Some(assignees) => store
+                .reassign_input_request(&execution_id, &assignees)
+                .await
+                .map_err(io_error)?,
+            None => store
+                .remind_input_request(&execution_id, now_unix_ms()?)
+                .await
+                .map_err(io_error)?,
+        };
+        let output = tools::human_input::InputControlOutput {
+            request_id: record.view.request_id,
+            status: record.view.status.as_str().to_owned(),
+            assignees: record.view.assignees,
+            reminder_count: record.view.reminder_count,
+        };
+        let visible = serde_json::to_string(&output).map_err(io_error)?;
+        self.succeeded_tool_result(call, &output, visible).await
     }
 
     async fn succeeded_job_read_result(
@@ -2007,6 +2098,18 @@ impl SessionTools {
         }
         if let Some(message) = per_call_batch_rule_violation(&request) {
             return failed_result(self.blobs.as_ref(), call.call_id, message)
+                .await
+                .map(ToolCallExecution::Completed);
+        }
+        if call.tool_id.as_ref().is_some_and(|id| {
+            matches!(
+                id.as_str(),
+                tools::human_input::INPUT_REMIND_TOOL_ID
+                    | tools::human_input::INPUT_REASSIGN_TOOL_ID
+            )
+        }) {
+            return self
+                .invoke_input_control_call(&request.session_id, &call)
                 .await
                 .map(ToolCallExecution::Completed);
         }

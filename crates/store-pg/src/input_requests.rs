@@ -187,26 +187,52 @@ impl PgStore {
         }
     }
 
-    /// Count the `count`th reminder of a pending request. Repeating the
-    /// same reminder changes nothing.
+    /// Count a reminder of a pending request sent at `at_ms`, from its
+    /// workflow's schedule or from the program. Repeating a reminder with
+    /// the same or an earlier time changes nothing. Returns the record as
+    /// it now stands.
     pub async fn remind_input_request(
         &self,
         execution_id: &str,
-        count: u32,
         at_ms: u64,
-    ) -> Result<(), InputRequestStoreError> {
+    ) -> Result<InputRequestRecord, InputRequestStoreError> {
         sqlx::query(
-            "UPDATE input_requests SET reminder_count = $3, last_reminded_at_ms = $4
+            "UPDATE input_requests SET reminder_count = reminder_count + 1,
+                 last_reminded_at_ms = $3
              WHERE universe_id = $1 AND execution_id = $2 AND status = 'pending'
-               AND reminder_count < $3",
+               AND (last_reminded_at_ms IS NULL OR last_reminded_at_ms < $3)",
         )
         .bind(self.config.universe_id)
         .bind(execution_id)
-        .bind(i32::try_from(count).map_err(|_| decode_error("reminder count"))?)
         .bind(to_i64(at_ms)?)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        self.read_input_request_by_execution(execution_id)
+            .await?
+            .ok_or_else(|| InputRequestStoreError::NotFound(execution_id.to_owned()))
+    }
+
+    /// Replace the assignees of a pending request. Returns the record as it
+    /// now stands.
+    pub async fn reassign_input_request(
+        &self,
+        execution_id: &str,
+        assignees: &[String],
+    ) -> Result<InputRequestRecord, InputRequestStoreError> {
+        sqlx::query(
+            "UPDATE input_requests SET assignees = $3
+             WHERE universe_id = $1 AND execution_id = $2 AND status = 'pending'",
+        )
+        .bind(self.config.universe_id)
+        .bind(execution_id)
+        .bind(serde_json::to_value(assignees).map_err(|error| {
+            InputRequestStoreError::Decode(format!("assignees: {error}"))
+        })?)
+        .execute(&self.pool)
+        .await?;
+        self.read_input_request_by_execution(execution_id)
+            .await?
+            .ok_or_else(|| InputRequestStoreError::NotFound(execution_id.to_owned()))
     }
 
     /// Hand a pending request to its escalation list with a fresh

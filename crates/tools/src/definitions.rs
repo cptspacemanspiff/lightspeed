@@ -208,6 +208,11 @@ pub fn resolve(
         ),
         crate::concurrency::TIME_SLEEP_TOOL_ID => crate::concurrency::time_sleep_definition(),
         crate::human_input::INPUT_REQUEST_TOOL_ID => crate::human_input::input_request_definition(),
+        crate::human_input::INPUT_OPEN_TOOL_ID => crate::human_input::input_open_definition(),
+        crate::human_input::INPUT_REMIND_TOOL_ID => crate::human_input::input_remind_definition(),
+        crate::human_input::INPUT_REASSIGN_TOOL_ID => {
+            crate::human_input::input_reassign_definition()
+        }
         name if name.starts_with("concurrency.") => {
             concurrency_tool_definitions(&ConcurrencyToolsetConfig::timer())?
                 .into_iter()

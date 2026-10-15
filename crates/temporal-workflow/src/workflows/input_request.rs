@@ -121,7 +121,7 @@ impl InputRequestWorkflow {
         if self
             .start
             .as_ref()
-            .is_some_and(|start| crate::workflows::is_joined_holder_cancellation(start, &envelope))
+            .is_some_and(|start| crate::workflows::is_holder_reply_cancellation(start, &envelope))
         {
             self.holder_cancelled = true;
         }
@@ -278,7 +278,7 @@ fn validate_start(
     {
         return Err("input request workflow, holder, or universe identity mismatch");
     }
-    if start.invocation.semantic_type != INPUT_REQUEST_SEMANTIC_TYPE
+    if !INPUT_SEMANTIC_TYPES.contains(&start.invocation.semantic_type.as_str())
         || !matches!(start.invocation.context, harness::CallContext::Scope { .. })
     {
         return Err("input request start is not a program's scoped input call");
@@ -287,19 +287,20 @@ fn validate_start(
         .invocation
         .completion_promises
         .as_ref()
-        .ok_or("input request requires one joined reply promise")?;
+        .ok_or("input request requires one reply promise")?;
     if promises.len() != 1 {
-        return Err("input request requires exactly one joined reply promise");
+        return Err("input request requires exactly one reply promise");
     }
     promises
         .get(harness::REPLY_COMPLETION_KEY)
         .cloned()
-        .ok_or("input request is missing its joined reply promise")
+        .ok_or("input request is missing its reply promise")
 }
 
-/// Mirrors the binding's semantic type; the workflow crate cannot depend
-/// on the tools crate.
-const INPUT_REQUEST_SEMANTIC_TYPE: &str = "lightspeed.input.request.v1";
+/// Mirrors the semantic types of the `input.request` (joined) and
+/// `input.open` (promise) bindings; the workflow crate cannot depend on the
+/// tools crate.
+const INPUT_SEMANTIC_TYPES: [&str; 2] = ["lightspeed.input.request.v1", "lightspeed.input.open.v1"];
 
 #[cfg(test)]
 mod tests {
@@ -319,7 +320,7 @@ mod tests {
                     "0".repeat(64)
                 )),
                 tool_id: harness::WorkflowToolId::new("input-request"),
-                semantic_type: INPUT_REQUEST_SEMANTIC_TYPE.into(),
+                semantic_type: INPUT_SEMANTIC_TYPES[0].into(),
                 schema_revision: 1,
                 binding_fingerprint: "fp".into(),
                 session_universe_id: universe_id,
@@ -350,5 +351,10 @@ mod tests {
         );
         assert!(validate_start("other", &scoped).is_err());
         assert!(validate_start("wtx:sha256:input", &start_args(CallContext::Run {})).is_err());
+        let mut opened = scoped.clone();
+        opened.invocation.semantic_type = INPUT_SEMANTIC_TYPES[1].into();
+        assert!(validate_start("wtx:sha256:input", &opened).is_ok());
+        opened.invocation.semantic_type = "lightspeed.other.v1".into();
+        assert!(validate_start("wtx:sha256:input", &opened).is_err());
     }
 }
