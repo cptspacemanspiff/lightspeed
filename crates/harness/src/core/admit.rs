@@ -7,6 +7,7 @@ use crate::{
     CoreAgentStatus, DomainError, PromiseEvent, PromiseResolution, RunEvent, RunRequestSource,
     RunSource, RunStatus, ToolConfigEvent, WorkflowToolConfigEvent,
     core::components::{
+        code_tool::stamp_code_tool_completions,
         config::{validate_config_update_for_state, validate_run_config_for_state},
         program::require_agent_driver,
         tooling::validate_tool_map,
@@ -28,8 +29,10 @@ pub fn admit_command(
                 .map_err(command_rejection_from_domain)
         }
         CoreAgentCommand::CompleteCodeToolCall { origin, result } => {
-            crate::complete_code_tool_call_proposals(state, origin, result)
-                .map_err(command_rejection_from_domain)
+            let mut proposals = crate::complete_code_tool_call_proposals(state, origin, result)
+                .map_err(command_rejection_from_domain)?;
+            stamp_code_tool_completions(&mut proposals, observed_at_ms);
+            Ok(proposals)
         }
         CoreAgentCommand::DeferCodeToolCall { origin, spec } => {
             crate::defer_code_tool_call_proposals(state, origin, spec)
@@ -39,14 +42,18 @@ pub fn admit_command(
             origin,
             result,
             claim_observed_at_ms,
-        } => crate::resume_code_tool_call_proposals(
-            state,
-            origin,
-            result,
-            claim_observed_at_ms,
-            observed_at_ms,
-        )
-        .map_err(command_rejection_from_domain),
+        } => {
+            let mut proposals = crate::resume_code_tool_call_proposals(
+                state,
+                origin,
+                result,
+                claim_observed_at_ms,
+                observed_at_ms,
+            )
+            .map_err(command_rejection_from_domain)?;
+            stamp_code_tool_completions(&mut proposals, observed_at_ms);
+            Ok(proposals)
+        }
         CoreAgentCommand::CloseCodeToolScope {
             execution_id,
             cancel,

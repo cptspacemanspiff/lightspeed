@@ -391,6 +391,7 @@ fn code_tool_vectors() -> Value {
         output_ref: Some(BlobRef::from_bytes(b"{\"text\":\"done\"}")),
         error_ref: None,
         attachments: Vec::new(),
+        completed_at_ms: Some(1_760_000_000_000),
     };
     json!({
         "openRequest": OpenCodeToolScopeRequest {
@@ -430,6 +431,7 @@ fn code_tool_vectors() -> Value {
             closed: true,
             cancel_requested: true,
             bindings: BTreeMap::from([(binding_id, tool_name)]),
+            contracts: BTreeMap::new(),
             calls: BTreeMap::from([(request_id, outcome.clone())]),
         },
         "outcome": outcome,

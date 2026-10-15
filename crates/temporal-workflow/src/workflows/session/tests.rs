@@ -467,6 +467,7 @@ fn bootstrap_creation_identity_records_source_universe_and_is_immutable() {
                     input_schema: None,
                     output_schema: None,
                     limits: Default::default(),
+                    requires: Vec::new(),
                 },
             },
         )

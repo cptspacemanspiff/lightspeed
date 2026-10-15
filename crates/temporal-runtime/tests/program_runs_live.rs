@@ -46,20 +46,26 @@ impl CoreAgentLlm for NoModel {
 }
 
 const PROGRAM: &str = r#"
-    const first = await tools.sleep({ms: 5});
-    const parallel = await Promise.all([3, 4].map(ms => tools.sleep({ms})));
-    const waited = await tools.await({
-        promises: [first, ...parallel].map(value => value.promise),
-        mode: "all", timeout_ms: 5000,
-    });
-    return {
-        claim: input.claim,
-        waited: waited.results.length,
-        statuses: waited.results.map(result => result.status),
+    export default {
+        async run(input, env, ctx) {
+            const first = await env.time.sleep({ ms: 5 });
+            const both = await Promise.all([3, 4].map(ms => env.time.sleep({ ms })));
+            const fired = await new Promise(resolve => setTimeout(() => resolve(Date.now()), 2));
+            return {
+                claim: input.claim,
+                slept: 1 + both.length,
+                clock: fired >= first.fire_at_ms && first.fire_at_ms >= ctx.startedAt,
+                hasOnlyItsContracts: Object.keys(env).join(","),
+            };
+        }
     };
 "#;
 
-fn program_profile(profile_id: &api::ProfileId, source: &str) -> api::AgentProfileInput {
+fn program_profile(
+    profile_id: &api::ProfileId,
+    source: &str,
+    requires: &[(&str, Option<&str>)],
+) -> api::AgentProfileInput {
     api::AgentProfileInput {
         profile_id: profile_id.clone(),
         display_name: Some("Live program".to_owned()),
@@ -77,9 +83,16 @@ fn program_profile(profile_id: &api::ProfileId, source: &str) -> api::AgentProfi
                 })),
                 output_schema: Some(json!({
                     "type": "object",
-                    "required": ["claim", "waited"],
+                    "required": ["claim", "slept"],
                 })),
                 limits: None,
+                requires: requires
+                    .iter()
+                    .map(|(contract, digest)| api::ProgramContractRequirement {
+                        contract: (*contract).to_owned(),
+                        digest: digest.map(str::to_owned),
+                    })
+                    .collect(),
             }),
             config: Some(api::SessionConfig {
                 features: Some(api::FeaturesConfig {
@@ -209,9 +222,48 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 let profile_id =
                     api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
                 api.create_profile(api::ProfileCreateParams {
-                    profile: program_profile(&profile_id, PROGRAM),
+                    profile: program_profile(&profile_id, PROGRAM, &[("time.sleep", None)]),
                 })
                 .await?;
+
+                // Contracts are admitted when the session is created: one the
+                // session's configuration does not grant, or one pinned to a
+                // different digest, refuses the session.
+                for (index, requires) in [
+                    [("vfs.read_file", None)],
+                    [("time.sleep", Some("contract-sha256:0000000000000000000000000000000000000000000000000000000000000000"))],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let refused_id = api::ProfileId::new(format!(
+                        "live_program_{}",
+                        uuid::Uuid::new_v4().simple()
+                    ));
+                    api.create_profile(api::ProfileCreateParams {
+                        profile: program_profile(&refused_id, PROGRAM, &requires),
+                    })
+                    .await?;
+                    let refused = start_program_session(
+                        &api,
+                        &SessionId::new(format!("{session_id}-refused-{index}")),
+                        &refused_id,
+                    )
+                    .await;
+                    assert!(
+                        refused.as_ref().is_err_and(|error| {
+                            matches!(
+                                error.downcast_ref::<api::AgentApiError>().map(|error| &error.kind),
+                                Some(api::AgentApiErrorKind::InvalidRequest)
+                            )
+                        }),
+                        "{requires:?} must refuse the session: {refused:?}"
+                    );
+                    api.delete_profile(api::ProfileDeleteParams {
+                        profile_id: refused_id,
+                    })
+                    .await?;
+                }
 
                 let session = start_program_session(&api, &session_id, &profile_id).await?;
                 assert_eq!(
@@ -243,7 +295,7 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 assert_eq!(output.media_type.as_deref(), Some("application/json"));
                 assert_eq!(
                     read_json(&store, &output.content_ref).await?,
-                    json!({"claim": "x", "waited": 3, "statuses": ["resolved", "resolved", "resolved"]})
+                    json!({"claim": "x", "slept": 3, "clock": true, "hasOnlyItsContracts": "time"})
                 );
 
                 // A thrown program fails the run with a program failure whose
@@ -251,7 +303,11 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 let failing_id =
                     api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
                 api.create_profile(api::ProfileCreateParams {
-                    profile: program_profile(&failing_id, "throw new Error('boom ' + input.claim);"),
+                    profile: program_profile(
+                        &failing_id,
+                        "export default { async run(input) { throw new Error('boom ' + input.claim); } };",
+                        &[],
+                    ),
                 })
                 .await?;
                 let failing_session = SessionId::new(format!("{session_id}-failing"));

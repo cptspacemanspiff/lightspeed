@@ -218,10 +218,30 @@ pub struct ProgramSpec {
     pub output_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ProgramLimitsInput>,
+    /// The tool contracts the program calls, such as `vfs.read_file` or
+    /// `time.sleep`. Only these reach the program's `env`. A session created
+    /// from the profile pins each to its digest and is refused if one is not
+    /// granted by the session's configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<ProgramContractRequirement>,
 }
 
 fn default_program_semantics_version() -> u32 {
     1
+}
+
+/// One tool contract a program calls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramContractRequirement {
+    /// Canonical contract name: dotted lowercase identifiers, for example
+    /// `vfs.read_file`.
+    pub contract: String,
+    /// The digest (`contract-sha256:<hex>`) of the contract the program was written
+    /// against. When given, a session whose contract has a different digest
+    /// is refused; when omitted, the session pins the current digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -23,9 +23,9 @@ use super::code::{
     validate_attempt,
 };
 use crate::{
-    code::{Cancellation, CodeRunReport, CodeToolCatalog, read_bounded},
+    code::{Cancellation, CodeRunError, CodeRunReport, read_bounded},
     gateway::GatewayAgentApi,
-    program::{ProgramRunner, put_json},
+    program::{ProgramRunner, program_catalog, put_json},
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,7 +77,7 @@ fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), PreparationError>
 async fn pinned_program(
     api: &GatewayAgentApi,
     start: &WorkflowToolStartArgs,
-) -> Result<harness::PinnedProgram, PreparationError> {
+) -> Result<(harness::PinnedProgram, u64), PreparationError> {
     validate_start(start)?;
     let loaded = api
         .load_session_state(&start.invocation.session_id)
@@ -96,7 +96,14 @@ async fn pinned_program(
             "start is not the run's pending program execution".into(),
         ));
     }
-    Ok(program.clone())
+    let started_at_ms = state
+        .runs
+        .active
+        .as_ref()
+        .filter(|run| run.run_id == start.invocation.run_id)
+        .and_then(|run| run.started_at_ms)
+        .ok_or_else(|| PreparationError::Invalid("program run has not started".into()))?;
+    Ok((program.clone(), started_at_ms))
 }
 
 fn execution_limits(
@@ -139,7 +146,7 @@ async fn prepare(
     start: &WorkflowToolStartArgs,
 ) -> Result<ProgramRunDescriptor, PreparationError> {
     let blobs = api.store().as_ref();
-    let program = pinned_program(api, start).await?;
+    let (program, started_at_ms) = pinned_program(api, start).await?;
     let limits = execution_limits(&program)?;
     let source = read_bounded(blobs, &program.source_ref, limits.max_source_bytes)
         .await
@@ -159,7 +166,9 @@ async fn prepare(
             "program run scope is closed".into(),
         ));
     }
-    let catalog = serde_json::to_vec(&CodeToolCatalog::from_scope(&scope))
+    let catalog = program_catalog(&scope, &program.requires)
+        .map_err(|error| PreparationError::Invalid(error.to_string()))?;
+    let catalog = serde_json::to_vec(&catalog)
         .map_err(|error| PreparationError::Invalid(error.to_string()))?;
     let catalog_ref = blobs
         .put_bytes(catalog)
@@ -175,6 +184,8 @@ async fn prepare(
         output_schema_ref: program.output_schema.clone(),
         semantics_version: program.engine.semantics_version,
         limits,
+        requires: program.requires.clone(),
+        started_at_ms,
     })
 }
 
@@ -283,10 +294,39 @@ pub(super) async fn attempt_activity(
     let work = async {
         let api = activities.universes().api_for(universe_id).await?;
         let runner = runner(activities, &api);
-        let report = runner
+        let report = match runner
             .run_attempt(descriptor.clone(), cancellation.clone())
             .await
-            .map_err(non_retryable)?;
+        {
+            Ok(report) => report,
+            // A pinned contract that changed or was revoked fails the run
+            // with its typed kind, before the program starts.
+            Err(CodeRunError::Contract(error)) => {
+                let report_ref = store_report(
+                    api.store().as_ref(),
+                    &ProgramRunReport {
+                        version: 1,
+                        execution_id: descriptor.execution_id.clone(),
+                        attempt: request.attempt,
+                        descriptor: Some(descriptor.clone()),
+                        execution: None,
+                        scope: None,
+                        interruption: None,
+                        cleanup_error: None,
+                        report_unavailable: None,
+                    },
+                )
+                .await?;
+                return Ok(ProgramAttemptActivityResult {
+                    report_ref,
+                    outcome: ProgramAttemptOutcome::Threw {
+                        error_kind: error.kind().to_owned(),
+                        message: error.to_string(),
+                    },
+                });
+            }
+            Err(error) => return Err(non_retryable(error)),
+        };
         let outcome = attempt_outcome(api.store().as_ref(), &report).await?;
         let report_ref = store_report(
             api.store().as_ref(),
@@ -571,6 +611,7 @@ mod tests {
                 max_in_flight: 20,
                 max_wall_clock_ms: Some(5_000),
             },
+            requires: Vec::new(),
         };
         let limits = execution_limits(&program).unwrap();
         assert_eq!(

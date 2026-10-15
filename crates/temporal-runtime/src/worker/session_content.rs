@@ -244,6 +244,7 @@ mod tests {
                 truncated: false,
             }
             .into(),
+            completed_at_ms: None,
         })
     }
 

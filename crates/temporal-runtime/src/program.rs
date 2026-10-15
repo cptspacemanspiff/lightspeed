@@ -3,9 +3,17 @@
 //! from the scope's recorded-outcome feed, in log order, so a replaying
 //! attempt will see completions in the same order a live one did.
 //!
+//! The program is a module whose default export has a `run(input, env, ctx)`
+//! handler. Its `env` holds only the contracts it was pinned to, and every
+//! attempt re-checks those pins against the scope before the program starts.
+//!
 //! This phase runs one attempt per run and does not replay a journal yet.
 
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use codemode::{ExecutionEvent, HostCompletion, HostError, HostRequest};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -17,6 +25,7 @@ use temporal_workflow::{
 };
 use temporalio_client::Client;
 use tokio::{sync::Semaphore, time::Instant};
+use tools::program::contracts::ContractError;
 
 use crate::code::{
     Cancellation, CodeRunError, CodeRunReport, CodeRunner, CodeToolCatalog,
@@ -163,13 +172,19 @@ impl ProgramRunner {
             .map_err(|error| CodeRunError::Preparation(error.message))?;
             let catalog: CodeToolCatalog = serde_json::from_slice(&catalog)
                 .map_err(|error| CodeRunError::Catalog(error.to_string()))?;
-            catalog.validate(&scope)?;
+            // Re-check the pins against the scope as it is now: a contract
+            // that changed or was revoked fails this attempt before it runs.
+            if program_catalog(&scope, &descriptor.requires)?.bindings != catalog.bindings {
+                return Err(CodeRunError::Catalog(
+                    "program catalog does not match the scope's contract bindings".into(),
+                ));
+            }
             if cancellation.is_cancelled() {
                 return Err(CodeRunError::Cancelled);
             }
-            Ok((permit, compose_source(&source, &input), catalog))
+            Ok((permit, source, input, catalog))
         };
-        let (_permit, source, catalog) =
+        let (_permit, source, input, catalog) =
             match cancellable_preparation(deadline, &cancellation, prepare).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -179,8 +194,6 @@ impl ProgramRunner {
                 }
             };
         let mut limits = engine_limits(&descriptor.limits);
-        // The composed source carries the run input ahead of the program.
-        limits.max_source_bytes = limits.max_source_bytes.max(source.len() as u64);
         limits.timeout_ms = deadline
             .saturating_duration_since(Instant::now())
             .as_millis()
@@ -200,6 +213,11 @@ impl ProgramRunner {
                 source,
                 bindings: catalog.bindings,
                 limits,
+                program: Some(codemode::ProgramExecution {
+                    input,
+                    started_at_ms: descriptor.started_at_ms,
+                    random_seed: random_seed(&descriptor.execution_id),
+                }),
             },
             cancellation,
         ) {
@@ -228,6 +246,7 @@ impl ProgramRunner {
                         "payload_too_large",
                         "host completion exceeds result budget",
                     )),
+                    completed_at_ms: None,
                 }),
                 result => result,
             };
@@ -311,6 +330,7 @@ impl ProgramRunner {
                                 descriptor.limits.max_result_bytes,
                             )
                             .await,
+                            completed_at_ms: outcome.completed_at_ms,
                         };
                         if let Err(error) = deliver(completion) {
                             bridge_failure = Some(error);
@@ -394,16 +414,58 @@ impl ProgramRunner {
             Err(error) => Err(HostCompletion {
                 request_id,
                 outcome: Err(error),
+                completed_at_ms: None,
             }),
         }
     }
 }
 
-/// The program runs as a script body with its run input bound to `input`.
-/// The input is inlined as JSON, so the composed source is a pure function
-/// of the pinned program and the run's input.
-pub(crate) fn compose_source(source: &str, input: &Value) -> String {
-    format!("const input = {input};\n{source}")
+/// A program's catalog: the scope's bindings for the contracts the program
+/// was pinned to, named by contract, with `#<part>` for each tool of a
+/// composite contract. Fails when the scope no longer binds a pinned
+/// contract at its digest.
+pub(crate) fn program_catalog(
+    scope: &CodeToolScopeReport,
+    requires: &[harness::ContractPin],
+) -> Result<CodeToolCatalog, ContractError> {
+    let current = scope
+        .contracts
+        .values()
+        .map(|binding| (binding.contract.clone(), binding.digest.clone()))
+        .collect::<BTreeMap<_, _>>();
+    tools::program::contracts::check_pins(requires, &current)?;
+    let required = requires
+        .iter()
+        .map(|pin| pin.contract.as_str())
+        .collect::<BTreeSet<_>>();
+    Ok(CodeToolCatalog {
+        version: 1,
+        bindings: scope
+            .contracts
+            .iter()
+            .filter(|(_, binding)| required.contains(binding.contract.as_str()))
+            .map(|(handle, binding)| codemode::ToolBinding {
+                name: match &binding.part {
+                    Some(part) => format!("{}#{part}", binding.contract),
+                    None => binding.contract.clone(),
+                },
+                binding_id: handle.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// The seed of a program's randomness: a function of its execution id, so
+/// every attempt of a run draws the same values.
+pub(crate) fn random_seed(execution_id: &str) -> [u32; 4] {
+    let digest = BlobRef::from_bytes(execution_id.as_bytes());
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("blob references are sha256 digests");
+    std::array::from_fn(|word| {
+        u32::from_str_radix(&hex[word * 8..word * 8 + 8], 16).expect("hex digest")
+    })
 }
 
 /// Store a JSON value and return its reference.
@@ -419,13 +481,77 @@ pub(crate) async fn put_json(blobs: &dyn BlobStore, value: &Value) -> Result<Blo
 mod tests {
     use super::*;
 
+    fn pin(contract: &str, digest: &str) -> harness::ContractPin {
+        harness::ContractPin {
+            contract: contract.into(),
+            digest: digest.into(),
+        }
+    }
+
+    fn binding(contract: &str, part: Option<&str>, digest: &str) -> harness::ContractBinding {
+        harness::ContractBinding {
+            contract: contract.into(),
+            digest: digest.into(),
+            part: part.map(str::to_owned),
+        }
+    }
+
     #[test]
-    fn composed_source_binds_the_input_ahead_of_the_program() {
-        let composed = compose_source(
-            "return input.claim;",
-            &serde_json::json!({"claim": "x\u{2028}y"}),
+    fn program_catalogs_hold_only_pinned_contracts_and_fail_on_drift() {
+        let read = harness::contract_digest(b"read");
+        let sleep = harness::contract_digest(b"sleep");
+        let fetch = harness::contract_digest(b"fetch");
+        let scope = CodeToolScopeReport {
+            execution_id: "wtx:test".into(),
+            closed: false,
+            cancel_requested: false,
+            bindings: [
+                ("h-read", "vfs_read_file"),
+                ("h-timer", "sleep"),
+                ("h-await", "await"),
+                ("h-fetch", "web_fetch"),
+            ]
+            .into_iter()
+            .map(|(handle, name)| (handle.into(), harness::ToolName::new(name)))
+            .collect(),
+            contracts: [
+                ("h-read", binding("vfs.read_file", None, &read)),
+                ("h-timer", binding("time.sleep", Some("timer"), &sleep)),
+                ("h-await", binding("time.sleep", Some("await"), &sleep)),
+                ("h-fetch", binding("web.fetch", None, &fetch)),
+            ]
+            .into_iter()
+            .map(|(handle, binding)| (handle.into(), binding))
+            .collect(),
+            calls: Default::default(),
+        };
+        let requires = [pin("vfs.read_file", &read), pin("time.sleep", &sleep)];
+        let catalog = program_catalog(&scope, &requires).unwrap();
+        assert_eq!(
+            catalog
+                .bindings
+                .iter()
+                .map(|binding| (binding.name.as_str(), binding.binding_id.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("time.sleep#await", "h-await"),
+                ("vfs.read_file", "h-read"),
+                ("time.sleep#timer", "h-timer"),
+            ]
         );
-        assert!(composed.starts_with("const input = {\"claim\":\"x\u{2028}y\"};\n"));
-        assert!(composed.ends_with("return input.claim;"));
+        assert!(matches!(
+            program_catalog(&scope, &[pin("vfs.read_file", &fetch)]),
+            Err(ContractError::Changed { .. })
+        ));
+        assert!(matches!(
+            program_catalog(&scope, &[pin("env.run_process", &read)]),
+            Err(ContractError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn random_seeds_follow_the_execution() {
+        assert_eq!(random_seed("wtx:a"), random_seed("wtx:a"));
+        assert_ne!(random_seed("wtx:a"), random_seed("wtx:b"));
     }
 }

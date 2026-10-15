@@ -16,3 +16,5 @@ pub fn is_program_execution_binding(tool_id: &str, semantic_type: &str) -> bool 
     tool_id == PROGRAM_EXECUTE_WORKFLOW_TOOL_ID
         && semantic_type == PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE
 }
+
+pub mod contracts;

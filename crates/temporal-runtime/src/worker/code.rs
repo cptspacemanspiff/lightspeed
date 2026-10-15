@@ -923,6 +923,7 @@ mod tests {
                 closed: true,
                 cancel_requested: false,
                 bindings: Default::default(),
+                contracts: Default::default(),
                 calls: calls
                     .into_iter()
                     .map(|call| (call.request_id.clone(), call))
@@ -945,6 +946,7 @@ mod tests {
             output_ref: Some(BlobRef::from_bytes(request_id.as_bytes())),
             error_ref: None,
             attachments: vec![attachment],
+            completed_at_ms: None,
         }
     }
 
@@ -1323,6 +1325,7 @@ mod tests {
                 closed: true,
                 cancel_requested: true,
                 bindings: Default::default(),
+                contracts: Default::default(),
                 calls: [(
                     "call-1".into(),
                     temporal_workflow::CodeToolCallOutcome {
@@ -1331,6 +1334,7 @@ mod tests {
                         status: temporal_workflow::CodeToolCallStatus::Failed,
                         output_ref: Some(output_ref.clone()),
                         error_ref: Some(error_ref.clone()),
+                        completed_at_ms: None,
                         attachments: vec![harness::Attachment::File(harness::FileAttachment::new(
                             file_ref.clone(),
                             "file.txt".into(),

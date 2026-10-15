@@ -697,7 +697,7 @@ impl<'a> CoreAgentProjector<'a> {
                         Phase::CallDeferred,
                         None,
                     ),
-                    harness::CodeToolEvent::CallCompleted { origin, result } => (
+                    harness::CodeToolEvent::CallCompleted { origin, result, .. } => (
                         origin.execution_id.clone(),
                         Some(origin.request_id.clone()),
                         Phase::CallCompleted,
@@ -4512,6 +4512,7 @@ mod tests {
                 truncated: false,
             }
             .into(),
+            completed_at_ms: Some(42),
         });
         let projected = projector.project_event_kind(&event).await.unwrap();
         assert_eq!(

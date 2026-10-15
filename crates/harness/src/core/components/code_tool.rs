@@ -90,6 +90,9 @@ pub(crate) fn interrupt_code_tools_for_run(state: &mut CoreAgentState, run_id: c
 pub struct CodeToolBinding {
     pub tool_id: ToolName,
     pub tool_name: ToolName,
+    /// Under contract binding, the contract (and part) this handle serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<crate::ContractBinding>,
 }
 
 /// Who holds a scope open. The owner decides what keeps the scope live, which
@@ -133,10 +136,12 @@ impl ScopePolicy {
         }
     }
 
-    /// The policy a program run's scope runs under. Calls are acknowledged
-    /// on admission so an attempt can release the session while they run.
+    /// The policy a program run's scope runs under. Bindings are canonical
+    /// contracts, and calls are acknowledged on admission so an attempt can
+    /// release the session while they run.
     pub fn program(limits: ScopeLimits) -> Self {
         Self {
+            binding_mode: BindingMode::Contract,
             completion: Completion::Ack,
             ..Self::code_mode(limits)
         }
@@ -150,6 +155,9 @@ pub enum BindingMode {
     /// Tool names and arguments follow the model presentation of the run that
     /// owns the scope, pinned when the scope opens.
     Presentation,
+    /// Every binding serves a canonical tool contract, named and pinned by
+    /// digest when the scope opens. No model presentation affects it.
+    Contract,
 }
 
 /// What invalidates a scope's bindings after it opens.
@@ -299,6 +307,12 @@ pub struct CodeToolCall {
     pub call_id: ToolCallId,
     pub promise_id_base: u64,
     pub status: CodeToolCallStatus,
+    /// When the session recorded the call's outcome. A program's clock
+    /// advances to it when the outcome is delivered, so replay sees the
+    /// same time. Absent on calls completed before this was recorded and
+    /// on calls interrupted by the end of their run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
 }
 
 /// Durable code tool outcome. Effect carriers are admitted as their own domain
@@ -437,6 +451,8 @@ pub enum CodeToolEvent {
     CallCompleted {
         origin: CodeToolOrigin,
         result: CodeToolCallResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completed_at_ms: Option<u64>,
     },
     CallDeferred {
         origin: CodeToolOrigin,
@@ -701,6 +717,15 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
     let owner_tool = facts.owner_tool;
     for (binding_id, binding) in &scope.bindings {
         validate_id("binding_id", binding_id)?;
+        match (scope.policy.binding_mode, &binding.contract) {
+            (BindingMode::Presentation, None) => {}
+            (BindingMode::Contract, Some(contract)) => contract.validate()?,
+            _ => {
+                return Err(invalid(
+                    "code tool binding does not match the scope's binding mode",
+                ));
+            }
+        }
         let tool_id = &binding.tool_id;
         let tool = state
             .tooling
@@ -1214,9 +1239,26 @@ pub fn resume_code_tool_call_proposals(
         CoreAgentEvent::CodeTool(CodeToolEvent::CallCompleted {
             origin,
             result: result.into(),
+            completed_at_ms: None,
         }),
     ));
     Ok(proposals)
+}
+
+/// Stamp the scoped-call completions among `proposals` with the time the
+/// session observed the command that produced them.
+pub(crate) fn stamp_code_tool_completions(
+    proposals: &mut [CoreAgentEventProposal],
+    observed_at_ms: u64,
+) {
+    for proposal in proposals {
+        if let CoreAgentEvent::CodeTool(CodeToolEvent::CallCompleted {
+            completed_at_ms, ..
+        }) = &mut proposal.event
+        {
+            *completed_at_ms = Some(observed_at_ms);
+        }
+    }
 }
 
 pub fn close_code_tool_scope_proposals(
@@ -1393,11 +1435,16 @@ pub(crate) fn apply_code_tool_event(
                         call_id: code_tool_call_id(&call.origin),
                         promise_id_base: *promise_id_base,
                         status: CodeToolCallStatus::Pending,
+                        completed_at_ms: None,
                     },
                 );
             state.id_cursors.last_promise_id = last;
         }
-        CodeToolEvent::CallCompleted { origin, result } => {
+        CodeToolEvent::CallCompleted {
+            origin,
+            result,
+            completed_at_ms,
+        } => {
             let call = code_tool_call(state, origin)
                 .ok_or_else(|| invalid("unknown code tool request"))?;
             validate_result_fields(call, &result.call_id, result.status)?;
@@ -1409,13 +1456,14 @@ pub(crate) fn apply_code_tool_event(
                 .scopes
                 .get_mut(&origin.execution_id)
                 .expect("validated scope");
-            scope
+            let call = scope
                 .calls
                 .get_mut(&origin.request_id)
-                .expect("validated call")
-                .status = CodeToolCallStatus::Completed {
+                .expect("validated call");
+            call.status = CodeToolCallStatus::Completed {
                 result: result.clone(),
             };
+            call.completed_at_ms = *completed_at_ms;
             scope.completed.push(origin.request_id.clone());
         }
         CodeToolEvent::CallDeferred { origin, suspension } => {

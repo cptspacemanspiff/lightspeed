@@ -331,7 +331,10 @@ impl GatewayAgentApi {
             Some(source) => Some(self.resolve_profile(source).await?),
             None => None,
         };
-        let driver = match resolved.as_ref().and_then(|resolved| {
+        let program_spec = resolved
+            .as_ref()
+            .and_then(|resolved| resolved.document.program.clone());
+        let mut driver = match resolved.as_ref().and_then(|resolved| {
             resolved
                 .document
                 .program
@@ -370,6 +373,11 @@ impl GatewayAgentApi {
             config,
         );
         let session_config = self.session_config_for_start(start_config).await?;
+        if let (harness::SessionDriver::Program { program }, Some(spec)) =
+            (&mut driver, program_spec.as_ref())
+        {
+            program.requires = self.pin_program_contracts(spec, &session_config).await?;
+        }
         let setup_environment = profiles::default_environment_id(&session_config.features)?;
 
         if let Some(admitted) = admitted.as_ref() {

@@ -631,6 +631,11 @@ export interface CodeRunActivityResult {
 export interface CodeToolCallOutcome {
   attachments?: Attachment[];
   call_id: ToolCallId;
+  /**
+   * When the session recorded the outcome; a program's clock advances to
+   * it on delivery.
+   */
+  completed_at_ms?: number | null;
   error_ref?: string | null;
   output_ref?: string | null;
   request_id: string;
@@ -666,7 +671,26 @@ export interface CodeToolScopeReport {
   };
   cancel_requested: boolean;
   closed: boolean;
+  /**
+   * Under contract binding, the contract each handle serves.
+   */
+  contracts?: {
+    [k: string]: ContractBinding;
+  };
   execution_id: string;
+}
+/**
+ * A scope binding's place in a contract. A contract is usually one tool;
+ * a composite contract (such as `time.sleep`, a timer and an await) binds
+ * each of its tools under a named part.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "ContractBinding".
+ */
+export interface ContractBinding {
+  contract: string;
+  digest: string;
+  part?: string | null;
 }
 /**
  * Read an authoritative snapshot, including after a runner loses its waiters.

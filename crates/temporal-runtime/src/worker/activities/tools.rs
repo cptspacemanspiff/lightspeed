@@ -66,6 +66,9 @@ pub(super) async fn prepare_code_tool_scope(
     deps: &ToolActivityDeps,
     request: temporal_workflow::CodeToolPrepareScopeActivityRequest,
 ) -> Result<temporal_workflow::CodeToolPrepareScopeActivityResult, ActivityError> {
+    if request.binding_mode == harness::BindingMode::Contract {
+        return prepare_contract_scope(deps, request).await;
+    }
     let target = tools::runtime::ToolTarget::from(&request.model);
     let resolved = tools::callable::resolve(deps.blobs.as_ref(), &target, &request.tools)
         .await
@@ -81,7 +84,14 @@ pub(super) async fn prepare_code_tool_scope(
         }
         let input = serde_json::to_vec(&(&tool_id, &tool_name)).map_err(activity_error)?;
         let handle = format!("binding:{}", harness::BlobRef::from_bytes(&input));
-        bindings.insert(handle, harness::CodeToolBinding { tool_id, tool_name });
+        bindings.insert(
+            handle,
+            harness::CodeToolBinding {
+                tool_id,
+                tool_name,
+                contract: None,
+            },
+        );
         Ok(())
     };
     for tool in resolved {
@@ -102,6 +112,35 @@ pub(super) async fn prepare_code_tool_scope(
             }
         } else if let Some(callable) = tool.into_callable() {
             insert(callable.tool_id, callable.definition.name)?;
+        }
+    }
+    Ok(temporal_workflow::CodeToolPrepareScopeActivityResult { bindings })
+}
+
+/// Bind a program scope: one handle per part of every canonical contract
+/// the session's tools serve. The model plays no part, so the same tools
+/// always bind the same contracts at the same digests.
+async fn prepare_contract_scope(
+    deps: &ToolActivityDeps,
+    request: temporal_workflow::CodeToolPrepareScopeActivityRequest,
+) -> Result<temporal_workflow::CodeToolPrepareScopeActivityResult, ActivityError> {
+    let contracts = tools::program::contracts::bind_toolset(deps.blobs.as_ref(), &request.tools)
+        .await
+        .map_err(activity_error)?;
+    let mut bindings = BTreeMap::new();
+    for contract in &contracts {
+        for part in &contract.parts {
+            let binding = contract.binding(part);
+            let input = serde_json::to_vec(&(&part.tool_id, &part.tool_name, &binding))
+                .map_err(activity_error)?;
+            bindings.insert(
+                format!("binding:{}", harness::BlobRef::from_bytes(&input)),
+                harness::CodeToolBinding {
+                    tool_id: part.tool_id.clone(),
+                    tool_name: part.tool_name.clone(),
+                    contract: Some(binding),
+                },
+            );
         }
     }
     Ok(temporal_workflow::CodeToolPrepareScopeActivityResult { bindings })
@@ -657,7 +696,7 @@ fn validate_code_tool_presentation(call: &harness::ToolInvocationRequest) -> Res
             .ok_or_else(|| "code tool MCP name does not match its admitted binding".to_owned());
     }
     if let Some(builtin) = &call.builtin {
-        let resolved = tools::definitions::resolve(id, &builtin.spec, &(&builtin.model).into())
+        let resolved = tools::definitions::resolve(id, &builtin.spec, &builtin.into())
             .map_err(|error| error.to_string())?;
         return resolved
             .into_iter()
@@ -1051,6 +1090,7 @@ mod tests {
                 provider_id: "anthropic".to_owned(),
                 model: "claude-pinned".to_owned(),
             },
+            program: false,
         });
         let request = batch(vec![call.clone()])
             .request
@@ -1092,6 +1132,7 @@ mod tests {
                 provider_id: "anthropic".to_owned(),
                 model: "claude".to_owned(),
             },
+            binding_mode: harness::BindingMode::Presentation,
         };
         let prepared = prepare_code_tool_scope(&deps, request.clone())
             .await
@@ -1112,6 +1153,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn program_scope_binds_contracts_whatever_the_session_model() {
+        let blobs: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
+        let (deps, _) = deps(RuntimeScript::Complete, blobs, None);
+        let canonical = tools::definitions::BuiltinSettings {
+            presentation: tools::toolset::BuiltinToolPresentation::Canonical,
+            ..Default::default()
+        };
+        let request = temporal_workflow::CodeToolPrepareScopeActivityRequest {
+            tools: [
+                "vfs.read_file",
+                "web.fetch",
+                "web.search",
+                "concurrency.sleep",
+                "concurrency.await",
+                "mcp.call",
+            ]
+            .into_iter()
+            .map(|id| {
+                tools::definitions::register(
+                    id,
+                    canonical.clone(),
+                    harness::ToolParallelism::ParallelSafe,
+                    Default::default(),
+                )
+            })
+            .collect(),
+            // Anthropic would present web.fetch as a provider-hosted tool;
+            // a program binds its host function regardless.
+            model: harness::ModelSelection {
+                api_kind: harness::ProviderApiKind::AnthropicMessages,
+                provider_id: "anthropic".to_owned(),
+                model: "claude".to_owned(),
+            },
+            binding_mode: harness::BindingMode::Contract,
+        };
+        let prepared = prepare_code_tool_scope(&deps, request.clone())
+            .await
+            .expect("prepare");
+        assert_eq!(
+            prepared,
+            prepare_code_tool_scope(&deps, request)
+                .await
+                .expect("repeat preparation")
+        );
+        let bound = prepared
+            .bindings
+            .values()
+            .map(|binding| {
+                let contract = binding.contract.as_ref().expect("contract binding");
+                (
+                    contract.contract.as_str(),
+                    contract.part.as_deref(),
+                    binding.tool_name.as_str(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            bound,
+            std::collections::BTreeSet::from([
+                ("promise.await", None, "await"),
+                ("time.sleep", Some("await"), "await"),
+                ("time.sleep", Some("timer"), "sleep"),
+                ("vfs.read_file", None, "vfs_read_file"),
+                ("web.fetch", None, "web_fetch"),
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn code_tool_call_rejects_legacy_alias_before_the_backend() {
         let blobs: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
         let (deps, tools) = deps(RuntimeScript::Complete, blobs.clone(), None);
@@ -1124,6 +1234,7 @@ mod tests {
                 provider_id: "anthropic".to_owned(),
                 model: "claude".to_owned(),
             },
+            program: false,
         });
         let request = batch(vec![call])
             .request

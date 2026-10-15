@@ -21,6 +21,7 @@ fn input(source: &str) -> ExecutionInput {
             max_tool_calls: 32,
             max_outstanding_tool_calls: 8,
         },
+        program: None,
     }
 }
 
@@ -53,6 +54,7 @@ async fn run_content(
                 let result = sender.complete(HostCompletion {
                     request_id: request.request_id.clone(),
                     outcome: complete(&request),
+                    completed_at_ms: None,
                 });
                 assert!(result.is_ok() || result == Err(CompletionError::Stopped));
                 requests.push(request);
@@ -218,6 +220,7 @@ async fn parallel_helpers_preserve_emission_order_when_admissions_finish_out_of_
             .complete(HostCompletion {
                 request_id: request.request_id,
                 outcome: Ok(content_descriptor()),
+                completed_at_ms: None,
             })
             .unwrap();
     }
@@ -443,6 +446,7 @@ async fn run(input: ExecutionInput) -> (Vec<HostRequest>, ExecutionReport) {
                 let result = completions.complete(HostCompletion {
                     request_id: request.request_id.clone(),
                     outcome: Ok(request.arguments.clone()),
+                    completed_at_ms: None,
                 });
                 assert!(result.is_ok() || result == Err(CompletionError::Stopped));
                 requests.push(request);
@@ -506,6 +510,7 @@ async fn parallel_requests_are_issued_before_any_completion_and_settle_out_of_or
             .complete(HostCompletion {
                 request_id: request.request_id,
                 outcome: Ok(request.arguments),
+                completed_at_ms: None,
             })
             .unwrap();
     }
@@ -546,6 +551,7 @@ async fn host_errors_are_catchable_and_preserve_structured_error_data() {
                     .complete(HostCompletion {
                         request_id: request.request_id,
                         outcome,
+                        completed_at_ms: None,
                     })
                     .unwrap();
             }
@@ -804,7 +810,8 @@ async fn oversized_completions_are_rejected_before_entering_the_engine() {
     assert_eq!(
         sender.complete(HostCompletion {
             request_id: request.request_id.clone(),
-            outcome: Ok(json!("x".repeat(200)))
+            outcome: Ok(json!("x".repeat(200))),
+            completed_at_ms: None,
         }),
         Err(CompletionError::TooLarge)
     );
@@ -812,6 +819,7 @@ async fn oversized_completions_are_rejected_before_entering_the_engine() {
         .complete(HostCompletion {
             request_id: request.request_id,
             outcome: Ok(json!(1)),
+            completed_at_ms: None,
         })
         .unwrap();
     let Some(ExecutionEvent::Finished(report)) = execution.next_event().await else {
@@ -859,6 +867,7 @@ async fn dropping_execution_cancels_the_native_thread() {
             let result = completion.complete(HostCompletion {
                 request_id: "unused".into(),
                 outcome: Ok(Value::Null),
+                completed_at_ms: None,
             });
             if result == Err(CompletionError::Stopped) {
                 break;
@@ -899,6 +908,7 @@ async fn unknown_and_duplicate_completions_fail_without_losing_outstanding_calls
                 .complete(HostCompletion {
                     request_id: first.request_id.clone(),
                     outcome: Ok(Value::Null),
+                    completed_at_ms: None,
                 })
                 .unwrap();
             let Some(ExecutionEvent::Request(second)) = execution.next_event().await else {
@@ -916,6 +926,7 @@ async fn unknown_and_duplicate_completions_fail_without_losing_outstanding_calls
                     "unknown".into()
                 },
                 outcome: Ok(Value::Null),
+                completed_at_ms: None,
             })
             .unwrap();
         let Some(ExecutionEvent::Finished(report)) = execution.next_event().await else {
@@ -926,9 +937,384 @@ async fn unknown_and_duplicate_completions_fail_without_losing_outstanding_calls
         assert_eq!(
             sender.complete(HostCompletion {
                 request_id: "unused".into(),
-                outcome: Ok(Value::Null)
+                outcome: Ok(Value::Null),
+                completed_at_ms: None,
             }),
             Err(CompletionError::Stopped)
         );
     }
+}
+
+fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionInput {
+    let mut program = input(source);
+    program.bindings = bindings
+        .iter()
+        .map(|name| ToolBinding {
+            name: (*name).into(),
+            binding_id: format!("opaque-{name}"),
+        })
+        .collect();
+    program.program = Some(ProgramExecution {
+        input: json!({"claim": "x"}),
+        started_at_ms: 1_000,
+        random_seed: seed,
+    });
+    program
+}
+
+/// Drive a program, answering each request in issue order with the
+/// outcome and completion time `complete` gives it.
+async fn run_program(
+    input: ExecutionInput,
+    mut complete: impl FnMut(&HostRequest) -> (Result<Value, HostError>, Option<u64>),
+) -> (Vec<HostRequest>, ExecutionReport) {
+    let mut execution = start(input, Cancellation::default()).unwrap();
+    let sender = execution.completion_sender();
+    let mut requests = Vec::new();
+    while let Some(event) = execution.next_event().await {
+        match event {
+            ExecutionEvent::Request(request) => {
+                let (outcome, completed_at_ms) = complete(&request);
+                let result = sender.complete(HostCompletion {
+                    request_id: request.request_id.clone(),
+                    outcome,
+                    completed_at_ms,
+                });
+                assert!(result.is_ok() || result == Err(CompletionError::Stopped));
+                requests.push(request);
+            }
+            ExecutionEvent::Finished(report) => return (requests, report),
+        }
+    }
+    panic!("execution ended without a report");
+}
+
+const SEED: [u32; 4] = [1, 2, 3, 4];
+
+#[tokio::test(flavor = "current_thread")]
+async fn programs_run_a_module_handler_with_contract_namespaces() {
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                const page = await env.web.fetch({ url: "https://example.test" });
+                const file = await env.vfs.read_file({ path: "/a" });
+                return {
+                    claim: input.claim,
+                    startedAt: ctx.startedAt,
+                    families: Object.keys(env).sort(),
+                    frozen: Object.isFrozen(env) && Object.isFrozen(env.vfs),
+                    results: [page, file],
+                    scriptGlobals: [typeof tools, typeof text, typeof media],
+                };
+            }
+        };
+    "#;
+    let (requests, report) = run_program(
+        program_input(source, &["web.fetch", "vfs.read_file"], SEED),
+        |request| (Ok(json!(request.binding_id)), None),
+    )
+    .await;
+    assert_eq!(report.error, None);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.binding_id.as_str())
+            .collect::<Vec<_>>(),
+        ["opaque-web.fetch", "opaque-vfs.read_file"]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "claim": "x",
+            "startedAt": 1_000,
+            "families": ["vfs", "web"],
+            "frozen": true,
+            "results": ["opaque-web.fetch", "opaque-vfs.read_file"],
+            "scriptGlobals": ["undefined", "undefined", "undefined"],
+        }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_program_needs_a_default_export_with_run_and_compiles_before_effects() {
+    for source in [
+        "export const run = async () => 1;",
+        "export default { run: 1 };",
+    ] {
+        let (_, report) = run_program(program_input(source, &[], SEED), |_| {
+            (Ok(Value::Null), None)
+        })
+        .await;
+        assert_eq!(
+            report.error.unwrap().kind,
+            ExecutionErrorKind::Javascript,
+            "{source}"
+        );
+    }
+    let (requests, report) = run_program(
+        program_input(
+            "setTimeout(() => {}, 1); export default { async run() { return 1 } ",
+            &["time.sleep#timer", "time.sleep#await"],
+            SEED,
+        ),
+        |_| (Ok(Value::Null), None),
+    )
+    .await;
+    assert!(requests.is_empty());
+    assert_eq!(report.error.unwrap().kind, ExecutionErrorKind::Javascript);
+    let (_, report) = run_program(
+        program_input(
+            r#"import fs from "fs"; export default { async run() { return 1 } };"#,
+            &[],
+            SEED,
+        ),
+        |_| (Ok(Value::Null), None),
+    )
+    .await;
+    assert!(report.error.is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_clock_is_the_recorded_start_and_advances_only_with_completions() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const seen = [Date.now(), new Date().getTime(), performance.now()];
+                await env.test.call({});
+                seen.push(Date.now());
+                // An earlier timestamp never moves the clock back.
+                await env.test.call({});
+                seen.push(Date.now(), performance.now());
+                const local = new Date(2026, 0, 2, 3, 4, 5);
+                return {
+                    seen,
+                    offset: local.getTimezoneOffset(),
+                    local: local.getTime() === Date.UTC(2026, 0, 2, 3, 4, 5),
+                    hours: local.getHours(),
+                    parsed: Date.parse("2026-01-02T03:04:05") === Date.UTC(2026, 0, 2, 3, 4, 5),
+                    zoned: Date.parse("2026-01-02T03:04:05+01:00") === Date.UTC(2026, 0, 2, 2, 4, 5),
+                    text: local.toString(),
+                    called: typeof Date(),
+                    subclass: (class Stamp extends Date {}).prototype instanceof Date,
+                };
+            }
+        };
+    "#;
+    let mut times = [5_000, 4_000].into_iter();
+    let (_, report) = run_program(program_input(source, &["test.call"], SEED), |_| {
+        (Ok(Value::Null), times.next())
+    })
+    .await;
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "seen": [1_000, 1_000, 0, 5_000, 5_000, 4_000],
+            "offset": 0,
+            "local": true,
+            "hours": 3,
+            "parsed": true,
+            "zoned": true,
+            "text": "Fri Jan 02 2026 03:04:05 GMT+0000 (Coordinated Universal Time)",
+            "called": "string",
+            "subclass": true,
+        }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn randomness_is_drawn_from_the_execution_seed() {
+    let source = r#"
+        export default {
+            async run() {
+                const bytes = crypto.getRandomValues(new Uint8Array(6));
+                return {
+                    random: [Math.random(), Math.random()],
+                    bytes: Array.from(bytes),
+                    uuid: crypto.randomUUID(),
+                };
+            }
+        };
+    "#;
+    let draw = |seed| async move {
+        let (_, report) = run_program(program_input(source, &[], seed), |_| {
+            (Ok(Value::Null), None)
+        })
+        .await;
+        assert_eq!(report.error, None);
+        report.return_value.unwrap()
+    };
+    let first = draw(SEED).await;
+    assert_eq!(first, draw(SEED).await);
+    assert_ne!(first, draw([4, 3, 2, 1]).await);
+    let uuid = first["uuid"].as_str().unwrap();
+    assert_eq!(uuid.len(), 36);
+    assert_eq!(&uuid[14..15], "4");
+    assert!(first["random"][0].as_f64().unwrap() < 1.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn programs_cannot_generate_code_from_strings() {
+    let source = r#"
+        export default {
+            async run() {
+                const refused = [];
+                for (const attempt of [
+                    () => eval("1"),
+                    () => (0, eval)("1"),
+                    () => new Function("return 1"),
+                    () => Function("return 1"),
+                    () => (function () {}).constructor("return 1"),
+                    () => (async function () {}).constructor("return 1"),
+                    () => (function* () {}).constructor("yield 1"),
+                    () => (async function* () {}).constructor("yield 1"),
+                ]) {
+                    try { attempt(); refused.push(false); } catch { refused.push(true); }
+                }
+                return { refused, instance: (() => {}) instanceof Function };
+            }
+        };
+    "#;
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| {
+        (Ok(Value::Null), None)
+    })
+    .await;
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(
+            json!({"refused": [true, true, true, true, true, true, true, true], "instance": true})
+        )
+    );
+}
+
+fn sleep_outcome(
+    request: &HostRequest,
+    fire_at_ms: u64,
+) -> (Result<Value, HostError>, Option<u64>) {
+    if request.binding_id == "opaque-time.sleep#timer" {
+        let promise = format!("promise_{}", request.request_id.trim_start_matches("call-"));
+        (
+            Ok(json!({"promise": promise, "fire_at_ms": fire_at_ms})),
+            Some(1_000),
+        )
+    } else {
+        let promise = request.arguments["promises"][0].clone();
+        (
+            Ok(
+                json!({"outcome": "completed", "results": [{"promise_id": promise, "status": "resolved"}]}),
+            ),
+            Some(fire_at_ms + 2),
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const order = [];
+                const cleared = setTimeout(() => order.push("cleared"), 5);
+                clearTimeout(cleared);
+                await new Promise(resolve => setTimeout(value => { order.push(value); resolve(); }, 20, "fired"));
+                const slept = await env.time.sleep({ ms: 30 });
+                let rejected = false;
+                try { await env.time.sleep({ ms: -1 }); } catch { rejected = true; }
+                return { order, slept, now: Date.now(), rejected };
+            }
+        };
+    "#;
+    let (requests, report) = run_program(
+        program_input(source, &["time.sleep#timer", "time.sleep#await"], SEED),
+        |request| {
+            let ms = request.arguments["ms"].as_u64().unwrap_or(0);
+            sleep_outcome(request, 1_000 + ms)
+        },
+    )
+    .await;
+    assert_eq!(report.error, None);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.binding_id.trim_start_matches("opaque-time.sleep#"))
+            .collect::<Vec<_>>(),
+        ["timer", "timer", "await", "await", "timer", "await"]
+    );
+    assert_eq!(requests[0].arguments, json!({"ms": 5}));
+    assert_eq!(
+        requests[2].arguments,
+        json!({"promises": ["promise_1"], "mode": "all"})
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "order": ["fired"],
+            "slept": {"fire_at_ms": 1_030},
+            // The await completed at 1_002 here; the clock is clamped to the
+            // later timer deadline.
+            "now": 1_030,
+            "rejected": true,
+        }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
+    let source = r#"
+        export default {
+            async run() {
+                setTimeout(() => { throw new Error("timer failed"); }, 1);
+                return await new Promise(() => {});
+            }
+        };
+    "#;
+    let (_, report) = run_program(
+        program_input(source, &["time.sleep#timer", "time.sleep#await"], SEED),
+        |request| sleep_outcome(request, 1_001),
+    )
+    .await;
+    assert_eq!(report.error.unwrap().message, "timer failed");
+
+    let (_, report) = run_program(
+        program_input(
+            "export default { async run() { setTimeout(() => {}, 1); } };",
+            &[],
+            SEED,
+        ),
+        |_| (Ok(Value::Null), None),
+    )
+    .await;
+    assert!(
+        report
+            .error
+            .unwrap()
+            .message
+            .contains("time.sleep contract")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn module_code_cannot_tamper_with_env_construction() {
+    let source = r#"
+        String.prototype.split = () => ["evil"];
+        Array.prototype.slice = () => { throw new Error("tampered"); };
+        export default {
+            async run(input, env) {
+                await new Promise(resolve => setTimeout(resolve, 1, "a"));
+                return Object.keys(env);
+            }
+        };
+    "#;
+    let (_, report) = run_program(
+        program_input(
+            source,
+            &["web.fetch", "time.sleep#timer", "time.sleep#await"],
+            SEED,
+        ),
+        |request| sleep_outcome(request, 1_001),
+    )
+    .await;
+    assert_eq!(report.error, None);
+    assert_eq!(report.return_value, Some(json!(["web", "time"])));
 }

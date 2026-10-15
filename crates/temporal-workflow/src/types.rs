@@ -739,6 +739,14 @@ pub struct ToolInvokeCallActivityRequest {
 pub struct CodeToolPrepareScopeActivityRequest {
     pub tools: Vec<harness::ToolSpec>,
     pub model: harness::ModelSelection,
+    /// Contract binding names each handle by canonical contract and ignores
+    /// the model; presentation binding follows the model's presentation.
+    #[serde(default = "presentation_binding")]
+    pub binding_mode: harness::BindingMode,
+}
+
+fn presentation_binding() -> harness::BindingMode {
+    harness::BindingMode::Presentation
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

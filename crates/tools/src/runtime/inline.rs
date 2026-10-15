@@ -230,7 +230,7 @@ impl InlineToolRuntime {
         crate::definitions::resolve_call_binding(
             id,
             &builtin.spec,
-            &crate::runtime::ToolTarget::from(&builtin.model),
+            &crate::runtime::ToolTarget::from(builtin),
             &call.tool_name,
         )
     }
@@ -729,6 +729,7 @@ mod tests {
                     provider_id: "openai".to_owned(),
                     model: "test-model".to_owned(),
                 },
+                program: false,
             }),
             call_id: ToolCallId::new("call-1"),
             tool_id: Some(ToolName::new(match tool_name {

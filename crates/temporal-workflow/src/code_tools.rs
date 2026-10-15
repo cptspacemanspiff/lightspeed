@@ -114,6 +114,9 @@ pub struct CodeToolScopeReport {
     pub cancel_requested: bool,
     /// Exposed names keyed by the opaque handles accepted by invoke requests.
     pub bindings: BTreeMap<String, ToolName>,
+    /// Under contract binding, the contract each handle serves.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, harness::ContractBinding>,
     /// Requests are keyed by execution-local request id, never arrival order.
     pub calls: BTreeMap<String, CodeToolCallOutcome>,
 }
@@ -129,6 +132,17 @@ impl From<&harness::CodeToolScope> for CodeToolScopeReport {
                 .bindings
                 .iter()
                 .map(|(id, binding)| (id.clone(), binding.tool_name.clone()))
+                .collect(),
+            contracts: scope
+                .spec
+                .bindings
+                .iter()
+                .filter_map(|(id, binding)| {
+                    binding
+                        .contract
+                        .as_ref()
+                        .map(|contract| (id.clone(), contract.clone()))
+                })
                 .collect(),
             calls: scope
                 .calls
@@ -152,6 +166,10 @@ pub struct CodeToolCallOutcome {
     pub error_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// When the session recorded the outcome; a program's clock advances to
+    /// it on delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
 }
 
 impl From<&harness::CodeToolCall> for CodeToolCallOutcome {
@@ -163,6 +181,7 @@ impl From<&harness::CodeToolCall> for CodeToolCallOutcome {
             output_ref: None,
             error_ref: None,
             attachments: Vec::new(),
+            completed_at_ms: call.completed_at_ms,
         };
         match &call.status {
             harness::CodeToolCallStatus::Pending => {}

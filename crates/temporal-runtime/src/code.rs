@@ -104,6 +104,9 @@ pub enum CodeRunError {
     },
     #[error("code host stopped unexpectedly; scope outcomes require reconciliation: {0}")]
     HostStopped(String),
+    /// A program's pinned contracts no longer match its scope.
+    #[error(transparent)]
+    Contract(#[from] tools::program::contracts::ContractError),
 }
 
 #[derive(Clone)]
@@ -275,6 +278,7 @@ impl CodeRunner {
                 source,
                 bindings: catalog.bindings,
                 limits,
+                program: None,
             },
             cancellation,
         ) {
@@ -315,6 +319,7 @@ impl CodeRunner {
                         Err(codemode::CompletionError::TooLarge) => completions.complete(HostCompletion {
                             request_id,
                             outcome: Err(host_error("payload_too_large", "host completion exceeds result budget")),
+                            completed_at_ms: None,
                         }),
                         result => result,
                     };
@@ -407,6 +412,7 @@ impl CodeRunner {
         HostCompletion {
             request_id: request.request_id,
             outcome,
+            completed_at_ms: None,
         }
     }
 
@@ -647,6 +653,7 @@ mod tests {
                 ("binding-b".into(), ToolName::new("timer_sleep")),
             ]
             .into(),
+            contracts: Default::default(),
             calls: Default::default(),
         }
     }
@@ -663,6 +670,7 @@ mod tests {
             output_ref,
             error_ref,
             attachments: Vec::new(),
+            completed_at_ms: None,
         }
     }
 

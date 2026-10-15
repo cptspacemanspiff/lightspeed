@@ -211,6 +211,10 @@ pub struct ToolInvocationRequest {
 pub struct BuiltinToolCallRuntime {
     pub spec: crate::BuiltinToolSpec,
     pub model: crate::ModelSelection,
+    /// A program's call resolves against the program target (host-executed
+    /// tools on their canonical presentation), never the model's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub program: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

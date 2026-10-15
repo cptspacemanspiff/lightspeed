@@ -974,6 +974,7 @@ pub(crate) fn tool_invocation_request(
                                         .map(|config| config.model.clone())
                                 })
                                 .expect("active run has a configured model"),
+                            program: state.lifecycle.driver.is_program(),
                         }),
                         _ => None,
                     }),
@@ -2110,6 +2111,7 @@ fn tool_call_completed_proposals_inner(
                     Some(origin) => CoreAgentEvent::CodeTool(crate::CodeToolEvent::CallCompleted {
                         origin: origin.clone(),
                         result: result_item.into(),
+                        completed_at_ms: None,
                     }),
                     None => {
                         let (turn_id, batch_id) = model_batch_ids(&result.context)?;
@@ -10348,7 +10350,8 @@ mod tests {
             request.calls[0].builtin,
             Some(crate::BuiltinToolCallRuntime {
                 spec,
-                model: override_model
+                model: override_model,
+                program: false,
             })
         );
         let mut replayed = CoreAgentDrive::from_replayed(
@@ -10545,6 +10548,7 @@ mod tests {
                         crate::CodeToolBinding {
                             tool_id: test_tool_id(name),
                             tool_name: ToolName::new(name),
+                            contract: None,
                         },
                     )
                 })
@@ -11148,6 +11152,7 @@ mod tests {
             crate::CodeToolBinding {
                 tool_id: ToolName::new("code_execute"),
                 tool_name: ToolName::new("code_execute"),
+                contract: None,
             },
         );
         assert!(
@@ -11640,6 +11645,7 @@ mod tests {
                 input_schema: None,
                 output_schema: None,
                 limits: Default::default(),
+                requires: Vec::new(),
             },
         }
     }
@@ -12117,10 +12123,19 @@ mod tests {
                         crate::CodeToolBinding {
                             tool_id: test_tool_id(name),
                             tool_name: ToolName::new(name),
+                            contract: Some(test_contract(name)),
                         },
                     )
                 })
                 .collect(),
+        }
+    }
+
+    fn test_contract(name: &str) -> crate::ContractBinding {
+        crate::ContractBinding {
+            contract: format!("test.{name}"),
+            digest: crate::contract_digest(name.as_bytes()),
+            part: None,
         }
     }
 
@@ -12196,11 +12211,30 @@ mod tests {
             crate::CodeToolBinding {
                 tool_id: ToolName::new(crate::PROGRAM_EXECUTE_TOOL_NAME),
                 tool_name: ToolName::new(crate::PROGRAM_EXECUTE_TOOL_NAME),
+                contract: Some(test_contract("self")),
             },
         );
         assert!(
             drive
                 .admit_command(CoreAgentCommand::OpenCodeToolScope { scope: recursive }, 40)
+                .is_err()
+        );
+        // A program scope binds contracts only: a presentation binding is
+        // refused.
+        let mut presentation = program_scope(run_id, &execution_id);
+        presentation
+            .bindings
+            .get_mut("local_echo")
+            .unwrap()
+            .contract = None;
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::OpenCodeToolScope {
+                        scope: presentation
+                    },
+                    40
+                )
                 .is_err()
         );
         assert!(
@@ -12255,6 +12289,14 @@ mod tests {
         assert_eq!(completion[0].joins.run_id, Some(run_id));
         assert_eq!(completion[0].joins.turn_id, None);
         log.extend(completion);
+        // The completion carries the time the session recorded it, which
+        // feeds the program's clock.
+        assert_eq!(
+            crate::code_tool_call(drive.state(), &echo.origin)
+                .unwrap()
+                .completed_at_ms,
+            Some(100)
+        );
 
         // A joined child call records a scoped-call invocation and waits on
         // its reply promise like a code-mode child.

@@ -24,7 +24,7 @@ impl Cancellation {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolBinding {
     pub name: String,
     pub binding_id: String,
@@ -35,6 +35,25 @@ pub struct ExecutionInput {
     pub source: String,
     pub bindings: Vec<ToolBinding>,
     pub limits: ExecutionLimits,
+    /// Present for a program: the source is then a module whose default
+    /// export has a `run(input, env, ctx)` handler, its bindings are named
+    /// by contract, and the host owns the clock, randomness and timers.
+    /// Absent for a code-mode script body.
+    pub program: Option<ProgramExecution>,
+}
+
+/// The deterministic inputs of one program execution. Everything the
+/// program can observe besides its calls' outcomes comes from here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProgramExecution {
+    /// The run input, `run`'s first argument.
+    pub input: Value,
+    /// The run's recorded start: `Date.now()` until the first completion
+    /// carrying a later timestamp is delivered.
+    pub started_at_ms: u64,
+    /// Seeds `Math.random` and `crypto`: the same seed draws the same values.
+    #[serde(rename = "seed")]
+    pub random_seed: [u32; 4],
 }
 
 /// Every budget is positive; there are intentionally no deployment defaults.
@@ -70,6 +89,10 @@ pub struct HostError {
 pub struct HostCompletion {
     pub request_id: String,
     pub outcome: Result<Value, HostError>,
+    /// When the host recorded the outcome. A program's clock advances to it
+    /// on delivery; scripts ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

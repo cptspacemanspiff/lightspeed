@@ -433,9 +433,10 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
             program: Some(api::ProgramSpec {
                 source: api::ProgramSource::Text {
                     text: format!(
-                        "return {{ version: {version}, seqs: input.events.map(e => e.seq), \
+                        "export default {{ async run(input) {{ \
+                         return {{ version: {version}, seqs: input.events.map(e => e.seq), \
                          kinds: input.events.map(e => e.event.kind), \
-                         notes: input.events.map(e => e.event.data.note) }};"
+                         notes: input.events.map(e => e.event.data.note) }}; }} }};"
                     ),
                 },
                 semantics_version: 1,
@@ -449,6 +450,7 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
                     "required": ["version", "seqs"],
                 })),
                 limits: None,
+                requires: Vec::new(),
             }),
             ..ProfileDocument::default()
         },

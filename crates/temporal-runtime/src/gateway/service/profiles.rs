@@ -139,7 +139,25 @@ impl GatewayAgentApi {
                 "the profile has no program, but the session is a program session; start a new session from the profile",
             )),
             (harness::SessionDriver::Program { program }, Some(spec)) => {
-                let proposed = self.pin_program(spec, resolved.named.as_ref()).await?;
+                let mut proposed = self.pin_program(spec, resolved.named.as_ref()).await?;
+                // Contracts were pinned against the session's tools at
+                // creation. The profile names the same ones when it requires
+                // the same contracts, at the same digests where it gives one.
+                proposed.requires = spec
+                    .requires
+                    .iter()
+                    .map(|requirement| harness::ContractPin {
+                        contract: requirement.contract.clone(),
+                        digest: requirement.digest.clone().unwrap_or_else(|| {
+                            program
+                                .requires
+                                .iter()
+                                .find(|pin| pin.contract == requirement.contract)
+                                .map(|pin| pin.digest.clone())
+                                .unwrap_or_default()
+                        }),
+                    })
+                    .collect();
                 if program.runs_same_program_as(&proposed) {
                     Ok(())
                 } else {
@@ -226,6 +244,23 @@ impl GatewayAgentApi {
             }
             None => Ok(None),
         };
+        let mut contracts = std::collections::BTreeSet::new();
+        for requirement in &spec.requires {
+            harness::validate_contract_name(&requirement.contract)
+                .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
+            if tools::program::contracts::definition(&requirement.contract).is_none() {
+                return Err(AgentApiError::invalid_request(format!(
+                    "program requires unknown tool contract {}",
+                    requirement.contract
+                )));
+            }
+            if !contracts.insert(requirement.contract.as_str()) {
+                return Err(AgentApiError::invalid_request(format!(
+                    "program requires tool contract {} more than once",
+                    requirement.contract
+                )));
+            }
+        }
         let input_schema = schema_ref(&spec.input_schema).await?;
         let output_schema = schema_ref(&spec.output_schema).await?;
         let defaults = harness::ProgramLimits::default();
@@ -245,11 +280,39 @@ impl GatewayAgentApi {
                 max_in_flight: limits.max_in_flight.unwrap_or(defaults.max_in_flight),
                 max_wall_clock_ms: limits.max_wall_clock_ms,
             },
+            // Pinned against the session's tools once its configuration is
+            // known; see `pin_program_contracts`.
+            requires: Vec::new(),
         };
         program
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
         Ok(program)
+    }
+
+    /// Pin a program's required contracts to what a session with this
+    /// configuration offers. A contract the configuration does not grant,
+    /// or whose digest differs from the one the program names, refuses the
+    /// session up front rather than failing the program at that call.
+    pub(super) async fn pin_program_contracts(
+        &self,
+        spec: &api::ProgramSpec,
+        session_config: &SessionConfig,
+    ) -> Result<Vec<harness::ContractPin>, AgentApiError> {
+        if spec.requires.is_empty() {
+            return Ok(Vec::new());
+        }
+        let available = self
+            .preparation_service()
+            .program_contracts(session_config)
+            .await?;
+        tools::program::contracts::pin_requirements(
+            &available,
+            spec.requires
+                .iter()
+                .map(|requirement| (requirement.contract.as_str(), requirement.digest.as_deref())),
+        )
+        .map_err(|error| AgentApiError::invalid_request(error.to_string()))
     }
 
     pub(super) fn merge_profile_start_config(

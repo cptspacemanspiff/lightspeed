@@ -843,6 +843,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             }
           ]
         },
+        "ProgramContractRequirement": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One tool contract a program calls.",
+          "properties": {
+            "contract": {
+              "description": "Canonical contract name: dotted lowercase identifiers, for example\n`vfs.read_file`.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "The digest (`contract-sha256:<hex>`) of the contract the program was written\nagainst. When given, a session whose contract has a different digest\nis refused; when omitted, the session pins the current digest.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "contract"
+          ],
+          "type": "object"
+        },
         "ProgramLimitsInput": {
           "additionalProperties": {
             "not": {}
@@ -934,6 +957,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             },
             "outputSchema": {
               "description": "JSON Schema that run output must satisfy."
+            },
+            "requires": {
+              "description": "The tool contracts the program calls, such as `vfs.read_file` or\n`time.sleep`. Only these reach the program's `env`. A session created\nfrom the profile pins each to its digest and is refused if one is not\ngranted by the session's configuration.",
+              "items": {
+                "$ref": "#/definitions/ProgramContractRequirement"
+              },
+              "type": "array"
             },
             "semanticsVersion": {
               "default": 1,
@@ -4634,6 +4664,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             }
           ]
         },
+        "ProgramContractRequirement": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One tool contract a program calls.",
+          "properties": {
+            "contract": {
+              "description": "Canonical contract name: dotted lowercase identifiers, for example\n`vfs.read_file`.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "The digest (`contract-sha256:<hex>`) of the contract the program was written\nagainst. When given, a session whose contract has a different digest\nis refused; when omitted, the session pins the current digest.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "contract"
+          ],
+          "type": "object"
+        },
         "ProgramLimitsInput": {
           "additionalProperties": {
             "not": {}
@@ -4725,6 +4778,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             },
             "outputSchema": {
               "description": "JSON Schema that run output must satisfy."
+            },
+            "requires": {
+              "description": "The tool contracts the program calls, such as `vfs.read_file` or\n`time.sleep`. Only these reach the program's `env`. A session created\nfrom the profile pins each to its digest and is refused if one is not\ngranted by the session's configuration.",
+              "items": {
+                "$ref": "#/definitions/ProgramContractRequirement"
+              },
+              "type": "array"
             },
             "semanticsVersion": {
               "default": 1,
@@ -6813,6 +6873,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "ProgramContractRequirement": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One tool contract a program calls.",
+          "properties": {
+            "contract": {
+              "description": "Canonical contract name: dotted lowercase identifiers, for example\n`vfs.read_file`.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "The digest (`contract-sha256:<hex>`) of the contract the program was written\nagainst. When given, a session whose contract has a different digest\nis refused; when omitted, the session pins the current digest.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "contract"
+          ],
+          "type": "object"
+        },
         "ProgramLimitsInput": {
           "additionalProperties": {
             "not": {}
@@ -6904,6 +6987,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             },
             "outputSchema": {
               "description": "JSON Schema that run output must satisfy."
+            },
+            "requires": {
+              "description": "The tool contracts the program calls, such as `vfs.read_file` or\n`time.sleep`. Only these reach the program's `env`. A session created\nfrom the profile pins each to its digest and is refused if one is not\ngranted by the session's configuration.",
+              "items": {
+                "$ref": "#/definitions/ProgramContractRequirement"
+              },
+              "type": "array"
             },
             "semanticsVersion": {
               "default": 1,
@@ -8065,6 +8155,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "ProgramContractRequirement": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One tool contract a program calls.",
+          "properties": {
+            "contract": {
+              "description": "Canonical contract name: dotted lowercase identifiers, for example\n`vfs.read_file`.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "The digest (`contract-sha256:<hex>`) of the contract the program was written\nagainst. When given, a session whose contract has a different digest\nis refused; when omitted, the session pins the current digest.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "contract"
+          ],
+          "type": "object"
+        },
         "ProgramLimitsInput": {
           "additionalProperties": {
             "not": {}
@@ -8156,6 +8269,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             },
             "outputSchema": {
               "description": "JSON Schema that run output must satisfy."
+            },
+            "requires": {
+              "description": "The tool contracts the program calls, such as `vfs.read_file` or\n`time.sleep`. Only these reach the program's `env`. A session created\nfrom the profile pins each to its digest and is refused if one is not\ngranted by the session's configuration.",
+              "items": {
+                "$ref": "#/definitions/ProgramContractRequirement"
+              },
+              "type": "array"
             },
             "semanticsVersion": {
               "default": 1,

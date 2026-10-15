@@ -76,18 +76,23 @@ pub struct PinnedProgram {
     pub output_schema: Option<BlobRef>,
     #[serde(default)]
     pub limits: ProgramLimits,
+    /// The tool contracts the program calls, each pinned to the digest of
+    /// the contract it was admitted against. Only these reach the program.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<ContractPin>,
 }
 
 impl PinnedProgram {
     /// Whether two pins run the same program: the same source, engine,
-    /// schemas and limits. Where a pin came from does not change what it
-    /// runs, so the named profile's identity and revision are ignored.
+    /// schemas, limits and contracts. Where a pin came from does not change
+    /// what it runs, so the named profile's identity and revision are ignored.
     pub fn runs_same_program_as(&self, other: &PinnedProgram) -> bool {
         self.source_ref == other.source_ref
             && self.engine == other.engine
             && self.input_schema == other.input_schema
             && self.output_schema == other.output_schema
             && self.limits == other.limits
+            && self.requires == other.requires
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -100,8 +105,115 @@ impl PinnedProgram {
             ));
         }
         self.engine.validate()?;
-        self.limits.validate()
+        self.limits.validate()?;
+        let mut names = std::collections::BTreeSet::new();
+        for pin in &self.requires {
+            pin.validate()?;
+            if !names.insert(pin.contract.as_str()) {
+                return Err(DomainError::InvariantViolation(format!(
+                    "program requires contract {} more than once",
+                    pin.contract
+                )));
+            }
+        }
+        Ok(())
     }
+}
+
+/// A canonical tool contract a program calls, pinned by the digest of its
+/// argument and result schemas. A contract whose schemas change no longer
+/// matches the pin, so the program fails at its next attempt instead of
+/// calling a tool it was not written against.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+pub struct ContractPin {
+    pub contract: String,
+    pub digest: String,
+}
+
+impl ContractPin {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_contract_name(&self.contract)?;
+        validate_contract_digest(&self.digest)
+    }
+}
+
+/// A scope binding's place in a contract. A contract is usually one tool;
+/// a composite contract (such as `time.sleep`, a timer and an await) binds
+/// each of its tools under a named part.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+pub struct ContractBinding {
+    pub contract: String,
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+}
+
+impl ContractBinding {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_contract_name(&self.contract)?;
+        validate_contract_digest(&self.digest)?;
+        if let Some(part) = &self.part
+            && !is_contract_segment(part)
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "contract {} has an invalid part name",
+                self.contract
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Contract names are dotted lowercase paths, `<family>.<operation>` or
+/// deeper (`mcp.<server>.<tool>`). Each segment becomes a property of the
+/// program's `env`, so segments are plain identifiers.
+pub fn validate_contract_name(name: &str) -> Result<(), DomainError> {
+    let segments = name.split('.').collect::<Vec<_>>();
+    if name.len() > 256 || segments.len() < 2 || !segments.iter().all(|s| is_contract_segment(s)) {
+        return Err(DomainError::InvariantViolation(format!(
+            "invalid contract name {name:?}: expected dotted lowercase identifiers"
+        )));
+    }
+    Ok(())
+}
+
+fn is_contract_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && segment.len() <= 64
+}
+
+/// Contract digests carry their own prefix so they are never mistaken for
+/// content references, which storage finds by scanning for `sha256:` strings.
+const CONTRACT_DIGEST_PREFIX: &str = "contract-sha256:";
+
+/// The digest of a contract's canonical shape.
+pub fn contract_digest(canonical: &[u8]) -> String {
+    use sha2::Digest;
+    format!(
+        "{CONTRACT_DIGEST_PREFIX}{}",
+        hex::encode(sha2::Sha256::digest(canonical))
+    )
+}
+
+fn validate_contract_digest(digest: &str) -> Result<(), DomainError> {
+    let valid = digest
+        .strip_prefix(CONTRACT_DIGEST_PREFIX)
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+    if !valid {
+        return Err(DomainError::InvariantViolation(format!(
+            "invalid contract digest {digest:?}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -500,4 +612,65 @@ pub(crate) fn require_agent_driver(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pin(contract: &str) -> ContractPin {
+        ContractPin {
+            contract: contract.to_owned(),
+            digest: contract_digest(contract.as_bytes()),
+        }
+    }
+
+    #[test]
+    fn contract_names_are_dotted_lowercase_paths() {
+        for valid in ["vfs.read_file", "time.sleep", "mcp.github.list_issues2"] {
+            assert!(validate_contract_name(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "sleep",
+            "vfs.",
+            ".read",
+            "vfs.Read",
+            "vfs.read-file",
+            "vfs.1read",
+        ] {
+            assert!(validate_contract_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn pinned_programs_require_each_contract_once_with_a_sha256_digest() {
+        let mut program = PinnedProgram {
+            program_id: None,
+            revision: None,
+            source_ref: BlobRef::from_bytes(b"export default {}"),
+            engine: ProgramEngine {
+                kind: ProgramEngineKind::Js,
+                semantics_version: 1,
+            },
+            input_schema: None,
+            output_schema: None,
+            limits: ProgramLimits::default(),
+            requires: vec![pin("vfs.read_file"), pin("time.sleep")],
+        };
+        program.validate().unwrap();
+        let other = PinnedProgram {
+            requires: vec![pin("vfs.read_file")],
+            ..program.clone()
+        };
+        assert!(!program.runs_same_program_as(&other));
+
+        program.requires.push(pin("time.sleep"));
+        assert!(program.validate().is_err());
+        program.requires.pop();
+        program.requires[0].digest = "contract-sha256:abc".into();
+        assert!(program.validate().is_err());
+        // A content reference is not a contract digest.
+        program.requires[0].digest = BlobRef::from_bytes(b"x").as_str().to_owned();
+        assert!(program.validate().is_err());
+    }
 }

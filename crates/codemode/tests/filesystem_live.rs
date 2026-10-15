@@ -56,6 +56,7 @@ async fn filesystem_call(
     HostCompletion {
         request_id: request.request_id,
         outcome: Ok(value),
+        completed_at_ms: None,
     }
 }
 
@@ -208,6 +209,7 @@ async fn missing_file_rejection_releases_capacity_for_recovery_and_readback() {
                 .complete(HostCompletion {
                     request_id: request.request_id,
                     outcome,
+                    completed_at_ms: None,
                 })
                 .expect("deliver filesystem outcome");
         };
@@ -275,6 +277,7 @@ async fn fanout_limit_bounds_host_writes_even_when_guest_catches_rejections() {
                         HostCompletion {
                             request_id: request.request_id,
                             outcome: Ok(json!(id)),
+                            completed_at_ms: None,
                         }
                     });
                 }
@@ -349,6 +352,7 @@ async fn partial_effects(stop: Stop) {
         .complete(HostCompletion {
             request_id: first.request_id,
             outcome: Ok(json!({"committed":"first"})),
+            completed_at_ms: None,
         })
         .unwrap();
 
@@ -382,6 +386,7 @@ async fn partial_effects(stop: Stop) {
                 .complete(HostCompletion {
                     request_id: barrier.request_id,
                     outcome: Ok(Value::Null),
+                    completed_at_ms: None,
                 })
                 .unwrap();
             ExecutionErrorKind::Javascript
@@ -421,6 +426,7 @@ async fn partial_effects(stop: Stop) {
         sender.complete(HostCompletion {
             request_id: pending_id,
             outcome: Ok(json!({"committed":"second"})),
+            completed_at_ms: None,
         }),
         Err(CompletionError::Stopped),
         "a late result must not revive a terminated interpreter"
