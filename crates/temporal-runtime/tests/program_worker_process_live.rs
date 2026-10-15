@@ -1,7 +1,6 @@
-//! Lose the code worker process while a program waits on a person, either
-//! during its attempt or after the attempt suspended, answer, and check a
-//! replacement process finishes the run by replaying the recorded calls
-//! instead of making them again. Session workers run in this process; the
+//! Lose the code worker process while a program waits on a person, answer,
+//! and check a replacement process finishes the run from the program
+//! workflow's history instead of making its calls again. Session workers run in this process; the
 //! code worker is a real child process.
 
 #[path = "support/programs.rs"]
@@ -16,19 +15,20 @@ use harness::{
     CoreAgentIoError, CoreAgentLlm, LlmGenerationRequest, LlmGenerationResult, SessionId,
     storage::BlobStore,
 };
-use programs::{admitted_tools, attempt_activities, program_execution_id, session_state};
+use programs::{activity_attempts, admitted_tools, program_execution_id, session_state};
 use serde_json::{Value, json};
 use support::live::{
     LIVE_TEST_LOCK, require_storage_live_env, run_with_live_worker_builder, seed_agent_default,
     wait_for_terminal_run_with_timeout, wait_until,
 };
-use temporal_runtime::program::PROGRAM_HOLD_WINDOW_ENV;
 use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     worker::{ActivityState, SessionTools, WorkerActivities},
 };
-use temporal_workflow::{ProgramRunPhase, ProgramRunWorkflow};
+use temporal_workflow::{
+    ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD, ProgramRunPhase, ProgramRunWorkflow,
+};
 use temporalio_client::{WorkflowExecutionStatus, WorkflowQueryOptions};
 use temporalio_sdk::workflow_replayer::{WorkflowReplayer, WorkflowReplayerOptions};
 use tokio::process::{Child, Command};
@@ -162,21 +162,12 @@ fn profile(profile_id: &api::ProfileId) -> api::AgentProfileInput {
     }
 }
 
-/// How the code worker is lost in [`resume_after_losing_the_code_worker`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Loss {
-    /// While the attempt holds the program waiting on its question.
-    DuringAttempt,
-    /// After the attempt suspended, when no attempt is running.
-    WhileSuspended,
-}
-
-/// Run the resuming program on a child code worker, lose that worker as
-/// `loss` says, answer the question, and finish on a replacement worker.
-/// Checks the run's output and that no call was admitted twice, then
-/// returns, for each attempt activity the run scheduled, the Temporal
-/// attempts it started.
-async fn resume_after_losing_the_code_worker(loss: Loss) -> anyhow::Result<Vec<Vec<i32>>> {
+/// Run the resuming program on a child code worker, kill that worker while
+/// the program waits on its question, answer, and finish on a replacement
+/// worker. Checks the run's output and that no call was admitted twice,
+/// then returns the Temporal attempts of each load and admission activity
+/// the run scheduled.
+async fn resume_after_losing_the_code_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<Vec<i32>>)> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -184,12 +175,8 @@ async fn resume_after_losing_the_code_worker(loss: Loss) -> anyhow::Result<Vec<V
     let activity_store = store.clone();
     let code_queue = format!("program-process-live-{}", uuid::Uuid::new_v4().simple());
     let activity_queue = code_queue.clone();
-    // A short hold window suspends the waiting program within a second.
-    let env: &[(&str, &str)] = match loss {
-        Loss::DuringAttempt => &[],
-        Loss::WhileSuspended => &[(PROGRAM_HOLD_WINDOW_ENV, "1000")],
-    };
-    let mut attempts = Vec::new();
+    let env: &[(&str, &str)] = &[];
+    let mut attempts = (Vec::new(), Vec::new());
     let attempts_out = &mut attempts;
     run_with_live_worker_builder(
         move |client, _| async move {
@@ -260,9 +247,9 @@ async fn resume_after_losing_the_code_worker(loss: Loss) -> anyhow::Result<Vec<V
                 assert_eq!(admitted_tools(&state), ["time.sleep", "input.request"]);
                 let handle =
                     client.get_workflow_handle::<ProgramRunWorkflow>(program_execution_id(&state)?);
-                if loss == Loss::WhileSuspended {
+                {
                     wait_until(
-                        "the attempt's suspension",
+                        "the program waiting in its workflow",
                         Duration::from_secs(30),
                         async || {
                             original.ensure_running()?;
@@ -330,7 +317,10 @@ async fn resume_after_losing_the_code_worker(loss: Loss) -> anyhow::Result<Vec<V
                         .fetch_history(Default::default())
                         .into_events()
                         .await?;
-                    *attempts_out = attempt_activities(&events);
+                    *attempts_out = (
+                        activity_attempts(&events, ACTIVITY_PROGRAM_LOAD),
+                        activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
+                    );
                     WorkflowReplayer::new(
                         WorkflowReplayerOptions::new()
                             .register_workflow::<ProgramRunWorkflow>()?
@@ -377,24 +367,13 @@ async fn inbox(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
-async fn a_program_attempt_lost_with_its_worker_replays_on_another_process() -> anyhow::Result<()> {
-    // One attempt activity, completed on its retry.
-    assert_eq!(
-        resume_after_losing_the_code_worker(Loss::DuringAttempt).await?,
-        [vec![2]]
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
-async fn a_suspended_program_resumes_on_a_new_worker_when_its_question_is_answered()
+async fn a_waiting_program_resumes_on_a_new_worker_when_its_question_is_answered()
 -> anyhow::Result<()> {
-    // The first attempt suspended; the answer woke a second, which replayed
-    // the program on the replacement worker. Neither was retried.
-    assert_eq!(
-        resume_after_losing_the_code_worker(Loss::WhileSuspended).await?,
-        [vec![1], vec![1]]
-    );
+    // The replacement worker rebuilt the program from the workflow's
+    // history: it was loaded once, and each of its two steps was admitted
+    // once, none retried.
+    let (loads, admissions) = resume_after_losing_the_code_worker().await?;
+    assert_eq!(loads, [vec![1]]);
+    assert_eq!(admissions, [vec![1], vec![1]]);
     Ok(())
 }

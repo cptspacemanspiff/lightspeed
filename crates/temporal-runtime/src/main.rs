@@ -648,11 +648,7 @@ async fn run_roles(args: RunArgs) -> anyhow::Result<()> {
         let activities = CodeWorkerActivities::with_runtime(
             universes.clone(),
             args.code_max_concurrent_executions,
-        )?
-        .with_program_hold_window(
-            temporal_runtime::program::program_hold_window_from_env()
-                .map_err(anyhow::Error::msg)?,
-        );
+        )?;
         workers.push((
             Role::Code,
             worker::code_worker(

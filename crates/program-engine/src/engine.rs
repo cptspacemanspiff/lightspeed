@@ -1,26 +1,18 @@
+//! The bridge between a program and its host: the native callbacks the
+//! prelude calls, module evaluation, completion delivery and error mapping.
+
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap, HashSet},
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc as sync_mpsc,
-    },
-    time::{Duration, Instant},
 };
 
-use rquickjs::{
-    Context, Ctx, Exception, Function, Module, Object, Promise, Runtime, Value as JsValue,
-};
+use rquickjs::{Ctx, Exception, Function, Module, Object, Promise, Value as JsValue};
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use crate::*;
 
 pub(crate) const PRELUDE: &str = include_str!("prelude.js");
-const IDLE_POLL: Duration = Duration::from_millis(5);
-const EVENT_BACKOFF: Duration = Duration::from_millis(1);
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -28,59 +20,12 @@ pub(crate) struct State {
     pub(crate) failure: Option<ExecutionError>,
     pub(crate) calls: u32,
     pub(crate) jobs: u64,
-    startup_micros: u64,
     pub(crate) program_context: Option<Value>,
-}
-
-pub(super) fn start(
-    input: ExecutionInput,
-    cancellation: Cancellation,
-) -> Result<Execution, StartError> {
-    validate(&input)?;
-    let capacity = input.limits.max_outstanding_tool_calls as usize;
-    let stack_size = (input.limits.max_stack_bytes as usize)
-        .checked_add(512 * 1024)
-        .ok_or_else(|| StartError::InvalidInput("stack budget overflows native size".into()))?
-        .max(2 * 1024 * 1024);
-    // One extra event slot lets terminal reporting go out behind all
-    // outstanding requests while the host is not polling. A replaying
-    // program can get further ahead; its sends wait for room.
-    let (event_tx, event_rx) = mpsc::channel(capacity + 1);
-    let (completion_tx, completion_rx) = sync_mpsc::sync_channel(capacity);
-    let completions = CompletionSender {
-        sender: completion_tx,
-        max_result_bytes: input.limits.max_result_bytes,
-    };
-    let thread_cancel = cancellation.clone();
-    let waiting = Arc::new(AtomicBool::new(false));
-    let thread_waiting = waiting.clone();
-    std::thread::Builder::new()
-        .name("codemode".into())
-        .stack_size(stack_size)
-        .spawn(move || {
-            let report = run(
-                input,
-                thread_cancel,
-                thread_waiting,
-                &event_tx,
-                completion_rx,
-            );
-            // Waits for room behind unread requests; fails only once the
-            // host has dropped the execution.
-            let _ = event_tx.blocking_send(ExecutionEvent::Finished(report));
-        })?;
-    Ok(Execution {
-        events: event_rx,
-        completions,
-        cancellation,
-        waiting,
-    })
 }
 
 pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
     let limits = &input.limits;
     for (name, value) in [
-        ("timeout_ms", limits.timeout_ms),
         ("max_memory_bytes", limits.max_memory_bytes),
         ("max_stack_bytes", limits.max_stack_bytes),
         ("max_source_bytes", limits.max_source_bytes),
@@ -133,241 +78,13 @@ pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
             ));
         }
     }
-    if Instant::now()
-        .checked_add(Duration::from_millis(limits.timeout_ms))
-        .is_none()
-    {
-        return Err(StartError::InvalidInput(
-            "timeout exceeds native duration".into(),
-        ));
-    }
     Ok(())
-}
-
-/// Where a guest's host requests go: the host's event channel for a
-/// threaded execution, or a buffer a stepped program instance drains after
-/// each step.
-#[derive(Clone)]
-pub(crate) enum RequestSink {
-    Channel(mpsc::Sender<ExecutionEvent>),
-    Buffer(Rc<RefCell<Vec<HostRequest>>>),
-}
-
-impl RequestSink {
-    fn send(
-        &self,
-        request: HostRequest,
-        cancellation: &Cancellation,
-        deadline: Instant,
-    ) -> Result<(), ExecutionError> {
-        let sender = match self {
-            Self::Buffer(buffer) => {
-                buffer.borrow_mut().push(request);
-                return Ok(());
-            }
-            Self::Channel(sender) => sender,
-        };
-        // A program replaying its journal can issue requests faster than
-        // the host reads them, since recorded completions arrive ahead; wait
-        // for room rather than fail. Waiting is invisible to the guest, so
-        // it cannot change what the program does.
-        let mut event = ExecutionEvent::Request(request);
-        loop {
-            match sender.try_send(event) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(returned)) => {
-                    if let Some(reason) = stop_reason(cancellation, deadline) {
-                        return Err(reason);
-                    }
-                    event = returned;
-                    std::thread::sleep(EVENT_BACKOFF);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err(error(
-                        ExecutionErrorKind::HostDisconnected,
-                        "host request receiver is unavailable",
-                    ));
-                }
-            }
-        }
-    }
 }
 
 pub(crate) fn error(kind: ExecutionErrorKind, message: impl Into<String>) -> ExecutionError {
     ExecutionError {
         kind,
         message: message.into(),
-    }
-}
-
-fn elapsed_micros(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
-fn stop_reason(cancellation: &Cancellation, deadline: Instant) -> Option<ExecutionError> {
-    if cancellation.is_cancelled() {
-        Some(error(
-            ExecutionErrorKind::Cancelled,
-            "JavaScript execution was cancelled",
-        ))
-    } else if Instant::now() >= deadline {
-        Some(error(
-            ExecutionErrorKind::TimedOut,
-            "JavaScript execution exceeded its wall-clock limit",
-        ))
-    } else {
-        None
-    }
-}
-
-fn run(
-    input: ExecutionInput,
-    cancellation: Cancellation,
-    waiting: Arc<AtomicBool>,
-    events: &mpsc::Sender<ExecutionEvent>,
-    completions: sync_mpsc::Receiver<HostCompletion>,
-) -> ExecutionReport {
-    let started = Instant::now();
-    let deadline = started + Duration::from_millis(input.limits.timeout_ms);
-    let state = Rc::new(RefCell::new(State::default()));
-    let fatal = Arc::new(AtomicBool::new(false));
-    let result = (|| {
-        if let Some(reason) = stop_reason(&cancellation, deadline) {
-            return Err(reason);
-        }
-        let runtime = Runtime::new().map_err(native_error)?;
-        runtime.set_memory_limit(input.limits.max_memory_bytes as usize);
-        runtime.set_max_stack_size(input.limits.max_stack_bytes as usize);
-        let interrupt_cancel = cancellation.clone();
-        let interrupt_fatal = fatal.clone();
-        runtime.set_interrupt_handler(Some(Box::new(move || {
-            interrupt_cancel.is_cancelled()
-                || Instant::now() >= deadline
-                || interrupt_fatal.load(Ordering::Acquire)
-        })));
-        let context = Context::full(&runtime).map_err(native_error)?;
-        context.with(|ctx| {
-            run_context(
-                ctx,
-                &input,
-                state.clone(),
-                fatal,
-                &cancellation,
-                &waiting,
-                deadline,
-                started,
-                events,
-                &completions,
-            )
-        })
-    })();
-    let mut state = state.borrow_mut();
-    let (return_value, execution_error) = match result {
-        Ok(value) => (value, None),
-        Err(failure) => (None, Some(failure)),
-    };
-    // Resource limits and cancellation remain terminal even if guest code
-    // catches the exception raised at an interrupt or host-callback boundary.
-    let execution_error = stop_reason(&cancellation, deadline)
-        .or_else(|| state.failure.take())
-        .or(execution_error);
-    ExecutionReport {
-        return_value,
-        program_context: state.program_context.take(),
-        error: execution_error,
-        pending_request_ids: state.pending.iter().cloned().collect(),
-        metrics: ExecutionMetrics {
-            startup_micros: state.startup_micros,
-            elapsed_micros: elapsed_micros(started),
-            tool_calls: state.calls,
-            pending_jobs: state.jobs,
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_context<'js>(
-    ctx: Ctx<'js>,
-    input: &ExecutionInput,
-    state: Rc<RefCell<State>>,
-    fatal: Arc<AtomicBool>,
-    cancellation: &Cancellation,
-    waiting: &AtomicBool,
-    deadline: Instant,
-    started: Instant,
-    events: &mpsc::Sender<ExecutionEvent>,
-    completions: &sync_mpsc::Receiver<HostCompletion>,
-) -> Result<Option<Value>, ExecutionError> {
-    let Prepared {
-        deliver,
-        serialize,
-        promise,
-    } = prepare_context(
-        &ctx,
-        input,
-        state.clone(),
-        fatal,
-        cancellation,
-        deadline,
-        started,
-        RequestSink::Channel(events.clone()),
-    )?;
-    loop {
-        if let Some(reason) = stop_reason(cancellation, deadline) {
-            return Err(reason);
-        }
-        if let Some(failure) = state.borrow().failure.clone() {
-            return Err(failure);
-        }
-        if let Some(result) = promise.result::<JsValue>() {
-            return settled_value(&ctx, &serialize, &input.limits, result);
-        }
-        // A program takes one completion only when it has no runnable job
-        // (quiescent delivery), so its execution is a function of the
-        // completion order alone. The deadline stops a job chain that never
-        // quiesces.
-        if ctx.execute_pending_job() {
-            waiting.store(false, Ordering::Release);
-            state.borrow_mut().jobs += 1;
-            continue;
-        }
-        match completions.try_recv() {
-            Ok(completion) => {
-                waiting.store(false, Ordering::Release);
-                apply_completion(&ctx, &deliver, &state, completion)?;
-                continue;
-            }
-            Err(sync_mpsc::TryRecvError::Disconnected) => {
-                return Err(error(
-                    ExecutionErrorKind::HostDisconnected,
-                    "host completion sender disconnected",
-                ));
-            }
-            Err(sync_mpsc::TryRecvError::Empty) => {}
-        }
-        if state.borrow().pending.is_empty() {
-            return Err(error(
-                ExecutionErrorKind::Javascript,
-                "program is awaiting a promise with no runnable jobs or host calls",
-            ));
-        }
-        let wait = deadline
-            .saturating_duration_since(Instant::now())
-            .min(IDLE_POLL);
-        waiting.store(true, Ordering::Release);
-        match completions.recv_timeout(wait) {
-            Ok(completion) => {
-                waiting.store(false, Ordering::Release);
-                apply_completion(&ctx, &deliver, &state, completion)?
-            }
-            Err(sync_mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(error(
-                    ExecutionErrorKind::HostDisconnected,
-                    "host completion sender disconnected",
-                ));
-            }
-            Err(sync_mpsc::RecvTimeoutError::Timeout) => {}
-        }
     }
 }
 
@@ -410,23 +127,17 @@ pub(crate) fn settled_value<'js>(
 
 /// Install the bridge and prelude in `ctx`, compile the program module,
 /// evaluate it and call its handler.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_context<'js>(
     ctx: &Ctx<'js>,
     input: &ExecutionInput,
     state: Rc<RefCell<State>>,
-    fatal: Arc<AtomicBool>,
-    cancellation: &Cancellation,
-    deadline: Instant,
-    started: Instant,
-    sink: RequestSink,
+    fatal: Rc<Cell<bool>>,
+    outbox: Rc<RefCell<Vec<HostRequest>>>,
 ) -> Result<Prepared<'js>, ExecutionError> {
     let ctx = ctx.clone();
     let send_state = state.clone();
     let send_fatal = fatal.clone();
-    let send_events = sink;
     let send_limits = input.limits.clone();
-    let send_cancel = cancellation.clone();
     let allowed: HashMap<_, _> = input
         .bindings
         .iter()
@@ -436,9 +147,7 @@ pub(crate) fn prepare_context<'js>(
         ctx.clone(),
         move |ctx: Ctx<'js>, binding_id: String, json: String| -> rquickjs::Result<String> {
             let mut state = send_state.borrow_mut();
-            let failure = if let Some(reason) = stop_reason(&send_cancel, deadline) {
-                Some(reason)
-            } else if !allowed.contains_key(&binding_id) {
+            let failure = if !allowed.contains_key(&binding_id) {
                 Some(error(ExecutionErrorKind::Internal, "unrecognized binding"))
             } else if json.len() as u64 > send_limits.max_request_bytes {
                 Some(error(
@@ -475,9 +184,7 @@ pub(crate) fn prepare_context<'js>(
                 binding_id,
                 arguments,
             };
-            if let Err(failure) = send_events.send(request, &send_cancel, deadline) {
-                return Err(fail_callback(&ctx, &mut state, &send_fatal, failure));
-            }
+            outbox.borrow_mut().push(request);
             state.calls += 1;
             state.pending.insert(request_id.clone());
             Ok(request_id)
@@ -520,7 +227,6 @@ pub(crate) fn prepare_context<'js>(
         .get("serialize")
         .map_err(|failure| js_error(&ctx, failure))?;
     let promise = start_program(&ctx, &controls, &input.source)?;
-    state.borrow_mut().startup_micros = elapsed_micros(started);
     Ok(Prepared {
         deliver,
         serialize,
@@ -608,14 +314,16 @@ fn issued(state: &State, request_id: &str) -> bool {
 fn fail_callback(
     ctx: &Ctx<'_>,
     state: &mut State,
-    fatal: &AtomicBool,
+    fatal: &Cell<bool>,
     failure: ExecutionError,
 ) -> rquickjs::Error {
     let exception = Exception::throw_type(ctx, &failure.message);
     if state.failure.is_none() {
         state.failure = Some(failure);
     }
-    fatal.store(true, Ordering::Release);
+    // The interrupt handler stops the program at its next check, so a
+    // guest cannot catch a bridge failure and carry on.
+    fatal.set(true);
     exception
 }
 

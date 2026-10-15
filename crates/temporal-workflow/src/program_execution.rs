@@ -92,10 +92,67 @@ impl ProgramRunDescriptor {
     }
 }
 
+/// Read what a workflow needs to run the program itself: source, input,
+/// context and contract bindings, with the pins re-checked against the
+/// scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgramAttemptActivityRequest {
+pub struct ProgramLoadActivityRequest {
     pub descriptor: ProgramRunDescriptor,
-    pub attempt: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProgramLoadActivityResult {
+    Loaded {
+        source: String,
+        input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<serde_json::Value>,
+        bindings: Vec<program_engine::ToolBinding>,
+    },
+    /// A pinned contract changed or was revoked: the run fails with this
+    /// stored outcome before the program starts.
+    Refused {
+        result: ProgramAttemptActivityResult,
+    },
+}
+
+/// Admit the requests one step of the program issued to the run's scope.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramAdmitActivityRequest {
+    pub descriptor: ProgramRunDescriptor,
+    pub requests: Vec<program_engine::HostRequest>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProgramAdmitActivityResult {
+    /// Requests the session did not admit, as the failures the program
+    /// receives in their place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<program_engine::HostCompletion>,
+}
+
+/// Read the scope's recorded outcomes after the first `after`, as the
+/// completions the program receives, in log order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramCollectActivityRequest {
+    pub session_workflow_id: String,
+    pub execution_id: String,
+    pub after: u64,
+    pub max_result_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProgramCollectActivityResult {
+    pub completions: Vec<program_engine::HostCompletion>,
+}
+
+/// Conclude a program the workflow ran: keep its output, context and
+/// report, and close the run's scope.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramConcludeActivityRequest {
+    pub descriptor: ProgramRunDescriptor,
+    pub report: program_engine::ExecutionReport,
 }
 
 /// What one attempt of the program did. The detailed report stays in CAS.
@@ -115,14 +172,6 @@ pub enum ProgramAttemptOutcome {
     },
     /// The handler threw or the attempt could not complete it.
     Threw { error_kind: String, message: String },
-    /// The program waited only on calls for the hold window and was
-    /// suspended with its scope open. The next attempt replays it once the
-    /// scope holds more than `recorded` outcomes.
-    Suspended {
-        recorded: u64,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        waiting_on: Vec<String>,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,7 +216,7 @@ pub enum ProgramRunPhase {
     Starting,
     Preparing,
     Running,
-    /// The last attempt suspended; the run waits for its calls to progress.
+    /// The program waits for its calls to progress.
     Suspended,
     Finalizing,
     Resolved,

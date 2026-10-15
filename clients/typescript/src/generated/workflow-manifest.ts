@@ -212,8 +212,6 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "parent_invocation_id": "wti:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "outcome": {
-        "arguments_ref": "sha256:3b321ffc343470aa8823b957731117919703f97ff7267821a111070f0ac2dd7e",
-        "binding_id": "binding:vector",
         "call_id": "code-tool:vector",
         "completed_at_ms": 1760000000000,
         "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
@@ -227,8 +225,6 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "next": 1,
         "outcomes": [
           {
-            "arguments_ref": "sha256:3b321ffc343470aa8823b957731117919703f97ff7267821a111070f0ac2dd7e",
-            "binding_id": "binding:vector",
             "call_id": "code-tool:vector",
             "completed_at_ms": 1760000000000,
             "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",
@@ -255,8 +251,6 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         },
         "calls": {
           "request:vector": {
-            "arguments_ref": "sha256:3b321ffc343470aa8823b957731117919703f97ff7267821a111070f0ac2dd7e",
-            "binding_id": "binding:vector",
             "call_id": "code-tool:vector",
             "completed_at_ms": 1760000000000,
             "output_ref": "sha256:23fb5c3482a5315f33eba760b84f175d7fb0ad91a527e5578baa1038a06482dd",

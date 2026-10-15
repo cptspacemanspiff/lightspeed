@@ -42,7 +42,6 @@ pub struct CodeWorkerActivities {
     universes: WorkerUniverses,
     /// Shared across all universes, including when this role shares a process.
     capacity: Arc<Semaphore>,
-    program_hold_window: std::time::Duration,
 }
 
 impl CodeWorkerActivities {
@@ -72,19 +71,7 @@ impl CodeWorkerActivities {
         Ok(Self {
             universes,
             capacity: Arc::new(Semaphore::new(capacity)),
-            program_hold_window: crate::program::DEFAULT_PROGRAM_HOLD_WINDOW,
         })
-    }
-
-    /// How long a program attempt holds a program that waits only on calls
-    /// before suspending it.
-    pub fn with_program_hold_window(mut self, hold_window: std::time::Duration) -> Self {
-        self.program_hold_window = hold_window;
-        self
-    }
-
-    pub(super) fn program_hold_window(&self) -> std::time::Duration {
-        self.program_hold_window
     }
 
     pub(super) fn universes(&self) -> &WorkerUniverses {
@@ -219,13 +206,40 @@ impl CodeWorkerActivities {
         super::program::prepare_activity(&self, ctx, request).await
     }
 
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ATTEMPT)]
-    pub async fn program_attempt(
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_LOAD)]
+    pub async fn program_load(
         self: Arc<Self>,
         ctx: ActivityContext,
-        request: temporal_workflow::ProgramAttemptActivityRequest,
+        request: temporal_workflow::ProgramLoadActivityRequest,
+    ) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
+        super::program::load_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ADMIT)]
+    pub async fn program_admit(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramAdmitActivityRequest,
+    ) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
+        super::program::admit_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_COLLECT)]
+    pub async fn program_collect(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramCollectActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
+        super::program::collect_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
+    pub async fn program_conclude(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramConcludeActivityRequest,
     ) -> Result<temporal_workflow::ProgramAttemptActivityResult, ActivityError> {
-        super::program::attempt_activity(&self, ctx, request).await
+        super::program::conclude_activity(&self, ctx, request).await
     }
 
     #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_FINALIZE)]
@@ -955,8 +969,6 @@ mod tests {
         temporal_workflow::CodeToolCallOutcome {
             request_id: request_id.into(),
             call_id: harness::ToolCallId::new(format!("tool-{request_id}")),
-            binding_id: None,
-            arguments_ref: None,
             status: temporal_workflow::CodeToolCallStatus::Succeeded,
             output_ref: Some(BlobRef::from_bytes(request_id.as_bytes())),
             error_ref: None,
@@ -1346,8 +1358,6 @@ mod tests {
                     temporal_workflow::CodeToolCallOutcome {
                         request_id: "call-1".into(),
                         call_id: harness::ToolCallId::new("tool-call-1"),
-                        binding_id: None,
-                        arguments_ref: None,
                         status: temporal_workflow::CodeToolCallStatus::Failed,
                         output_ref: Some(output_ref.clone()),
                         error_ref: Some(error_ref.clone()),
@@ -1388,5 +1398,25 @@ mod tests {
             CodeWorkerActivities::code_finalize.name(),
             temporal_workflow::WorkflowActivities::code_finalize.name()
         );
+        for (worker, workflow) in [
+            (
+                CodeWorkerActivities::program_load.name(),
+                temporal_workflow::WorkflowActivities::program_load.name(),
+            ),
+            (
+                CodeWorkerActivities::program_admit.name(),
+                temporal_workflow::WorkflowActivities::program_admit.name(),
+            ),
+            (
+                CodeWorkerActivities::program_collect.name(),
+                temporal_workflow::WorkflowActivities::program_collect.name(),
+            ),
+            (
+                CodeWorkerActivities::program_conclude.name(),
+                temporal_workflow::WorkflowActivities::program_conclude.name(),
+            ),
+        ] {
+            assert_eq!(worker, workflow);
+        }
     }
 }

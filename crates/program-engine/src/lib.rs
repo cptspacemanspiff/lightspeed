@@ -8,36 +8,17 @@
 //! issues the same requests and returns the same value, however the
 //! completions were timed.
 //!
-//! [`start`] runs a program on its own thread, talking to the host over
-//! channels; [`ProgramInstance`] runs one step at a time on the caller's
-//! thread for a deterministic host.
+//! [`ProgramInstance`] runs a program one step at a time on the caller's
+//! thread, so a deterministic host such as a Temporal workflow can drive it
+//! and replay it from its own history.
 
 mod engine;
 mod instance;
 
 pub use instance::{ProgramInstance, Step, StepBudget};
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
-
-/// Cancellation is cooperative at the native engine's interrupt boundary.
-#[derive(Clone, Debug, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
-
-impl Cancellation {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolBinding {
@@ -78,7 +59,6 @@ pub const MAX_PROGRAM_CONTEXT_BYTES: usize = 64 * 1024;
 /// Every budget is positive; there are intentionally no deployment defaults.
 #[derive(Clone, Debug)]
 pub struct ExecutionLimits {
-    pub timeout_ms: u64,
     pub max_memory_bytes: u64,
     pub max_stack_bytes: u64,
     pub max_source_bytes: u64,
@@ -157,94 +137,17 @@ pub struct ExecutionReport {
     pub metrics: ExecutionMetrics,
 }
 
-#[derive(Clone, Debug)]
-pub enum ExecutionEvent {
-    Request(HostRequest),
-    Finished(ExecutionReport),
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("invalid execution input: {0}")]
     InvalidInput(String),
-    #[error("could not start interpreter thread: {0}")]
-    Thread(#[from] std::io::Error),
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum CompletionError {
-    #[error("the interpreter has stopped")]
-    Stopped,
-    #[error("the completion queue is full")]
-    Full,
-    #[error("host completion exceeds the result byte limit")]
-    TooLarge,
-}
-
-#[derive(Clone)]
-pub struct CompletionSender {
-    sender: std::sync::mpsc::SyncSender<HostCompletion>,
-    max_result_bytes: u64,
-}
-
-impl CompletionSender {
-    /// Enqueue without blocking the async executor. The queue is sized for all
-    /// admitted outstanding calls; callers send each completion at most once.
-    pub fn complete(&self, completion: HostCompletion) -> Result<(), CompletionError> {
-        if serialized_len(&completion) > self.max_result_bytes {
-            return Err(CompletionError::TooLarge);
-        }
-        self.sender
-            .try_send(completion)
-            .map_err(|error| match error {
-                std::sync::mpsc::TrySendError::Full(_) => CompletionError::Full,
-                std::sync::mpsc::TrySendError::Disconnected(_) => CompletionError::Stopped,
-            })
-    }
-}
-
-pub struct Execution {
-    events: mpsc::Receiver<ExecutionEvent>,
-    completions: CompletionSender,
-    cancellation: Cancellation,
-    waiting: Arc<AtomicBool>,
-}
-
-impl Execution {
-    pub async fn next_event(&mut self) -> Option<ExecutionEvent> {
-        self.events.recv().await
-    }
-    pub fn completion_sender(&self) -> CompletionSender {
-        self.completions.clone()
-    }
-    pub fn cancel(&self) {
-        self.cancellation.cancel();
-    }
-    /// Whether the interpreter has no runnable job and is blocked waiting
-    /// for a host completion. A program found waiting can be stopped and
-    /// later replayed to the same point without losing work.
-    pub fn is_waiting(&self) -> bool {
-        self.waiting.load(Ordering::Acquire)
-    }
-}
-
-impl Drop for Execution {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-/// Start one fresh JavaScript attempt on its own native thread. A program
-/// attempt can replay a recorded one by being sent its completions in
-/// recorded order, ahead of the requests they answer.
-/// No interpreter value or handle crosses this API.
-pub fn start(input: ExecutionInput, cancellation: Cancellation) -> Result<Execution, StartError> {
-    engine::start(input, cancellation)
+    #[error("could not create the JavaScript engine: {0}")]
+    Engine(String),
 }
 
 /// Count serialization without allocating another copy of a potentially large
 /// host payload. Values have already crossed the caller's JSON boundary.
-fn serialized_len(value: &impl Serialize) -> u64 {
+pub(crate) fn serialized_len(value: &impl Serialize) -> u64 {
     struct Counter(u64);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

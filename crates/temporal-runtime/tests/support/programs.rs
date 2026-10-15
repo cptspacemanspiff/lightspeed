@@ -5,7 +5,7 @@ use harness::{
     CoreAgentState, SessionId, WorkflowToolTarget,
     storage::{ReadSessionEvents, SessionStore},
 };
-use temporal_workflow::{ACTIVITY_PROGRAM_ATTEMPT, ReducedSession, reduce_session_entries_from};
+use temporal_workflow::{ReducedSession, reduce_session_entries_from};
 use temporalio_common::protos::temporal::api::history::v1::{
     HistoryEvent, history_event::Attributes,
 };
@@ -64,9 +64,9 @@ pub fn program_execution_id(state: &CoreAgentState) -> anyhow::Result<String> {
     ))
 }
 
-/// For each attempt activity scheduled in `events`, the Temporal attempts
-/// that started (a retried activity records only its last start).
-pub fn attempt_activities(events: &[HistoryEvent]) -> Vec<Vec<i32>> {
+/// For each `activity` scheduled in `events`, the Temporal attempts that
+/// started (a retried activity records only its last start).
+pub fn activity_attempts(events: &[HistoryEvent], activity: &str) -> Vec<Vec<i32>> {
     events
         .iter()
         .filter_map(|event| match &event.attributes {
@@ -74,7 +74,7 @@ pub fn attempt_activities(events: &[HistoryEvent]) -> Vec<Vec<i32>> {
                 if attributes
                     .activity_type
                     .as_ref()
-                    .is_some_and(|kind| kind.name == ACTIVITY_PROGRAM_ATTEMPT) =>
+                    .is_some_and(|kind| kind.name == activity) =>
             {
                 Some(event.event_id)
             }
