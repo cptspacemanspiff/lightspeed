@@ -222,6 +222,11 @@ export type EmissionBody =
       token: string;
     }
   | {
+      completed: number;
+      execution_id: string;
+      kind: "scope_progress";
+    }
+  | {
       kind: "source_resolution";
       promise_id: PromiseId;
       resolution: PromiseResolution;

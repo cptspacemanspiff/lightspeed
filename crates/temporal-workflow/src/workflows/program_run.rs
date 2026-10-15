@@ -1,7 +1,10 @@
 //! Durable supervision of a program run: one invocation of a program
 //! session's pinned program. Session-owned activities still execute every
-//! tool effect. An attempt lost with its worker is retried and replays the
-//! recorded calls; suspension between attempts comes later.
+//! tool effect. An attempt runs until the program finishes or has waited
+//! only on calls for the hold window; a suspended run holds no interpreter
+//! and resumes, replaying its recorded calls, when the session reports that
+//! one of them completed. An attempt lost with its worker is retried and
+//! replays the same way.
 
 use std::time::Duration;
 
@@ -10,8 +13,8 @@ use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{
     ActivityCancellationType, ActivityCloseTimeouts, ActivityOptions, CancellableFuture,
-    SyncWorkflowContext, WorkflowCancellationToken, WorkflowContext, WorkflowContextView,
-    WorkflowResult,
+    ContinueAsNewOptions, SyncWorkflowContext, WorkflowCancellationToken, WorkflowContext,
+    WorkflowContextView, WorkflowResult,
 };
 
 use crate::{
@@ -31,6 +34,9 @@ pub struct ProgramRunWorkflow {
     snapshot: ProgramRunSnapshot,
     start: Option<WorkflowToolStartArgs>,
     holder_cancelled: bool,
+    /// The most recorded outcomes the session has reported for the run's
+    /// scope. A suspended attempt resumes once this passes what it saw.
+    recorded: u64,
 }
 
 #[workflow_methods]
@@ -106,7 +112,7 @@ impl ProgramRunWorkflow {
                         state.snapshot.descriptor = Some((*descriptor).clone());
                         state.snapshot.phase = ProgramRunPhase::Running;
                     });
-                    run_once(ctx, *descriptor).await
+                    run_attempts(ctx, &start, *descriptor).await?
                 }
             }
         };
@@ -176,12 +182,14 @@ impl ProgramRunWorkflow {
         _ctx: &mut SyncWorkflowContext<Self>,
         envelope: harness::EmissionEnvelope,
     ) {
-        if self
-            .start
-            .as_ref()
-            .is_some_and(|start| crate::workflows::is_holder_reply_cancellation(start, &envelope))
-        {
+        let Some(start) = self.start.as_ref() else {
+            return;
+        };
+        if crate::workflows::is_holder_reply_cancellation(start, &envelope) {
             self.holder_cancelled = true;
+        }
+        if let Some(completed) = scope_progress(start, &envelope) {
+            self.recorded = self.recorded.max(completed);
         }
     }
 
@@ -253,16 +261,101 @@ fn terminal_after_cancellation(
     })
 }
 
-async fn run_once(
+/// The run's scope progress an emission reports, if it comes from the
+/// run's own session about the run's own scope.
+fn scope_progress(
+    start: &WorkflowToolStartArgs,
+    envelope: &harness::EmissionEnvelope,
+) -> Option<u64> {
+    let harness::EmissionProducer::Session {
+        universe_id,
+        session_id,
+        ..
+    } = &envelope.producer
+    else {
+        return None;
+    };
+    let harness::EmissionBody::ScopeProgress {
+        execution_id,
+        completed,
+    } = &envelope.body
+    else {
+        return None;
+    };
+    (*universe_id == start.universe_id
+        && *session_id == start.invocation.session_id
+        && *execution_id == start.execution_id)
+        .then_some(*completed)
+}
+
+/// Run attempts until one finishes. A suspended attempt holds nothing: the
+/// workflow waits for the session to report progress on the run's scope,
+/// then starts the next attempt, which replays the program to where it
+/// stopped. Continues as new when its history grows long.
+async fn run_attempts(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    start: &WorkflowToolStartArgs,
+    descriptor: ProgramRunDescriptor,
+) -> WorkflowResult<ProgramRunTerminal> {
+    let mut attempt = 1;
+    loop {
+        let terminal = run_attempt(ctx, descriptor.clone(), attempt).await;
+        let ProgramRunTerminal::Completed {
+            result:
+                crate::ProgramAttemptActivityResult {
+                    outcome: crate::ProgramAttemptOutcome::Suspended { recorded, .. },
+                    ..
+                },
+        } = terminal
+        else {
+            return Ok(terminal);
+        };
+        ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Suspended);
+        let woken =
+            ctx.wait_for_state(move |state| state.holder_cancelled || state.recorded > recorded);
+        let external_cancel = ctx.cancelled().fuse();
+        futures::pin_mut!(woken, external_cancel);
+        select_biased! {
+            _ = external_cancel => {
+                return Ok(ProgramRunTerminal::Interrupted {
+                    reason: ProgramRunInterruption::WorkflowCancelled,
+                    result: None,
+                });
+            }
+            _ = woken => {}
+        }
+        if ctx.state(|state| state.holder_cancelled) {
+            return Ok(ProgramRunTerminal::Interrupted {
+                reason: ProgramRunInterruption::HolderCancelled,
+                result: None,
+            });
+        }
+        if ctx.continue_as_new_suggested()
+            || ctx.history_length() >= crate::DEFAULT_CONTINUE_AS_NEW_HISTORY_THRESHOLD
+        {
+            // The next run prepares again, which reopens the same scope and
+            // builds the same descriptor, then replays from its journal.
+            match ctx.continue_as_new(start.clone(), ContinueAsNewOptions::default()) {
+                Ok(never) => match never {},
+                Err(termination) => return Err(termination),
+            }
+        }
+        ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Running);
+        attempt += 1;
+    }
+}
+
+async fn run_attempt(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
     descriptor: ProgramRunDescriptor,
+    attempt: u32,
 ) -> ProgramRunTerminal {
     let options = runner_options(descriptor.limits.timeout_ms);
     let mut activity = ctx.execute_activity(
         WorkflowActivities::program_attempt,
         crate::ProgramAttemptActivityRequest {
             descriptor,
-            attempt: 1,
+            attempt,
         },
         options,
     );

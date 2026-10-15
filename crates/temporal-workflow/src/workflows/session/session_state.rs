@@ -19,6 +19,10 @@ impl AgentSessionWorkflow {
             return;
         }
         match envelope.body {
+            harness::EmissionBody::ScopeProgress { .. } => {
+                self.last_error =
+                    Some("session workflow does not run programs' attempts".to_owned());
+            }
             harness::EmissionBody::RunTerminal { .. }
             | harness::EmissionBody::RunWaiting { .. } => {
                 // A receiving workflow interprets the typed run output and then
@@ -66,6 +70,7 @@ impl AgentSessionWorkflow {
         entries: &[CoreAgentEntry],
     ) -> anyhow::Result<()> {
         self.queue_run_waiting(entries)?;
+        self.queue_scope_progress(entries)?;
         let universe_id = self
             .universe_id
             .ok_or_else(|| anyhow::anyhow!("initialized session is missing universe id"))?;
@@ -152,6 +157,53 @@ impl AgentSessionWorkflow {
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Wake the program workflow of every run-owned scope whose calls
+    /// completed in `entries`, once per scope with its newest count of
+    /// recorded outcomes. A suspended attempt resumes from that count.
+    fn queue_scope_progress(&mut self, entries: &[CoreAgentEntry]) -> anyhow::Result<()> {
+        let mut progressed = BTreeMap::new();
+        for entry in entries {
+            let CoreAgentEvent::CodeTool(harness::CodeToolEvent::CallCompleted { origin, .. }) =
+                &entry.event
+            else {
+                continue;
+            };
+            let Some(scope) = self.core_state.code_tools.scopes.get(&origin.execution_id) else {
+                continue;
+            };
+            if !matches!(scope.spec.owner, harness::ScopeOwner::Run { .. }) {
+                continue;
+            }
+            progressed.insert(
+                origin.execution_id.clone(),
+                (entry.position.seq, scope.completed.len() as u64),
+            );
+        }
+        if progressed.is_empty() {
+            return Ok(());
+        }
+        let universe_id = self
+            .universe_id
+            .ok_or_else(|| anyhow::anyhow!("initialized session is missing universe id"))?;
+        let session_id = self
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("initialized session is missing session id"))?;
+        for (execution_id, (log_seq, completed)) in progressed {
+            self.pending_emissions.push(PendingEmission::immediate(
+                execution_id.clone(),
+                EmissionEnvelope::scope_progress(
+                    universe_id,
+                    session_id.clone(),
+                    log_seq,
+                    execution_id,
+                    completed,
+                ),
+            ));
         }
         Ok(())
     }

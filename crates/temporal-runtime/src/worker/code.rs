@@ -42,6 +42,7 @@ pub struct CodeWorkerActivities {
     universes: WorkerUniverses,
     /// Shared across all universes, including when this role shares a process.
     capacity: Arc<Semaphore>,
+    program_hold_window: std::time::Duration,
 }
 
 impl CodeWorkerActivities {
@@ -71,7 +72,19 @@ impl CodeWorkerActivities {
         Ok(Self {
             universes,
             capacity: Arc::new(Semaphore::new(capacity)),
+            program_hold_window: crate::program::DEFAULT_PROGRAM_HOLD_WINDOW,
         })
+    }
+
+    /// How long a program attempt holds a program that waits only on calls
+    /// before suspending it.
+    pub fn with_program_hold_window(mut self, hold_window: std::time::Duration) -> Self {
+        self.program_hold_window = hold_window;
+        self
+    }
+
+    pub(super) fn program_hold_window(&self) -> std::time::Duration {
+        self.program_hold_window
     }
 
     pub(super) fn universes(&self) -> &WorkerUniverses {

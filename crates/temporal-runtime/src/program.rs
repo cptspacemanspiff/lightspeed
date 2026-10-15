@@ -42,12 +42,55 @@ const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
 /// How often an attempt with calls in flight asks the session for outcomes.
 const OUTCOME_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Overrides how long an attempt holds a program that waits only on calls
+/// before suspending it, in milliseconds.
+pub const PROGRAM_HOLD_WINDOW_ENV: &str = "LIGHTSPEED_PROGRAM_HOLD_WINDOW_MS";
+
+/// Long enough that short tool calls finish inside one attempt.
+pub const DEFAULT_PROGRAM_HOLD_WINDOW: Duration = Duration::from_secs(30);
+
+/// The hold window from [`PROGRAM_HOLD_WINDOW_ENV`], or the default when it
+/// is unset or empty.
+pub fn program_hold_window_from_env() -> Result<Duration, String> {
+    match std::env::var(PROGRAM_HOLD_WINDOW_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        None => Ok(DEFAULT_PROGRAM_HOLD_WINDOW),
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|millis| *millis > 0)
+            .map(Duration::from_millis)
+            .ok_or_else(|| {
+                format!("{PROGRAM_HOLD_WINDOW_ENV} must be a positive number of milliseconds")
+            }),
+    }
+}
+
+/// How one attempt of a program run ended.
+#[derive(Debug)]
+pub enum AttemptEnd {
+    /// The program returned or failed, and its scope is closed.
+    Finished(Box<CodeRunReport>),
+    /// The program waited only on calls for the hold window. Its interpreter
+    /// is gone and its scope stays open: the next attempt replays to here.
+    Suspended {
+        /// Recorded outcomes the program had received.
+        recorded: u64,
+        /// Requests it was waiting on.
+        waiting_on: Vec<String>,
+    },
+}
+
 #[derive(Clone)]
 pub struct ProgramRunner {
     client: Client,
     blobs: Arc<dyn BlobStore>,
     capacity: Arc<Semaphore>,
     cleanup_timeout: Duration,
+    hold_window: Duration,
 }
 
 impl ProgramRunner {
@@ -62,7 +105,14 @@ impl ProgramRunner {
             blobs,
             capacity,
             cleanup_timeout,
+            hold_window: DEFAULT_PROGRAM_HOLD_WINDOW,
         }
+    }
+
+    /// Suspend a program that has waited only on calls for `hold_window`.
+    pub fn with_hold_window(mut self, hold_window: Duration) -> Self {
+        self.hold_window = hold_window;
+        self
     }
 
     fn code_runner(&self) -> CodeRunner {
@@ -86,13 +136,14 @@ impl ProgramRunner {
             .await
     }
 
-    /// Run one attempt to completion. Dropping the caller cancels the
-    /// interpreter; the scope is closed on every ordinary exit.
+    /// Run one attempt until the program finishes or suspends. Dropping the
+    /// caller cancels the interpreter; the scope is closed when the program
+    /// finishes or the attempt fails, and stays open when it suspends.
     pub async fn run_attempt(
         &self,
         descriptor: ProgramRunDescriptor,
         cancellation: Cancellation,
-    ) -> Result<CodeRunReport, CodeRunError> {
+    ) -> Result<AttemptEnd, CodeRunError> {
         struct CancelOnDrop(Cancellation);
         impl Drop for CancelOnDrop {
             fn drop(&mut self) {
@@ -110,7 +161,7 @@ impl ProgramRunner {
         &self,
         descriptor: ProgramRunDescriptor,
         cancellation: Cancellation,
-    ) -> Result<CodeRunReport, CodeRunError> {
+    ) -> Result<AttemptEnd, CodeRunError> {
         descriptor
             .validate()
             .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
@@ -260,32 +311,55 @@ impl ProgramRunner {
         let mut poll = tokio::time::interval(OUTCOME_POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut bridge_failure: Option<codemode::ExecutionError> = None;
+        // When the attempt last saw the program or the session move.
+        let mut idle_since = Instant::now();
         let report = loop {
-            if bridge_failure.is_none()
-                && let Err(error) = send_feed(&completions, &mut feed)
-            {
-                bridge_failure = Some(error);
-                execution.cancel();
+            if bridge_failure.is_none() {
+                match send_feed(&completions, &mut feed) {
+                    Ok(0) => {}
+                    Ok(_) => idle_since = Instant::now(),
+                    Err(error) => {
+                        bridge_failure = Some(error);
+                        execution.cancel();
+                    }
+                }
             }
+            let suspendable = bridge_failure.is_none()
+                && journal_read
+                && !awaited.is_empty()
+                && feed.is_empty()
+                && admissions.is_empty();
             tokio::select! {
+                // A program that has waited only on calls for the hold
+                // window is suspended: replaying it later is cheaper than
+                // holding an interpreter while people or long jobs answer.
+                () = tokio::time::sleep_until(idle_since + self.hold_window), if suspendable => {
+                    if execution.is_waiting() {
+                        break None;
+                    }
+                    idle_since = Instant::now();
+                }
                 event = execution.next_event() => match event {
-                    Some(ExecutionEvent::Request(request)) => match replay_check(&recorded, &request) {
-                        // A recorded request is not admitted again: its
-                        // outcome, or the wait for it, is in the feed.
-                        Ok(true) => { awaited.insert(request.request_id); }
-                        Ok(false) => admissions.push(self.admit(&code_tools, &descriptor, request)),
-                        Err(error) => if bridge_failure.is_none() {
-                            bridge_failure = Some(error);
-                            execution.cancel();
-                        },
-                    },
+                    Some(ExecutionEvent::Request(request)) => {
+                        idle_since = Instant::now();
+                        match replay_check(&recorded, &request) {
+                            // A recorded request is not admitted again: its
+                            // outcome, or the wait for it, is in the feed.
+                            Ok(true) => { awaited.insert(request.request_id); }
+                            Ok(false) => admissions.push(self.admit(&code_tools, &descriptor, request)),
+                            Err(error) => if bridge_failure.is_none() {
+                                bridge_failure = Some(error);
+                                execution.cancel();
+                            },
+                        }
+                    }
                     Some(ExecutionEvent::Finished(mut report)) => {
                         if let Some(error) = bridge_failure.take() {
                             report.error = Some(error);
                         }
-                        break report;
+                        break Some(report);
                     }
-                    None => break codemode::ExecutionReport {
+                    None => break Some(codemode::ExecutionReport {
                         output: Vec::new(), selections: Vec::new(), return_value: None,
                         program_context: None,
                         error: Some(codemode::ExecutionError {
@@ -293,10 +367,13 @@ impl ProgramRunner {
                             message: "interpreter stopped without a report; consult scope outcomes".into(),
                         }),
                         pending_request_ids: Vec::new(), metrics: Default::default(),
-                    },
+                    }),
                 },
                 Some(admitted) = admissions.next(), if !admissions.is_empty() => match admitted {
-                    Ok(request_id) => { awaited.insert(request_id); }
+                    Ok(request_id) => {
+                        idle_since = Instant::now();
+                        awaited.insert(request_id);
+                    }
                     Err(Admission::Rejected(completion)) => feed.push_back(completion),
                     // The session recorded this request with another binding
                     // or arguments: an earlier attempt issued it differently.
@@ -336,6 +413,9 @@ impl ProgramRunner {
                         Err(_) => continue,
                     };
                     journal_read |= page.outcomes.len() < MAX_RECORDED_OUTCOMES_PER_PAGE as usize;
+                    if !page.outcomes.is_empty() {
+                        idle_since = Instant::now();
+                    }
                     for outcome in &page.outcomes {
                         cursor += 1;
                         awaited.remove(&outcome.request_id);
@@ -356,6 +436,12 @@ impl ProgramRunner {
         };
         drop(admissions);
         drop(execution);
+        let Some(report) = report else {
+            return Ok(AttemptEnd::Suspended {
+                recorded: cursor,
+                waiting_on: awaited.into_iter().collect(),
+            });
+        };
         // A program that returned keeps its context with the scope's close;
         // the session writes it only if the run completes.
         let mut cleanup_error = None;
@@ -379,11 +465,11 @@ impl ProgramRunner {
             )
             .await;
         let cleanup_error = cleanup_error.or(close_error);
-        Ok(CodeRunReport {
+        Ok(AttemptEnd::Finished(Box::new(CodeRunReport {
             execution: report,
             scope,
             cleanup_error,
-        })
+        })))
     }
 
     async fn keep_context(&self, value: &Value) -> Result<harness::ProgramContextInput, String> {
@@ -528,17 +614,20 @@ fn diverged(request_id: &str, how: &str) -> codemode::ExecutionError {
 }
 
 /// Send queued completions in order until the program's completion queue
-/// is full. One too large to deliver is replaced by a failure in place.
+/// is full, and count those sent. One too large to deliver is replaced by
+/// a failure in place.
 fn send_feed(
     completions: &codemode::CompletionSender,
     feed: &mut VecDeque<HostCompletion>,
-) -> Result<(), codemode::ExecutionError> {
+) -> Result<usize, codemode::ExecutionError> {
+    let mut sent = 0;
     while let Some(completion) = feed.front() {
         match completions.complete(completion.clone()) {
             Ok(()) => {
                 feed.pop_front();
+                sent += 1;
             }
-            Err(codemode::CompletionError::Full) => return Ok(()),
+            Err(codemode::CompletionError::Full) => return Ok(sent),
             Err(codemode::CompletionError::TooLarge) => {
                 let request_id = completion.request_id.clone();
                 feed[0] = HostCompletion {
@@ -552,11 +641,11 @@ fn send_feed(
             }
             Err(codemode::CompletionError::Stopped) => {
                 feed.clear();
-                return Ok(());
+                return Ok(sent);
             }
         }
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// A tool failure whose error is a `{ code, message }` document (an

@@ -214,6 +214,7 @@ pub struct Execution {
     events: mpsc::Receiver<ExecutionEvent>,
     completions: CompletionSender,
     cancellation: Cancellation,
+    waiting: Arc<AtomicBool>,
 }
 
 impl Execution {
@@ -225,6 +226,12 @@ impl Execution {
     }
     pub fn cancel(&self) {
         self.cancellation.cancel();
+    }
+    /// Whether the interpreter has no runnable job and is blocked waiting
+    /// for a host completion. A program found waiting can be stopped and
+    /// later replayed to the same point without losing work.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
     }
 }
 

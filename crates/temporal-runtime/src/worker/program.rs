@@ -24,7 +24,7 @@ use super::code::{
 use crate::{
     code::{Cancellation, CodeRunError, CodeRunReport, read_bounded},
     gateway::GatewayAgentApi,
-    program::{ProgramRunner, program_catalog, put_json},
+    program::{AttemptEnd, ProgramRunner, program_catalog, put_json},
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +47,7 @@ fn runner(activities: &CodeWorkerActivities, api: &GatewayAgentApi) -> ProgramRu
         activities.capacity(),
         CLEANUP_TIMEOUT,
     )
+    .with_hold_window(activities.program_hold_window())
 }
 
 fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), PreparationError> {
@@ -249,6 +250,13 @@ struct ProgramRunReport {
     cleanup_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     report_unavailable: Option<String>,
+    /// The Temporal attempt of this attempt's activity: above 1 when an
+    /// earlier try was lost with its worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_attempt: Option<u32>,
+    /// Present when the attempt suspended instead of finishing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suspended: Option<ProgramAttemptOutcome>,
 }
 
 async fn store_report(
@@ -290,7 +298,7 @@ pub(super) async fn attempt_activity(
 ) -> Result<ProgramAttemptActivityResult, ActivityError> {
     // A retried attempt replays the run's recorded calls (see
     // `ProgramRunner`), so a lost worker is not a lost run.
-    let attempt = ctx.info().attempt;
+    let activity_attempt = Some(ctx.info().attempt);
     let descriptor = request.descriptor;
     descriptor.validate().map_err(non_retryable)?;
     require_activity_owner(&ctx, &descriptor.execution_id)?;
@@ -313,13 +321,15 @@ pub(super) async fn attempt_activity(
                     &ProgramRunReport {
                         version: 1,
                         execution_id: descriptor.execution_id.clone(),
-                        attempt,
+                        attempt: request.attempt,
                         descriptor: Some(descriptor.clone()),
                         execution: None,
                         scope: None,
                         interruption: None,
                         cleanup_error: None,
                         report_unavailable: None,
+                        activity_attempt,
+                        suspended: None,
                     },
                 )
                 .await?;
@@ -333,19 +343,54 @@ pub(super) async fn attempt_activity(
             }
             Err(error) => return Err(non_retryable(error)),
         };
+        let report = match report {
+            AttemptEnd::Finished(report) => *report,
+            AttemptEnd::Suspended {
+                recorded,
+                waiting_on,
+            } => {
+                let outcome = ProgramAttemptOutcome::Suspended {
+                    recorded,
+                    waiting_on,
+                };
+                let report_ref = store_report(
+                    api.store().as_ref(),
+                    &ProgramRunReport {
+                        version: 1,
+                        execution_id: descriptor.execution_id.clone(),
+                        attempt: request.attempt,
+                        descriptor: Some(descriptor.clone()),
+                        execution: None,
+                        scope: None,
+                        interruption: None,
+                        cleanup_error: None,
+                        report_unavailable: None,
+                        activity_attempt,
+                        suspended: Some(outcome.clone()),
+                    },
+                )
+                .await?;
+                return Ok(ProgramAttemptActivityResult {
+                    report_ref,
+                    outcome,
+                });
+            }
+        };
         let outcome = attempt_outcome(api.store().as_ref(), &report).await?;
         let report_ref = store_report(
             api.store().as_ref(),
             &ProgramRunReport {
                 version: 1,
                 execution_id: descriptor.execution_id.clone(),
-                attempt,
+                attempt: request.attempt,
                 descriptor: Some(descriptor.clone()),
                 execution: Some(report.execution.clone()),
                 scope: report.scope.clone(),
                 interruption: None,
                 cleanup_error: report.cleanup_error.clone(),
                 report_unavailable: None,
+                activity_attempt,
+                suspended: None,
             },
         )
         .await?;
@@ -477,6 +522,8 @@ async fn finalize(
         },
         cleanup_error,
         report_unavailable: None,
+        activity_attempt: None,
+        suspended: None,
     };
     let report_ref = store_report(store.as_ref(), &report).await?;
     let failure = |status: &str, message: String, attempt_report: Option<&BlobRef>| {
@@ -535,6 +582,19 @@ async fn finalize(
         ) => failure(
             "threw",
             format!("{error_kind}: {message}"),
+            Some(attempt_ref),
+        ),
+        // The workflow resumes a suspended attempt rather than finishing
+        // with it; a suspended receipt as the terminal is a workflow bug.
+        (
+            ProgramRunTerminal::Completed { .. },
+            Some(ProgramAttemptActivityResult {
+                outcome: ProgramAttemptOutcome::Suspended { .. },
+                report_ref: attempt_ref,
+            }),
+        ) => failure(
+            "interrupted",
+            "the run ended on a suspended attempt".into(),
             Some(attempt_ref),
         ),
         (ProgramRunTerminal::Rejected { error_ref }, _) => {

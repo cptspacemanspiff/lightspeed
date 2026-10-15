@@ -20,6 +20,7 @@ use crate::*;
 
 const PRELUDE: &str = include_str!("prelude.js");
 const IDLE_POLL: Duration = Duration::from_millis(5);
+const EVENT_BACKOFF: Duration = Duration::from_millis(1);
 
 #[derive(Default)]
 struct State {
@@ -58,8 +59,9 @@ pub(super) fn start(
         .checked_add(512 * 1024)
         .ok_or_else(|| StartError::InvalidInput("stack budget overflows native size".into()))?
         .max(2 * 1024 * 1024);
-    // One extra event slot ensures terminal reporting never blocks behind all
-    // outstanding requests when the host is not currently polling.
+    // One extra event slot lets terminal reporting go out behind all
+    // outstanding requests while the host is not polling. A replaying
+    // program can get further ahead; its sends wait for room.
     let (event_tx, event_rx) = mpsc::channel(capacity + 1);
     let (completion_tx, completion_rx) = sync_mpsc::sync_channel(capacity);
     let completions = CompletionSender {
@@ -67,17 +69,28 @@ pub(super) fn start(
         max_result_bytes: input.limits.max_result_bytes,
     };
     let thread_cancel = cancellation.clone();
+    let waiting = Arc::new(AtomicBool::new(false));
+    let thread_waiting = waiting.clone();
     std::thread::Builder::new()
         .name("codemode".into())
         .stack_size(stack_size)
         .spawn(move || {
-            let report = run(input, thread_cancel, &event_tx, completion_rx);
-            let _ = event_tx.try_send(ExecutionEvent::Finished(report));
+            let report = run(
+                input,
+                thread_cancel,
+                thread_waiting,
+                &event_tx,
+                completion_rx,
+            );
+            // Waits for room behind unread requests; fails only once the
+            // host has dropped the execution.
+            let _ = event_tx.blocking_send(ExecutionEvent::Finished(report));
         })?;
     Ok(Execution {
         events: event_rx,
         completions,
         cancellation,
+        waiting,
     })
 }
 
@@ -180,6 +193,7 @@ fn stop_reason(cancellation: &Cancellation, deadline: Instant) -> Option<Executi
 fn run(
     input: ExecutionInput,
     cancellation: Cancellation,
+    waiting: Arc<AtomicBool>,
     events: &mpsc::Sender<ExecutionEvent>,
     completions: sync_mpsc::Receiver<HostCompletion>,
 ) -> ExecutionReport {
@@ -209,6 +223,7 @@ fn run(
                 state.clone(),
                 fatal,
                 &cancellation,
+                &waiting,
                 deadline,
                 started,
                 events,
@@ -249,6 +264,7 @@ fn run_context<'js>(
     state: Rc<RefCell<State>>,
     fatal: Arc<AtomicBool>,
     cancellation: &Cancellation,
+    waiting: &AtomicBool,
     deadline: Instant,
     started: Instant,
     events: &mpsc::Sender<ExecutionEvent>,
@@ -338,19 +354,33 @@ fn run_context<'js>(
                 binding_id,
                 arguments,
             };
-            if send_events
-                .try_send(ExecutionEvent::Request(request))
-                .is_err()
-            {
-                return Err(fail_callback(
-                    &ctx,
-                    &mut state,
-                    &send_fatal,
-                    error(
-                        ExecutionErrorKind::HostDisconnected,
-                        "host request receiver is unavailable",
-                    ),
-                ));
+            // A program replaying its journal can issue requests faster than
+            // the host reads them, since recorded completions arrive ahead;
+            // wait for room rather than fail. Waiting is invisible to the
+            // guest, so it cannot change what the program does.
+            let mut event = ExecutionEvent::Request(request);
+            loop {
+                match send_events.try_send(event) {
+                    Ok(()) => break,
+                    Err(mpsc::error::TrySendError::Full(returned)) => {
+                        if let Some(reason) = stop_reason(&send_cancel, deadline) {
+                            return Err(fail_callback(&ctx, &mut state, &send_fatal, reason));
+                        }
+                        event = returned;
+                        std::thread::sleep(EVENT_BACKOFF);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        return Err(fail_callback(
+                            &ctx,
+                            &mut state,
+                            &send_fatal,
+                            error(
+                                ExecutionErrorKind::HostDisconnected,
+                                "host request receiver is unavailable",
+                            ),
+                        ));
+                    }
+                }
             }
             state.calls += 1;
             state.pending.insert(request_id.clone());
@@ -580,12 +610,14 @@ fn run_context<'js>(
             }
         }
         if ctx.execute_pending_job() {
+            waiting.store(false, Ordering::Release);
             state.borrow_mut().jobs += 1;
             continue;
         }
         if durable {
             match completions.try_recv() {
                 Ok(completion) => {
+                    waiting.store(false, Ordering::Release);
                     apply_completion(&ctx, &deliver, &state, completion, true)?;
                     continue;
                 }
@@ -607,8 +639,12 @@ fn run_context<'js>(
         let wait = deadline
             .saturating_duration_since(Instant::now())
             .min(IDLE_POLL);
+        waiting.store(true, Ordering::Release);
         match completions.recv_timeout(wait) {
-            Ok(completion) => apply_completion(&ctx, &deliver, &state, completion, durable)?,
+            Ok(completion) => {
+                waiting.store(false, Ordering::Release);
+                apply_completion(&ctx, &deliver, &state, completion, durable)?
+            }
             Err(sync_mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(error(
                     ExecutionErrorKind::HostDisconnected,

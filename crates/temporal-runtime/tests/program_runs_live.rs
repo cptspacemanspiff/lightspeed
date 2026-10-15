@@ -3,6 +3,8 @@
 //! JSON input whose scoped calls use the session's real tools, and a reply
 //! that completes the run with the program's output. No model is involved.
 
+#[path = "support/programs.rs"]
+mod programs;
 mod support;
 
 use std::{sync::Arc, time::Duration};
@@ -18,6 +20,7 @@ use support::live::{
     LIVE_TEST_LOCK, live_universe_id, read_session_view, require_storage_live_env,
     run_with_live_worker_builder, seed_agent_default, wait_for_terminal_run,
 };
+use temporal_runtime::program::DEFAULT_PROGRAM_HOLD_WINDOW;
 use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
@@ -230,6 +233,27 @@ async fn with_program_workers(
     input_timeouts: InputTimeouts,
     body: impl FnOnce(Arc<GatewayAgentApi>, Arc<store_pg::PgStore>, SessionId) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
+    with_program_workers_holding(
+        input_timeouts,
+        DEFAULT_PROGRAM_HOLD_WINDOW,
+        |api, store, session_id, _| body(api, store, session_id),
+    )
+    .await
+}
+
+/// [`with_program_workers`] with a code worker that suspends a program
+/// waiting only on calls after `hold_window`; `body` also gets the
+/// Temporal client.
+async fn with_program_workers_holding(
+    input_timeouts: InputTimeouts,
+    hold_window: Duration,
+    body: impl FnOnce(
+        Arc<GatewayAgentApi>,
+        Arc<store_pg::PgStore>,
+        SessionId,
+        temporalio_client::Client,
+    ) -> ProgramTestBody,
+) -> anyhow::Result<()> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -262,14 +286,15 @@ async fn with_program_workers(
                     .with_input_timeouts(input_timeouts)
                     .build(),
             );
-            let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?;
+            let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?
+                .with_program_hold_window(hold_window);
             let runtime = worker_runtime()?;
             let mut worker = code_worker(&runtime, client.clone(), code_queue, activities)?;
             let shutdown = worker.shutdown_handle();
             let worker_run = worker.run();
             tokio::pin!(worker_run);
             let result = tokio::select! {
-                result = body(api, store, session_id) => result,
+                result = body(api, store, session_id, client.clone()) => result,
                 result = &mut worker_run => Err(anyhow::anyhow!("code worker stopped early: {result:?}")),
             };
             shutdown();
@@ -861,10 +886,8 @@ async fn an_opened_request_is_reminded_reassigned_answered_and_withdrawn() -> an
             let run = start_program_run(&api, &session_id, json!({"claim": "pr-9"})).await?;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             let request = loop {
-                let [request] =
-                    <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?).map_err(
-                        |requests| anyhow::anyhow!("one request expected: {requests:?}"),
-                    )?;
+                let [request] = <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?)
+                    .map_err(|requests| anyhow::anyhow!("one request expected: {requests:?}"))?;
                 if request.assignees == ["lead".to_owned()] {
                     break request;
                 }
@@ -891,7 +914,9 @@ async fn an_opened_request_is_reminded_reassigned_answered_and_withdrawn() -> an
                 read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
             assert_eq!(output["answer"]["approved"], json!(true), "{output}");
             assert!(
-                output["id"].as_str().is_some_and(|id| id.starts_with("wtx:")),
+                output["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("wtx:")),
                 "{output}"
             );
             let tools = scoped_call_tools(&store, &session_id).await?;
@@ -1413,5 +1438,80 @@ async fn a_program_call_that_needs_approval_waits_in_the_inbox_and_runs_once_app
             Ok(())
         })
     })
+    .await
+}
+
+const SLEEPING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const first = await env.time.sleep({ ms: 1500 });
+            const second = await env.time.sleep({ ms: 1500 });
+            return {
+                claim: input.claim,
+                slept: 2,
+                inOrder: second.fire_at_ms > first.fire_at_ms && Date.now() >= second.fire_at_ms,
+            };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_sleeping_program_suspends_and_resumes_when_its_timer_fires() -> anyhow::Result<()> {
+    with_program_workers_holding(
+        InputTimeouts::default(),
+        Duration::from_millis(300),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        SLEEPING_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(&api, &session_id, json!({"claim": "nap"})).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                assert_eq!(
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                    json!({"claim": "nap", "slept": 2, "inOrder": true})
+                );
+                // Each sleep outlasted the hold window, so the run suspended
+                // twice and its third attempt finished; replays re-issued
+                // the first sleep without admitting it again.
+                let state = programs::session_state(&store, &session_id).await?;
+                assert_eq!(
+                    programs::admitted_tools(&state),
+                    ["time.sleep", "time.sleep"]
+                );
+                let handle = client.get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(
+                    programs::program_execution_id(&state)?,
+                );
+                let events = handle
+                    .fetch_history(Default::default())
+                    .into_events()
+                    .await?;
+                assert_eq!(
+                    programs::attempt_activities(&events),
+                    [vec![1], vec![1], vec![1]]
+                );
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
     .await
 }

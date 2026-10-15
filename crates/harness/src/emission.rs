@@ -93,6 +93,27 @@ impl EmissionId {
         )
     }
 
+    /// One per recorded-outcome count of a program run's scope: a repeated
+    /// delivery of the same progress is the same emission.
+    pub fn for_scope_progress(
+        universe_id: Uuid,
+        session_id: &SessionId,
+        execution_id: &str,
+        completed: u64,
+    ) -> Self {
+        let universe = universe_id.to_string();
+        let completed = completed.to_be_bytes();
+        Self::from_parts(
+            b"scope_progress",
+            &[
+                universe.as_bytes(),
+                session_id.as_str().as_bytes(),
+                execution_id.as_bytes(),
+                &completed,
+            ],
+        )
+    }
+
     /// Promise ids are session-scoped counters, so the holder workflow id
     /// is part of the identity: one producer resolving `promise_7` for two
     /// holders sends two distinct emissions.
@@ -219,6 +240,13 @@ pub enum EmissionBody {
     /// Sent once per run to the holders its terminal will notify; the
     /// terminal follows as usual.
     RunWaiting { token: String, run_id: RunId },
+    /// A call in a program run's scope completed: the scope now holds
+    /// `completed` recorded outcomes. Wakes the run's program workflow when
+    /// its attempt is suspended waiting on calls.
+    ScopeProgress {
+        execution_id: String,
+        completed: u64,
+    },
     SourceResolution {
         promise_id: PromiseId,
         resolution: PromiseResolution,
@@ -297,6 +325,29 @@ impl EmissionEnvelope {
                 log_seq,
             },
             body: EmissionBody::RunWaiting { token, run_id },
+        }
+    }
+
+    pub fn scope_progress(
+        universe_id: Uuid,
+        session_id: SessionId,
+        log_seq: EventSeq,
+        execution_id: String,
+        completed: u64,
+    ) -> Self {
+        let emission_id =
+            EmissionId::for_scope_progress(universe_id, &session_id, &execution_id, completed);
+        Self {
+            emission_id,
+            producer: EmissionProducer::Session {
+                universe_id,
+                session_id,
+                log_seq,
+            },
+            body: EmissionBody::ScopeProgress {
+                execution_id,
+                completed,
+            },
         }
     }
 
