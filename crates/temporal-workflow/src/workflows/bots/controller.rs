@@ -44,7 +44,7 @@ use super::{
     BotReadToolInvocationsRequest, BotRecordClosedRequest, BotRecordOutcomesRequest,
     BotRenameSessionRequest, BotSessionRequest, BotSessionStatus, bot_activity_options,
 };
-pub use state::{BotDelivery, CoalesceBuffer, ManagedSession};
+pub use state::{BotDelivery, CoalesceBuffer, ManagedSession, WaitingRun};
 use state::{
     ControllerState, DispatchAction, EmissionDisposition, LaneResolution, LaneTerminal,
     PendingInvocation, ROTATION_RETRY_DELAY_MS, resolve_invocations_for_run, used_carried_tool,
@@ -103,6 +103,9 @@ pub struct BotControllerCarry {
     pub main_generation: u32,
     /// Tool declaration revision the main session was created under.
     pub tools_revision: Option<u32>,
+    /// Deliveries recorded `deferred` while their runs wait on people, by
+    /// session; each settles when its run's terminal arrives.
+    pub waiting_runs: BTreeMap<String, WaitingRun>,
 }
 
 #[workflow]
@@ -435,6 +438,9 @@ pub(super) async fn process_emissions(ctx: &Ctx) {
                     });
                 });
             }
+            EmissionDisposition::Waiting { token } => {
+                ctx.state_mut(|state| state.attach_waiting(&token));
+            }
             EmissionDisposition::Terminal {
                 session_id,
                 run_id,
@@ -443,26 +449,33 @@ pub(super) async fn process_emissions(ctx: &Ctx) {
                 failure_message_ref,
                 output_ref,
             } => {
-                reconcile_run(ctx, &run_id, &session_id, status, output_ref).await;
-                ctx.state_mut(|state| {
-                    state.attach_terminal(
-                        &token,
-                        LaneTerminal {
-                            status,
-                            run_id,
-                            failure_message_ref,
-                        },
-                    )
-                });
+                let resolution = reconcile_run(ctx, &run_id, &session_id, status, output_ref).await;
+                let terminal = LaneTerminal {
+                    status,
+                    run_id,
+                    failure_message_ref,
+                };
+                match ctx.state_mut(|state| state.take_waiting_run(&token)) {
+                    Some((session_id, waiting)) => {
+                        lanes::settle_waiting_run(ctx, &session_id, waiting, terminal, resolution)
+                            .await;
+                    }
+                    None => ctx.state_mut(|state| {
+                        if let Some(resolution) = resolution {
+                            state.set_lane_resolution(&session_id, resolution);
+                        }
+                        state.attach_terminal(&token, terminal);
+                    }),
+                }
             }
             EmissionDisposition::Ignore => {}
         }
     }
 }
 
-/// Read the session log past its cursor and fold the run's resolve calls
-/// into the lane on that session (run-scoped correlation: one delivery
-/// per run, the last call wins). A run that used a carried tool without
+/// Read the session log past its cursor and return the run's decision on
+/// its delivery from its resolve calls (run-scoped correlation: one
+/// delivery per run, the last call wins). A run that used a carried tool without
 /// resolving counts as handled, and a completed program run without one
 /// is decided by its output. Read failures are recorded, never fatal:
 /// the terminal still lands and the delivery ends `unresolved`.
@@ -472,7 +485,7 @@ async fn reconcile_run(
     target: &str,
     status: RunStatus,
     output_ref: Option<BlobRef>,
-) {
+) -> Option<LaneResolution> {
     let (universe_id, after_seq) =
         ctx.state(|state| (state.config.universe_id, state.cursor_for(target)));
     let pulled = match activity(
@@ -491,10 +504,11 @@ async fn reconcile_run(
             ctx.state_mut(|state| {
                 state.record_error(format!("read tool invocations of {target}: {message}"))
             });
-            return;
+            return None;
         }
     };
     ctx.state_mut(|state| state.set_cursor(target, pulled.next_seq));
+    let mut resolution = None;
     for invocation in resolve_invocations_for_run(&pulled.invocations, run_id) {
         let args = match activity(
             ctx,
@@ -518,58 +532,42 @@ async fn reconcile_run(
             }
         };
         match parse_event_resolve_args(&args) {
-            Ok(parsed) => ctx.state_mut(|state| {
-                state.set_lane_resolution(
-                    target,
-                    LaneResolution {
-                        outcome: parsed.outcome,
-                        summary: parsed.summary,
-                    },
-                )
-            }),
+            Ok(parsed) => {
+                resolution = Some(LaneResolution {
+                    outcome: parsed.outcome,
+                    summary: parsed.summary,
+                });
+            }
             Err(message) => ctx.state_mut(|state| {
                 state.record_error(format!("bot_event_resolve arguments invalid: {message}"))
             }),
         }
     }
-    let unresolved = ctx.state(|state| {
-        state
-            .active_by_session
-            .get(target)
-            .is_some_and(|lane| lane.resolution.is_none())
-    });
-    if unresolved {
-        let carried = ctx.state(|state| {
-            state
-                .extra_session(target)
-                .map(|session| session.carried_tool_ids.clone())
-                .unwrap_or_default()
-        });
-        if used_carried_tool(&pulled.invocations, run_id, &carried) {
-            ctx.state_mut(|state| {
-                state.set_lane_resolution(
-                    target,
-                    LaneResolution {
-                        outcome: BotEventOutcome::Handled,
-                        summary: None,
-                    },
-                )
-            });
-        } else if status == RunStatus::Completed && ctx.state(|state| state.program_sessions) {
-            let verdict = bots::tools::program_verdict(
-                program_output(ctx, universe_id, output_ref).await.as_ref(),
-            );
-            ctx.state_mut(|state| {
-                state.set_lane_resolution(
-                    target,
-                    LaneResolution {
-                        outcome: verdict.outcome,
-                        summary: verdict.summary,
-                    },
-                )
-            });
-        }
+    if resolution.is_some() {
+        return resolution;
     }
+    let carried = ctx.state(|state| {
+        state
+            .extra_session(target)
+            .map(|session| session.carried_tool_ids.clone())
+            .unwrap_or_default()
+    });
+    if used_carried_tool(&pulled.invocations, run_id, &carried) {
+        return Some(LaneResolution {
+            outcome: BotEventOutcome::Handled,
+            summary: None,
+        });
+    }
+    if status == RunStatus::Completed && ctx.state(|state| state.program_sessions) {
+        let verdict = bots::tools::program_verdict(
+            program_output(ctx, universe_id, output_ref).await.as_ref(),
+        );
+        return Some(LaneResolution {
+            outcome: verdict.outcome,
+            summary: verdict.summary,
+        });
+    }
+    None
 }
 
 /// A program run's JSON output. An unreadable output is recorded and
@@ -861,6 +859,7 @@ async fn teardown(ctx: &Ctx) {
                 outcome: BotEventOutcome::Archived,
                 detail: Some("bot_closed".to_owned()),
                 run_id: None,
+                after_waiting: false,
             },
         )
         .await

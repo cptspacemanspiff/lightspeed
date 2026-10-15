@@ -274,6 +274,10 @@ pub struct BotRecordOutcomesRequest {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// The run waited on people: this outcome replaces the `deferred`
+    /// recorded for the same run meanwhile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_waiting: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

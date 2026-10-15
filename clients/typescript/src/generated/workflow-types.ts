@@ -217,6 +217,11 @@ export type EmissionBody =
       token: string;
     }
   | {
+      kind: "run_waiting";
+      run_id: number;
+      token: string;
+    }
+  | {
       kind: "source_resolution";
       promise_id: PromiseId;
       resolution: PromiseResolution;

@@ -1216,7 +1216,8 @@ impl BotEventStore for PgStore {
                 run_id = $6,
                 resolved_at_ms = $7
             WHERE universe_id = $1 AND bot_id = $2 AND event_id = ANY($3::text[])
-              AND outcome IS NULL
+              AND (outcome IS NULL
+                   OR ($8 AND outcome = 'deferred' AND run_id IS NOT NULL AND run_id = $6))
             "#,
         )
         .bind(self.config.universe_id)
@@ -1226,6 +1227,7 @@ impl BotEventStore for PgStore {
         .bind(write.detail.as_deref())
         .bind(write.run_id.as_deref())
         .bind(write.resolved_at_ms)
+        .bind(write.after_waiting)
         .execute(&self.pool)
         .await
         .map_err(|error| bot_sql_error("record bot event outcomes", error))?;

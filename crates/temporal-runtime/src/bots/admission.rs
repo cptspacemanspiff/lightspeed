@@ -428,7 +428,8 @@ impl GatewayAgentApi {
         Ok(())
     }
 
-    /// Write-once outcome for a delivery's events.
+    /// Write-once outcome for a delivery's events; `after_waiting` lets a
+    /// waiting run's final outcome replace its `deferred`.
     pub(crate) async fn record_bot_event_outcomes(
         &self,
         bot_id: &BotId,
@@ -436,6 +437,7 @@ impl GatewayAgentApi {
         outcome: BotEventOutcome,
         detail: Option<String>,
         run_id: Option<String>,
+        after_waiting: bool,
     ) -> Result<u64, BotError> {
         self.store()
             .record_bot_event_outcomes(
@@ -446,6 +448,7 @@ impl GatewayAgentApi {
                     detail,
                     run_id,
                     resolved_at_ms: now_ms(),
+                    after_waiting,
                 },
             )
             .await

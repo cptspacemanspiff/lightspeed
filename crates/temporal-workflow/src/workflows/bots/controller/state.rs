@@ -243,7 +243,19 @@ pub struct ActiveLane {
     pub run_id: Option<String>,
     pub terminal: Option<LaneTerminal>,
     pub resolution: Option<LaneResolution>,
+    /// The run reported that it waits on people.
+    pub waiting: bool,
     pub started_at_ms: i64,
+}
+
+/// A delivery whose run waits on people. It was recorded `deferred` and
+/// left its lane, so the controller can continue as new while the run
+/// waits; the session stays occupied until the run's terminal settles it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingRun {
+    pub delivery: BotDelivery,
+    pub run_id: String,
+    pub waiting_since_ms: i64,
 }
 
 /// A pushed `bot_*` invocation waiting for its lane.
@@ -287,6 +299,8 @@ pub enum EmissionDisposition {
         invocation: Box<WorkflowToolInvocation>,
         holder_workflow_id: String,
     },
+    /// One of the bot's runs waits on people; its terminal comes later.
+    Waiting { token: String },
     /// A run terminal from one of the bot's sessions.
     Terminal {
         session_id: String,
@@ -324,6 +338,8 @@ pub struct ControllerState {
     pub rotation_requests: BTreeSet<String>,
     pub active_by_session: BTreeMap<String, ActiveLane>,
     pub sidecar_by_session: BTreeSet<String>,
+    /// Sessions whose run waits on people, with the delivery it settles.
+    pub waiting_runs: BTreeMap<String, WaitingRun>,
     pub applied_profile_id: Option<ProfileId>,
     pub applied_profile_revision: Option<u64>,
     pub session_ready: bool,
@@ -390,6 +406,7 @@ impl ControllerState {
             rotation_requests: carry.rotation_requests.into_iter().collect(),
             active_by_session: BTreeMap::new(),
             sidecar_by_session: BTreeSet::new(),
+            waiting_runs: carry.waiting_runs,
             applied_profile_id: carry.applied_profile_id,
             applied_profile_revision: carry.applied_profile_revision,
             session_ready: carry.session_ready,
@@ -443,6 +460,7 @@ impl ControllerState {
             rotation_requests: self.rotation_requests.iter().cloned().collect(),
             main_generation: self.main_generation,
             tools_revision: self.tools_revision,
+            waiting_runs: self.waiting_runs.clone(),
         }
     }
 
@@ -853,7 +871,7 @@ impl ControllerState {
         }
         self.pending_deliveries.iter().any(|delivery| {
             let target = self.target_of(delivery);
-            if self.rotation_requests.contains(&target) {
+            if self.rotation_requests.contains(&target) || self.waiting_runs.contains_key(&target) {
                 return false;
             }
             match self.active_by_session.get(&target) {
@@ -878,7 +896,8 @@ impl ControllerState {
                 break;
             }
             let target = self.target_of(&self.pending_deliveries[index]);
-            if self.rotation_requests.contains(&target) {
+            // A session whose run waits on people is busy until it ends.
+            if self.rotation_requests.contains(&target) || self.waiting_runs.contains_key(&target) {
                 index += 1;
                 continue;
             }
@@ -906,6 +925,7 @@ impl ControllerState {
                     run_id: None,
                     terminal: None,
                     resolution: None,
+                    waiting: false,
                     started_at_ms: now_ms,
                 },
             );
@@ -962,6 +982,57 @@ impl ControllerState {
             self.lane_tick += 1;
         }
         attached
+    }
+
+    /// Mark the lane of the delivery `token` names as waiting on people.
+    pub fn attach_waiting(&mut self, token: &str) -> bool {
+        let mut attached = false;
+        for lane in self.active_by_session.values_mut() {
+            if ids::delivery_terminal_token(&lane.delivery.id) == token && !lane.waiting {
+                lane.waiting = true;
+                attached = true;
+            }
+        }
+        if attached {
+            self.lane_tick += 1;
+        }
+        attached
+    }
+
+    pub fn lane_is_waiting(&self, session_id: &str) -> bool {
+        self.active_by_session
+            .get(session_id)
+            .is_some_and(|lane| lane.waiting && lane.terminal.is_none())
+    }
+
+    /// Move a waiting lane's delivery out of its lane: the lane ends, the
+    /// session stays occupied.
+    pub fn park_waiting_lane(&mut self, session_id: &str, run_id: &str, now_ms: i64) {
+        if let Some(lane) = self.active_by_session.remove(session_id) {
+            self.waiting_runs.insert(
+                session_id.to_owned(),
+                WaitingRun {
+                    delivery: lane.delivery,
+                    run_id: run_id.to_owned(),
+                    waiting_since_ms: now_ms,
+                },
+            );
+            self.touch_session(session_id, now_ms);
+            self.lane_tick += 1;
+        }
+    }
+
+    /// The waiting delivery a run terminal's token settles, taken out of
+    /// the waiting set so the session can take its next delivery.
+    pub fn take_waiting_run(&mut self, token: &str) -> Option<(String, WaitingRun)> {
+        let session_id = self
+            .waiting_runs
+            .iter()
+            .find(|(_, waiting)| ids::delivery_terminal_token(&waiting.delivery.id) == token)
+            .map(|(session_id, _)| session_id.clone())?;
+        let waiting = self.waiting_runs.remove(&session_id)?;
+        self.lane_tick += 1;
+        Some((session_id, waiting))
     }
 
     pub fn set_lane_resolution(&mut self, session_id: &str, resolution: LaneResolution) {
@@ -1336,6 +1407,7 @@ pub fn classify_emission(
             failure_message_ref,
             output_ref: output.map(|output| output.content_ref),
         },
+        EmissionBody::RunWaiting { token, .. } => EmissionDisposition::Waiting { token },
         EmissionBody::SourceResolution { .. } | EmissionBody::InvocationCancellation { .. } => {
             EmissionDisposition::Ignore
         }
@@ -1997,6 +2069,55 @@ mod tests {
         ));
         assert!(state.lane_has_terminal("bot:v1:triage"));
         assert!(state.lane_tick > tick);
+    }
+
+    #[test]
+    fn a_waiting_run_leaves_its_lane_but_holds_its_session_until_its_terminal() {
+        let mut state = ready(fresh());
+        state.accept_event(event("e1", 1), NOW).unwrap();
+        state.dispatch(NOW);
+        let token = ids::delivery_terminal_token("e1");
+        let waiting = EmissionEnvelope::run_waiting(
+            UNIVERSE,
+            SessionId::new("bot:v1:triage"),
+            EventSeq::new(5),
+            token.clone(),
+            RunId::new(7),
+        );
+        assert_eq!(
+            state.classify_emission(waiting.clone()),
+            Some(EmissionDisposition::Waiting {
+                token: token.clone()
+            })
+        );
+        assert_eq!(state.classify_emission(waiting), None, "deduplicated");
+        assert!(!state.attach_waiting("bot-event-terminal-v1-nope"));
+        assert!(state.attach_waiting(&token));
+        assert!(state.lane_is_waiting("bot:v1:triage"));
+
+        state.park_waiting_lane("bot:v1:triage", "run_7", NOW + 1);
+        assert!(state.active_by_session.is_empty(), "the lane ended");
+        // The next delivery for the session waits for the run to end.
+        state.accept_event(event("e2", 2), NOW + 2).unwrap();
+        assert!(!state.dispatchable(NOW + 2));
+        assert!(state.dispatch(NOW + 2).is_empty());
+        // The waiting delivery survives continue-as-new.
+        let carried = ControllerState::new(
+            BotControllerArgs {
+                config: state.config.clone(),
+                carry: Some(serde_json::from_str(&serde_json::to_string(&state.carry()).unwrap()).unwrap()),
+            },
+            NOW + 3,
+        );
+        assert_eq!(carried.waiting_runs, state.waiting_runs);
+
+        assert!(state.take_waiting_run("bot-event-terminal-v1-nope").is_none());
+        let (session, settled) = state.take_waiting_run(&token).expect("waiting run");
+        assert_eq!(session, "bot:v1:triage");
+        assert_eq!(settled.run_id, "run_7");
+        assert_eq!(settled.delivery.id, "e1");
+        assert!(state.dispatchable(NOW + 4));
+        assert_eq!(state.dispatch(NOW + 4).len(), 1);
     }
 
     // ── Outcome ladder ──────────────────────────────────────────────────

@@ -121,6 +121,7 @@ pub async fn record_outcomes(
             request.outcome,
             request.detail,
             request.run_id,
+            request.after_waiting,
         )
         .await
         .map_err(|error| bot_error("record event outcomes", error))?;

@@ -54,6 +54,15 @@
           "token:utf8"
         ]
       },
+      "runWaiting": {
+        "kind": "run_waiting",
+        "parts": [
+          "universeId:utf8",
+          "sessionId:utf8",
+          "runId:u64be",
+          "token:utf8"
+        ]
+      },
       "sourceResolution": {
         "kind": "source_resolution",
         "parts": [
@@ -255,6 +264,7 @@
     "emissionIds": {
       "invocationCancellation": "emission:sha256:6b88bd2ef714193fc9274b5f212cc415da4dd25733e1717fa89c7fdddc3eca4e",
       "runTerminal": "emission:sha256:a477a56dbeb4f3937959dc5ece1cf363c7030bec130415e4019b507e48098240",
+      "runWaiting": "emission:sha256:4449b92a1d9aeb82083a2ce538696f9e0969f2a74efee6c3a3004a83c452c48b",
       "sourceResolution": "emission:sha256:8980ea03cd17fbacf2682cdf4e5a13593d6c596ca8965ebcdb601ad56e40ec85",
       "toolInvocation": "wti:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
@@ -338,6 +348,20 @@
         "producer": {
           "kind": "session",
           "log_seq": 44,
+          "session_id": "bot:v1:triage",
+          "universe_id": "6f3a1a52-58c1-4f0e-9c2d-1a2b3c4d5e6f"
+        }
+      },
+      {
+        "body": {
+          "kind": "run_waiting",
+          "run_id": 7,
+          "token": "terminal-token-1"
+        },
+        "emission_id": "emission:sha256:4449b92a1d9aeb82083a2ce538696f9e0969f2a74efee6c3a3004a83c452c48b",
+        "producer": {
+          "kind": "session",
+          "log_seq": 45,
           "session_id": "bot:v1:triage",
           "universe_id": "6f3a1a52-58c1-4f0e-9c2d-1a2b3c4d5e6f"
         }

@@ -607,7 +607,7 @@ impl BotEventStore for InMemoryBotStore {
             let Some(record) = state.events.get_mut(&(bot_id.clone(), event_id.clone())) else {
                 continue;
             };
-            if record.outcome.is_some() {
+            if !write.replaces(record.outcome, record.run_id.as_deref()) {
                 continue;
             }
             record.outcome = Some(write.outcome);
@@ -747,6 +747,7 @@ mod tests {
 
     fn outcome(kind: BotEventOutcome, resolved_at_ms: i64) -> BotEventOutcomeWrite {
         BotEventOutcomeWrite {
+            after_waiting: false,
             outcome: kind,
             detail: Some("done".to_owned()),
             run_id: Some("run-1".to_owned()),

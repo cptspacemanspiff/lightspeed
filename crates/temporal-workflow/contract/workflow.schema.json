@@ -1011,6 +1011,29 @@
           "type": "object"
         },
         {
+          "description": "A run is still active but waits on people (a program's open input\nrequest), so it may stay active far longer than a run usually does.\nSent once per run to the holders its terminal will notify; the\nterminal follows as usual.",
+          "properties": {
+            "kind": {
+              "const": "run_waiting",
+              "type": "string"
+            },
+            "run_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token",
+            "run_id"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "kind": {
               "const": "source_resolution",

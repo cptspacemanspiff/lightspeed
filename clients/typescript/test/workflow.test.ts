@@ -32,6 +32,14 @@ describe("generated workflow contract", () => {
       ),
     ).toBe(WORKFLOW_CONTRACT_VECTORS.emissionIds.runTerminal);
     expect(
+      emissionId.runWaiting(
+        inputs.universeId,
+        inputs.sessionId,
+        inputs.runId,
+        inputs.token,
+      ),
+    ).toBe(WORKFLOW_CONTRACT_VECTORS.emissionIds.runWaiting);
+    expect(
       emissionId.sourceResolution(
         inputs.universeId,
         inputs.producerWorkflowId,

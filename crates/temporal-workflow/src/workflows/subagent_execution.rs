@@ -281,8 +281,11 @@ pub(crate) fn classify_emission(
                 && completion_key == harness::REPLY_COMPLETION_KEY)
                 .then_some(SignalEffect::HolderCancelled)
         }
+        // The execution waits for the child's terminal however long the
+        // child waits on people.
         harness::EmissionBody::SourceResolution { .. }
-        | harness::EmissionBody::ToolInvocation { .. } => None,
+        | harness::EmissionBody::ToolInvocation { .. }
+        | harness::EmissionBody::RunWaiting { .. } => None,
     }
 }
 

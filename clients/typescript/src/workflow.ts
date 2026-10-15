@@ -63,6 +63,24 @@ export const emissionId = {
     ]);
   },
 
+  /** One waiting notice per run and holder token. */
+  runWaiting(
+    universeId: string,
+    sessionId: string,
+    runId: number,
+    token: string,
+  ): string {
+    requireSessionId(sessionId);
+    requireSafeIntegerValue(runId, "runId");
+    requireNonEmpty(token, "token");
+    return derivedEmissionId("run_waiting", [
+      utf8(normalizeUniverseId(universeId)),
+      utf8(sessionId),
+      u64be(runId),
+      utf8(token),
+    ]);
+  },
+
   /**
    * Promise ids are session-scoped counters (`promise_7`), so the holder
    * workflow id is part of the emission identity: one producer resolving
@@ -285,6 +303,10 @@ function parseBody(value: unknown): void {
         }
       }
       requireOptionalBlobRef(body, "failure_message_ref");
+      return;
+    case "run_waiting":
+      requireNonEmpty(requireString(body, "token"), "run_waiting.token");
+      requireSafeInteger(body, "run_id");
       return;
     case "source_resolution":
       requireNonEmpty(

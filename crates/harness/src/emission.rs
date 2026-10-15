@@ -72,6 +72,27 @@ impl EmissionId {
         )
     }
 
+    /// One waiting notice per run and holder token: a run reports at most
+    /// once that it waits on people.
+    pub fn for_run_waiting(
+        universe_id: Uuid,
+        session_id: &SessionId,
+        run_id: RunId,
+        token: &str,
+    ) -> Self {
+        let universe = universe_id.to_string();
+        let run = run_id.as_u64().to_be_bytes();
+        Self::from_parts(
+            b"run_waiting",
+            &[
+                universe.as_bytes(),
+                session_id.as_str().as_bytes(),
+                &run,
+                token.as_bytes(),
+            ],
+        )
+    }
+
     /// Promise ids are session-scoped counters, so the holder workflow id
     /// is part of the identity: one producer resolving `promise_7` for two
     /// holders sends two distinct emissions.
@@ -193,6 +214,11 @@ pub enum EmissionBody {
         output: Option<crate::ContentRef>,
         failure_message_ref: Option<BlobRef>,
     },
+    /// A run is still active but waits on people (a program's open input
+    /// request), so it may stay active far longer than a run usually does.
+    /// Sent once per run to the holders its terminal will notify; the
+    /// terminal follows as usual.
+    RunWaiting { token: String, run_id: RunId },
     SourceResolution {
         promise_id: PromiseId,
         resolution: PromiseResolution,
@@ -252,6 +278,25 @@ impl EmissionEnvelope {
                 output,
                 failure_message_ref,
             },
+        }
+    }
+
+    pub fn run_waiting(
+        universe_id: Uuid,
+        session_id: SessionId,
+        log_seq: EventSeq,
+        token: String,
+        run_id: RunId,
+    ) -> Self {
+        let emission_id = EmissionId::for_run_waiting(universe_id, &session_id, run_id, &token);
+        Self {
+            emission_id,
+            producer: EmissionProducer::Session {
+                universe_id,
+                session_id,
+                log_seq,
+            },
+            body: EmissionBody::RunWaiting { token, run_id },
         }
     }
 

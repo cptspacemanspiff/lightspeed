@@ -297,6 +297,32 @@ fn validate_start(
         .ok_or("input request is missing its reply promise")
 }
 
+/// Whether a program run has a question open: a pending promise of the run
+/// that an `input.request` or `input.open` invocation will resolve.
+pub(crate) fn run_waits_on_people(state: &harness::CoreAgentState, run: &harness::ActiveRun) -> bool {
+    if !matches!(run.source, harness::RunSource::Program { .. }) {
+        return false;
+    }
+    let questions = state
+        .workflow_tools
+        .start_requests
+        .values()
+        .filter(|invocation| {
+            invocation.run_id == run.run_id
+                && INPUT_SEMANTIC_TYPES.contains(&invocation.semantic_type.as_str())
+        })
+        .map(|invocation| invocation.invocation_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    !questions.is_empty()
+        && state.promises.pending().any(|promise| {
+            matches!(
+                &promise.source,
+                harness::PromiseSource::Workflow { invocation_id, .. }
+                    if questions.contains(invocation_id.as_str())
+            )
+        })
+}
+
 /// Mirrors the semantic types of the `input.request` (joined) and
 /// `input.open` (promise) bindings; the workflow crate cannot depend on the
 /// tools crate.
