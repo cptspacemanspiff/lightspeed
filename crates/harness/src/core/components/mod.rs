@@ -58,10 +58,11 @@ pub use llm::*;
 pub use log::*;
 pub use program::{
     APPROVAL_TOOL_NAME, APPROVAL_WORKFLOW_SEMANTIC_TYPE, APPROVAL_WORKFLOW_TOOL_ID,
-    ContractBinding, ContractPin, PROGRAM_EXECUTE_TOOL_NAME,
-    PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE, PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram,
-    ProgramApprovals, ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver,
-    contract_digest, is_program_session, program_run_execution_id, program_run_invocation,
+    ContractBinding, ContractPin, DEFAULT_PROGRAM_CONTEXT_RETAINED, MAX_PROGRAM_CONTEXT_RETAINED,
+    PROGRAM_CONTEXT_SEED_SOURCE, PROGRAM_EXECUTE_TOOL_NAME, PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE,
+    PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram, ProgramApprovals, ProgramContextInput,
+    ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver, contract_digest,
+    is_program_session, program_context, program_run_execution_id, program_run_invocation,
     program_run_is_waiting, validate_contract_name,
 };
 pub use promise::AwaitOutcome;

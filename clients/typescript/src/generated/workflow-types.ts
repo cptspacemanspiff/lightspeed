@@ -524,6 +524,23 @@ export interface ChatActivation {
 export interface CloseCodeToolScopeRequest {
   cancel_pending: boolean;
   execution_id: string;
+  /**
+   * The program context a program run's scope keeps as it closes;
+   * written as the session's newest only if the run completes.
+   */
+  program_context?: ProgramContextInput | null;
+}
+/**
+ * A program context to keep: the JSON value in the content store, and a
+ * short display preview. A run passes one when it closes its scope; it
+ * becomes a context entry only if the run completes.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "ProgramContextInput".
+ */
+export interface ProgramContextInput {
+  content_ref: string;
+  preview?: string | null;
 }
 /**
  * Small, immutable input shared by code-execution orchestration and its runner.

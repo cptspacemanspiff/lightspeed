@@ -423,6 +423,105 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
     .await
 }
 
+const REMEMBERING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const before = ctx.context ?? null;
+            ctx.setContext({
+                round: (before?.round ?? 0) + 1,
+                claims: [...(before?.claims ?? []), input.claim],
+            });
+            if (input.claim === "throw") throw new Error("after setting its context");
+            return { claim: input.claim, slept: 0, before };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_reads_the_context_its_last_completed_run_kept() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            let mut profile = program_profile(&profile_id, REMEMBERING_PROGRAM, &[]);
+            profile.document.program.as_mut().unwrap().limits = Some(api::ProgramLimitsInput {
+                context_retained: Some(2),
+                ..Default::default()
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            let mut befores = Vec::new();
+            for claim in ["a", "b", "throw", "c"] {
+                let run = start_program_run(&api, &session_id, json!({ "claim": claim })).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                if claim == "throw" {
+                    // A failed run keeps nothing, though it set a context.
+                    assert_eq!(run.status, api::RunStatus::Failed, "{run:?}");
+                    continue;
+                }
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output = run.output.as_ref().expect("program output");
+                befores.push(read_json(&store, &output.content_ref).await?["before"].clone());
+            }
+            assert_eq!(
+                befores,
+                [
+                    Value::Null,
+                    json!({"round": 1, "claims": ["a"]}),
+                    json!({"round": 2, "claims": ["a", "b"]}),
+                ]
+            );
+
+            // Each completed run's context is its own entry; beyond the
+            // program's `contextRetained`, the oldest leave the active context.
+            let session = read_session_view(&api, &session_id).await?;
+            let contexts = session
+                .active_context
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == api::ContextEntryKindView::ProgramState)
+                .collect::<Vec<_>>();
+            assert_eq!(contexts.len(), 2, "{contexts:?}");
+            let mut kept = Vec::new();
+            for entry in &contexts {
+                assert_eq!(
+                    entry.content.media_type.as_deref(),
+                    Some("application/json")
+                );
+                kept.push(read_json(&store, &entry.content.content_ref).await?);
+            }
+            assert_eq!(
+                kept,
+                [
+                    json!({"round": 2, "claims": ["a", "b"]}),
+                    json!({"round": 3, "claims": ["a", "b", "c"]}),
+                ]
+            );
+            assert!(
+                contexts[1]
+                    .preview
+                    .as_deref()
+                    .is_some_and(|preview| preview.contains("\"round\":3")),
+                "{contexts:?}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 const ASKING_PROGRAM: &str = r#"
     export default {
         async run(input, env) {

@@ -98,6 +98,22 @@ pub fn routed_session_generation_id(base: &str, generation: u32) -> String {
     }
 }
 
+/// The ids of the generations before `session_id`'s, newest first and at
+/// most `limit` of them: the sessions its key ran in before.
+pub fn previous_generation_ids(session_id: &str, limit: u32) -> Vec<String> {
+    let base = routed_session_base(session_id);
+    let generation = session_id
+        .strip_prefix(base)
+        .and_then(|suffix| suffix.strip_prefix("-g"))
+        .and_then(|generation| generation.parse::<u32>().ok())
+        .unwrap_or(1);
+    (1..generation)
+        .rev()
+        .take(limit as usize)
+        .map(|generation| routed_session_generation_id(base, generation))
+        .collect()
+}
+
 /// Whether a session id belongs to the bot: its main session, a generation
 /// of it, or a routed session.
 pub fn is_bot_session(bot_id: &BotId, session_id: &str) -> bool {
@@ -263,6 +279,16 @@ pub fn coalesce_key(trigger_id: &BotTriggerId, routed_session_id: Option<&str>) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn previous_generations_are_listed_newest_first() {
+        assert_eq!(
+            super::previous_generation_ids("bot-x-pr-42-ab12-g4", 2),
+            ["bot-x-pr-42-ab12-g3", "bot-x-pr-42-ab12-g2"]
+        );
+        assert_eq!(super::previous_generation_ids("bot-x-g2", 4), ["bot-x"]);
+        assert!(super::previous_generation_ids("bot-x", 4).is_empty());
+    }
+
     use super::*;
 
     fn bot(id: &str) -> BotId {

@@ -506,6 +506,15 @@ pub async fn ensure_session(
         }
         return Err(activity_error("start managed session", error));
     }
+    // A key's next session carries on from the program context its last
+    // session kept.
+    if program && !request.previous_generations.is_empty() {
+        let session_id = harness::SessionId::try_new(request.session_id.clone())
+            .map_err(|error| non_retryable(format!("invalid session id: {error}")))?;
+        api.seed_program_context(&session_id, &request.previous_generations)
+            .await
+            .map_err(|error| activity_error("seed program context", error))?;
+    }
 
     if request.applied_profile_revision != Some(profile.revision) {
         // A session's provider identity and API kind are pinned for its lifetime.

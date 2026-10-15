@@ -205,6 +205,8 @@ impl ContextSnapshot {
 pub enum ContextRemovalReason {
     Pruned,
     ProviderCompacted,
+    /// Program contexts older than the program's `context_retained`.
+    ProgramContextRetention,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +343,10 @@ pub enum ContextEntryKind {
         approval_request_id: String,
         approve: bool,
     },
+    /// A program session's program context: the JSON value one run kept
+    /// for the runs after it. Written only when a run completes, never by a
+    /// context edit; the newest is what the next run reads.
+    ProgramState,
 }
 
 /// Catalog kinds supersede on keyed replacement instead of removing the
@@ -390,6 +396,10 @@ pub enum ContextEntrySource {
     },
     Runtime {
         label: String,
+    },
+    /// The program context a completed run of a program session kept.
+    ProgramRun {
+        run_id: RunId,
     },
 }
 
@@ -1602,6 +1612,7 @@ fn apply_entries_applied(
             )));
         }
 
+        crate::core::components::program::validate_program_context_entry(state, entry)?;
         record_entry_materialization(state, entry)?;
 
         if let Some(key) = entry.key.as_ref() {
@@ -1794,7 +1805,8 @@ fn record_entry_materialization(
         | ContextEntrySource::ApprovalDecision { .. }
         | ContextEntrySource::Tool { .. }
         | ContextEntrySource::Reasoning { .. }
-        | ContextEntrySource::Runtime { .. } => Ok(()),
+        | ContextEntrySource::Runtime { .. }
+        | ContextEntrySource::ProgramRun { .. } => Ok(()),
     }
 }
 
@@ -1900,7 +1912,9 @@ pub fn validate_entry_replacement(
 
 fn validate_removal_reason(reason: &ContextRemovalReason) -> Result<(), DomainError> {
     match reason {
-        ContextRemovalReason::Pruned | ContextRemovalReason::ProviderCompacted => Ok(()),
+        ContextRemovalReason::Pruned
+        | ContextRemovalReason::ProviderCompacted
+        | ContextRemovalReason::ProgramContextRetention => Ok(()),
     }
 }
 

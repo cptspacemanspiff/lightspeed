@@ -798,6 +798,15 @@ function applyNonToolCallItem(
       }
       break;
     }
+    case "programState":
+      // The JSON a program run kept for the runs after it.
+      state.entries.push({
+        kind: "system",
+        key: item.id,
+        text: item.preview ? `program context: ${item.preview}` : "program context",
+        contentRef: item.content.contentRef,
+      });
+      break;
     case "providerOpaque":
       if (["openai.responses.compaction", "anthropic.messages.compaction"].includes(item.content.providerKind ?? "")) {
         state.entries.push({

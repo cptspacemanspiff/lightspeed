@@ -156,6 +156,14 @@ pub enum CoreAgentCommand {
     CloseCodeToolScope {
         execution_id: String,
         cancel: bool,
+        /// A program run's context, kept when its program returned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program_context: Option<crate::ProgramContextInput>,
+    },
+    /// Copy a predecessor session's newest program context into a program
+    /// session before its first run. Runtime-only: no public method sends it.
+    SeedProgramContext {
+        context: crate::ProgramContextInput,
     },
     CloseSession {
         /// Force-cancel the active run and drop queued runs before closing

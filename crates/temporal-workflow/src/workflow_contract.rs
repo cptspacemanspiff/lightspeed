@@ -420,6 +420,7 @@ fn code_tool_vectors() -> Value {
         "closeRequest": CloseCodeToolScopeRequest {
             execution_id: execution_id.clone(),
             cancel_pending: true,
+            program_context: None,
         },
         "reportRequest": CodeToolScopeReportRequest { execution_id: execution_id.clone() },
         "recordedOutcomesRequest": ScopeRecordedOutcomesRequest {

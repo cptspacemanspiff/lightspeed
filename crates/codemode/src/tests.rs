@@ -958,6 +958,7 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
         input: json!({"claim": "x"}),
         started_at_ms: 1_000,
         random_seed: seed,
+        context: None,
     });
     program
 }
@@ -1033,6 +1034,46 @@ async fn programs_run_a_module_handler_with_contract_namespaces() {
             "scriptGlobals": ["undefined", "undefined", "undefined"],
         }))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                const before = ctx.context;
+                const next = { round: before.round + 1 };
+                ctx.setContext({ round: 0 });
+                ctx.setContext(next);
+                next.round = 99;
+                const errors = [];
+                for (const value of [undefined, () => 1, "x".repeat(70000)]) {
+                    try { ctx.setContext(value); } catch (error) { errors.push(error.name); }
+                }
+                return { before, errors, frozen: Object.isFrozen(ctx) };
+            }
+        };
+    "#;
+    let mut input = program_input(source, &[], SEED);
+    input.program.as_mut().unwrap().context = Some(json!({"round": 1}));
+    let (_, report) = run_program(input, |_| unreachable!()).await;
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "before": {"round": 1},
+            "errors": ["TypeError", "TypeError", "RangeError"],
+            "frozen": true,
+        }))
+    );
+    assert_eq!(report.program_context, Some(json!({"round": 2})));
+
+    let source = r#"
+        export default { async run(input, env, ctx) { return ctx.context === undefined; } };
+    "#;
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!()).await;
+    assert_eq!(report.return_value, Some(json!(true)));
+    assert_eq!(report.program_context, None);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -68,6 +68,10 @@ pub struct InvokeCodeToolRequest {
 pub struct CloseCodeToolScopeRequest {
     pub execution_id: String,
     pub cancel_pending: bool,
+    /// The program context a program run's scope keeps as it closes;
+    /// written as the session's newest only if the run completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_context: Option<harness::ProgramContextInput>,
 }
 
 /// Read an authoritative snapshot, including after a runner loses its waiters.

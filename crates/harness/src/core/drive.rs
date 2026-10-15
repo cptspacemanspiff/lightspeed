@@ -11082,6 +11082,7 @@ mod tests {
             CoreAgentCommand::CloseCodeToolScope {
                 execution_id: "execution-1".into(),
                 cancel: true,
+                program_context: None,
             },
         );
         assert!(
@@ -11338,6 +11339,7 @@ mod tests {
             CoreAgentCommand::CloseCodeToolScope {
                 execution_id: "execution-1".into(),
                 cancel: true,
+                program_context: None,
             },
         ));
         let result = promise_tool_result(
@@ -11560,6 +11562,7 @@ mod tests {
                 CoreAgentCommand::CloseCodeToolScope {
                     execution_id: "execution-1".into(),
                     cancel: true,
+                    program_context: None,
                 },
             );
             assert!(!drive.state().promises.promises.contains_key(&reply_id));
@@ -12088,6 +12091,290 @@ mod tests {
         assert_eq!(
             record.failure.as_ref().unwrap().kind,
             crate::RunFailureKind::Program
+        );
+    }
+
+    fn program_context_input(value: &[u8]) -> crate::ProgramContextInput {
+        crate::ProgramContextInput {
+            content_ref: BlobRef::from_bytes(value),
+            preview: Some(String::from_utf8_lossy(value).into_owned()),
+        }
+    }
+
+    /// Runs one program run on an open program session: its scope closes
+    /// with `context`, and its reply resolves or fails.
+    fn program_run_with_context(
+        drive: &mut CoreAgentDrive,
+        log: &mut Vec<CoreAgentEntry>,
+        context: Option<&[u8]>,
+        resolve: bool,
+    ) -> crate::RunId {
+        let at = 1_000 * (drive.state().runs.completed.len() as u64 + 1);
+        drive.reset_steps();
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), at + 20)
+            .unwrap();
+        log.extend(commit_action(drive, action));
+        for now in [at + 30, at + 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id).unwrap();
+        log.extend(code_tool_commit(
+            drive,
+            CoreAgentCommand::OpenCodeToolScope {
+                scope: crate::CodeToolScopeSpec {
+                    execution_id: execution_id.clone(),
+                    owner: crate::ScopeOwner::Run { run_id },
+                    policy: crate::ScopePolicy::program(crate::ScopeLimits {
+                        max_calls: 16,
+                        max_in_flight: 8,
+                    }),
+                    bindings: Default::default(),
+                },
+            },
+        ));
+        log.extend(code_tool_commit(
+            drive,
+            CoreAgentCommand::CloseCodeToolScope {
+                execution_id: execution_id.clone(),
+                cancel: true,
+                program_context: context.map(program_context_input),
+            },
+        ));
+        // The context is kept once, when the scope closes; a later one is
+        // dropped with the repeated close.
+        assert!(matches!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::CloseCodeToolScope {
+                        execution_id,
+                        cancel: true,
+                        program_context: Some(program_context_input(b"{\"late\":true}")),
+                    },
+                    at + 40,
+                )
+                .unwrap(),
+            CoreAgentAction::Idle
+        ));
+        let promise_id = crate::program_run_invocation(drive.state(), run_id)
+            .unwrap()
+            .completion_promises
+            .as_ref()
+            .unwrap()[crate::REPLY_COMPLETION_KEY]
+            .clone();
+        let resolution = if resolve {
+            crate::PromiseResolution::Resolved { payload_ref: None }
+        } else {
+            crate::PromiseResolution::Failed { error_ref: None }
+        };
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id,
+                    resolution,
+                },
+                at + 40,
+            )
+            .unwrap();
+        log.extend(commit_action(drive, action));
+        let action = drive.next_action(at + 41, 8).unwrap();
+        log.extend(commit_action(drive, action));
+        assert!(drive.state().runs.active.is_none());
+        run_id
+    }
+
+    fn program_contexts(state: &CoreAgentState) -> Vec<(BlobRef, crate::ContextEntrySource)> {
+        state
+            .context
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == crate::ContextEntryKind::ProgramState)
+            .map(|entry| (entry.content.content_ref.clone(), entry.source.clone()))
+            .collect()
+    }
+
+    fn open_program_session_retaining(
+        drive: &mut CoreAgentDrive,
+        retained: u32,
+    ) -> Vec<CoreAgentEntry> {
+        let mut driver = program_driver();
+        let crate::SessionDriver::Program { program } = &mut driver else {
+            unreachable!()
+        };
+        program.limits.context_retained = retained;
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver,
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        commit_action(drive, action)
+    }
+
+    #[test]
+    fn program_context_is_written_when_a_run_completes_and_keeps_the_newest() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-context"),
+            CoreAgentState::new(),
+            None,
+        );
+        let mut log = open_program_session_retaining(&mut drive, 2);
+        let first = program_run_with_context(&mut drive, &mut log, Some(b"{\"round\":1}"), true);
+        assert_eq!(
+            program_contexts(drive.state()),
+            [(
+                BlobRef::from_bytes(b"{\"round\":1}"),
+                crate::ContextEntrySource::ProgramRun { run_id: first }
+            )]
+        );
+        let newest = crate::program_context(drive.state()).unwrap();
+        assert_eq!(
+            newest.content.media_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(newest.preview.as_deref(), Some("{\"round\":1}"));
+
+        // A failed run, or one that kept nothing, leaves the context as it was.
+        program_run_with_context(&mut drive, &mut log, Some(b"{\"round\":\"lost\"}"), false);
+        program_run_with_context(&mut drive, &mut log, None, true);
+        assert_eq!(program_contexts(drive.state()).len(), 1);
+
+        // Beyond `context_retained`, the oldest leave the active context.
+        let second = program_run_with_context(&mut drive, &mut log, Some(b"{\"round\":2}"), true);
+        let third = program_run_with_context(&mut drive, &mut log, Some(b"{\"round\":3}"), true);
+        assert_eq!(
+            program_contexts(drive.state()),
+            [
+                (
+                    BlobRef::from_bytes(b"{\"round\":2}"),
+                    crate::ContextEntrySource::ProgramRun { run_id: second }
+                ),
+                (
+                    BlobRef::from_bytes(b"{\"round\":3}"),
+                    crate::ContextEntrySource::ProgramRun { run_id: third }
+                ),
+            ]
+        );
+        assert_eq!(
+            crate::program_context(drive.state())
+                .unwrap()
+                .content
+                .content_ref,
+            BlobRef::from_bytes(b"{\"round\":3}")
+        );
+        assert!(log.iter().any(|entry| matches!(
+            &entry.event,
+            CoreAgentEvent::Context(crate::ContextEvent::EntriesRemoved {
+                reason: crate::ContextRemovalReason::ProgramContextRetention,
+                ..
+            })
+        )));
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn program_context_seeds_only_a_fresh_program_session_and_never_comes_from_edits() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-seed"),
+            CoreAgentState::new(),
+            None,
+        );
+        let mut log = open_program_session_retaining(&mut drive, 10);
+        let seed = CoreAgentCommand::SeedProgramContext {
+            context: program_context_input(b"{\"round\":7}"),
+        };
+        let action = drive.admit_command(seed.clone(), 15).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        // A repeated seed is a no-op.
+        assert!(matches!(
+            drive.admit_command(seed, 16).unwrap(),
+            CoreAgentAction::Idle
+        ));
+        assert_eq!(
+            program_contexts(drive.state()),
+            [(
+                BlobRef::from_bytes(b"{\"round\":7}"),
+                crate::ContextEntrySource::Runtime {
+                    label: crate::PROGRAM_CONTEXT_SEED_SOURCE.into()
+                }
+            )]
+        );
+        let run_id = program_run_with_context(&mut drive, &mut log, Some(b"{\"round\":8}"), true);
+        assert_eq!(
+            crate::program_context(drive.state()).unwrap().source,
+            crate::ContextEntrySource::ProgramRun { run_id }
+        );
+        // Once a run has kept a context, a seed would overwrite it.
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::SeedProgramContext {
+                        context: program_context_input(b"{\"round\":0}"),
+                    },
+                    50,
+                )
+                .is_err()
+        );
+        assert_replays_identically(&drive, &log);
+
+        // An agent session has no program context, by seed or by edit.
+        let mut agent = CoreAgentDrive::from_replayed(
+            SessionId::new("agent-no-context"),
+            CoreAgentState::new(),
+            None,
+        );
+        let action = agent
+            .admit_command(
+                CoreAgentCommand::OpenSession {
+                    config: config(),
+                    driver: Default::default(),
+                },
+                10,
+            )
+            .unwrap();
+        commit_action(&mut agent, action);
+        assert!(
+            agent
+                .admit_command(
+                    CoreAgentCommand::SeedProgramContext {
+                        context: program_context_input(b"{}"),
+                    },
+                    20,
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .admit_command(
+                    CoreAgentCommand::UpsertContext {
+                        expected_revision: None,
+                        key: crate::ContextEntryKey::new("state"),
+                        entry: crate::ContextEntryInput {
+                            origin: None,
+                            kind: crate::ContextEntryKind::ProgramState,
+                            content: crate::ContentRef {
+                                content_ref: BlobRef::from_bytes(b"{}"),
+                                media_type: Some("application/json".into()),
+                                provider_kind: None,
+                            },
+                            preview: None,
+                            provenance_ref: None,
+                            token_estimate: None,
+                        },
+                    },
+                    20,
+                )
+                .is_err()
         );
     }
 
@@ -12626,6 +12913,7 @@ mod tests {
             CoreAgentCommand::CloseCodeToolScope {
                 execution_id: execution_id.clone(),
                 cancel: true,
+                program_context: None,
             },
         ));
         log.extend(code_tool_commit(

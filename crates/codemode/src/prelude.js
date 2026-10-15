@@ -1,4 +1,4 @@
-(function (send, emit, select, catalogJson, programJson) {
+(function (send, emit, select, keep, catalogJson, programJson) {
     "use strict";
     // Capture intrinsics before user code can replace globals or prototypes.
     const parse = JSON.parse;
@@ -534,7 +534,15 @@
     let programCtx = null;
     function prepare() {
         programEnv = buildEnv();
-        programCtx = freeze({ startedAt: program.started_at_ms });
+        // The newest program context, a fresh copy for this run; a later
+        // run reads what this one passes to setContext, which is copied
+        // when it is called.
+        const context = hasOwn(program, "context") ? program.context : undefined;
+        programCtx = freeze({
+            startedAt: program.started_at_ms,
+            context,
+            setContext: freeze(function (value) { keep(serialize(value)); }),
+        });
         harden();
     }
     function harden() {

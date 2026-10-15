@@ -77,7 +77,7 @@ fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), PreparationError>
 async fn pinned_program(
     api: &GatewayAgentApi,
     start: &WorkflowToolStartArgs,
-) -> Result<(harness::PinnedProgram, u64), PreparationError> {
+) -> Result<(harness::PinnedProgram, u64, Option<BlobRef>), PreparationError> {
     validate_start(start)?;
     let loaded = api
         .load_session_state(&start.invocation.session_id)
@@ -103,7 +103,11 @@ async fn pinned_program(
         .filter(|run| run.run_id == start.invocation.run_id)
         .and_then(|run| run.started_at_ms)
         .ok_or_else(|| PreparationError::Invalid("program run has not started".into()))?;
-    Ok((program.clone(), started_at_ms))
+    // The run reads the newest program context as it starts; the
+    // descriptor records which, so a replay sees the same value.
+    let context_ref =
+        harness::program_context(state).map(|entry| entry.content.content_ref.clone());
+    Ok((program.clone(), started_at_ms, context_ref))
 }
 
 fn execution_limits(
@@ -146,7 +150,7 @@ async fn prepare(
     start: &WorkflowToolStartArgs,
 ) -> Result<ProgramRunDescriptor, PreparationError> {
     let blobs = api.store().as_ref();
-    let (program, started_at_ms) = pinned_program(api, start).await?;
+    let (program, started_at_ms, context_ref) = pinned_program(api, start).await?;
     let limits = execution_limits(&program)?;
     let source = read_bounded(blobs, &program.source_ref, limits.max_source_bytes)
         .await
@@ -186,6 +190,7 @@ async fn prepare(
         limits,
         requires: program.requires.clone(),
         started_at_ms,
+        context_ref,
     })
 }
 
@@ -260,6 +265,7 @@ async fn store_report(
             descriptor.input_ref.clone(),
             descriptor.catalog_ref.clone(),
         ]);
+        children.extend(descriptor.context_ref.iter().cloned());
     }
     if let Some(scope) = &report.scope {
         for call in scope.calls.values() {
@@ -611,6 +617,7 @@ mod tests {
                 max_in_flight: 20,
                 max_wall_clock_ms: Some(5_000),
                 input_deadline_ms: None,
+                context_retained: 10,
             },
             requires: Vec::new(),
             approvals: None,

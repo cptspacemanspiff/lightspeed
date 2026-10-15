@@ -306,6 +306,7 @@ impl CodeRunner {
                     }
                     None => break codemode::ExecutionReport {
                         output: Vec::new(), selections: Vec::new(), return_value: None,
+                        program_context: None,
                         error: Some(codemode::ExecutionError {
                             kind: codemode::ExecutionErrorKind::Internal,
                             message: "interpreter stopped without a report; consult scope outcomes".into(),
@@ -420,7 +421,20 @@ impl CodeRunner {
         &self,
         code_tools: &CodeToolClient,
         execution_id: &str,
+        latest: Option<CodeToolScopeReport>,
+    ) -> (Option<CodeToolScopeReport>, Option<String>) {
+        self.close_scope(code_tools, execution_id, latest, None)
+            .await
+    }
+
+    /// Close the scope, keeping a program run's context with the close, and
+    /// collect terminal outcomes.
+    pub(crate) async fn close_scope(
+        &self,
+        code_tools: &CodeToolClient,
+        execution_id: &str,
         mut latest: Option<CodeToolScopeReport>,
+        program_context: Option<harness::ProgramContextInput>,
     ) -> (Option<CodeToolScopeReport>, Option<String>) {
         let cleanup = async {
             latest = Some(
@@ -429,6 +443,7 @@ impl CodeRunner {
                         CloseCodeToolScopeRequest {
                             execution_id: execution_id.to_owned(),
                             cancel_pending: true,
+                            program_context: program_context.clone(),
                         },
                         Default::default(),
                     )

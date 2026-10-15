@@ -266,6 +266,7 @@ pub(super) async fn process_pending(
                     CoreAgentCommand::CloseCodeToolScope {
                         execution_id: request.execution_id,
                         cancel: request.cancel_pending,
+                        program_context: request.program_context,
                     },
                 )
                 .await?
@@ -294,6 +295,7 @@ pub(super) async fn process_pending(
             CoreAgentCommand::CloseCodeToolScope {
                 execution_id,
                 cancel: true,
+                program_context: None,
             },
         )
         .await?;
@@ -1239,6 +1241,7 @@ mod tests {
                 cancel_requested: false,
                 calls,
                 completed: Vec::new(),
+                program_context: None,
             },
         );
         state

@@ -5,12 +5,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActiveRun, BlobRef, CallContext, CoreAgentEvent, CoreAgentEventProposal, CoreAgentJoins,
-    CoreAgentState, DomainError, PlanningError, PromiseEvent, PromiseId, PromiseOwnership,
-    PromiseScope, PromiseStatus, REPLY_COMPLETION_KEY, RunEvent, RunFailure, RunFailureKind, RunId,
-    RunSource, RunStatus, SessionId, WorkflowToolBinding, WorkflowToolCompletion,
-    WorkflowToolEvent, WorkflowToolId, WorkflowToolInvocation, WorkflowToolInvocationId,
-    WorkflowToolTarget,
+    ActiveRun, BlobRef, CallContext, ContextEntry, ContextEntryInput, ContextEntryKind,
+    ContextEntrySource, ContextEvent, ContextRemovalReason, CoreAgentEvent, CoreAgentEventProposal,
+    CoreAgentJoins, CoreAgentState, DomainError, PlanningError, PromiseEvent, PromiseId,
+    PromiseOwnership, PromiseScope, PromiseStatus, REPLY_COMPLETION_KEY, RunEvent, RunFailure,
+    RunFailureKind, RunId, RunSource, RunStatus, SessionId, WorkflowToolBinding,
+    WorkflowToolCompletion, WorkflowToolEvent, WorkflowToolId, WorkflowToolInvocation,
+    WorkflowToolInvocationId, WorkflowToolTarget,
 };
 
 /// The system workflow tool that executes a program session's own program.
@@ -274,6 +275,17 @@ pub struct ProgramLimits {
     /// How long a human-input request waits when the call sets no deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_deadline_ms: Option<u64>,
+    /// How many runs' program contexts stay in the active context. Older
+    /// ones leave it when a run completes; the session log keeps them all.
+    #[serde(default = "default_context_retained")]
+    pub context_retained: u32,
+}
+
+pub const DEFAULT_PROGRAM_CONTEXT_RETAINED: u32 = 10;
+pub const MAX_PROGRAM_CONTEXT_RETAINED: u32 = 1000;
+
+fn default_context_retained() -> u32 {
+    DEFAULT_PROGRAM_CONTEXT_RETAINED
 }
 
 impl Default for ProgramLimits {
@@ -283,6 +295,7 @@ impl Default for ProgramLimits {
             max_in_flight: 64,
             max_wall_clock_ms: None,
             input_deadline_ms: None,
+            context_retained: DEFAULT_PROGRAM_CONTEXT_RETAINED,
         }
     }
 }
@@ -294,6 +307,8 @@ impl ProgramLimits {
             || self.max_in_flight > self.max_calls
             || self.max_wall_clock_ms == Some(0)
             || self.input_deadline_ms == Some(0)
+            || self.context_retained == 0
+            || self.context_retained > MAX_PROGRAM_CONTEXT_RETAINED
         {
             return Err(DomainError::InvariantViolation(
                 "program limits are outside their bounded ranges".into(),
@@ -301,6 +316,218 @@ impl ProgramLimits {
         }
         Ok(())
     }
+}
+
+/// Source label of a program context copied into a new session from the
+/// session it succeeds (a routed key's next generation).
+pub const PROGRAM_CONTEXT_SEED_SOURCE: &str = "program_context.seed";
+const PROGRAM_CONTEXT_MEDIA_TYPE: &str = "application/json";
+const PROGRAM_CONTEXT_PREVIEW_MAX_BYTES: usize = 1024;
+
+/// A program context to keep: the JSON value in the content store, and a
+/// short display preview. A run passes one when it closes its scope; it
+/// becomes a context entry only if the run completes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+pub struct ProgramContextInput {
+    pub content_ref: BlobRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+impl ProgramContextInput {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.len() > PROGRAM_CONTEXT_PREVIEW_MAX_BYTES)
+        {
+            return Err(DomainError::InvariantViolation(format!(
+                "program context preview exceeds {PROGRAM_CONTEXT_PREVIEW_MAX_BYTES} bytes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn entry_input(&self) -> ContextEntryInput {
+        ContextEntryInput {
+            origin: None,
+            kind: ContextEntryKind::ProgramState,
+            content: crate::ContentRef {
+                content_ref: self.content_ref.clone(),
+                media_type: Some(PROGRAM_CONTEXT_MEDIA_TYPE.to_owned()),
+                provider_kind: None,
+            },
+            preview: self.preview.clone(),
+            provenance_ref: None,
+            token_estimate: None,
+        }
+    }
+}
+
+/// The newest program context in the active context: what the session's
+/// next run reads as `ctx.context`.
+pub fn program_context(state: &CoreAgentState) -> Option<&ContextEntry> {
+    state
+        .context
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == ContextEntryKind::ProgramState)
+}
+
+/// A program context entry belongs to a program session, is unkeyed JSON,
+/// and comes either from the completing active run or, before any run, from
+/// the session this one succeeds.
+pub(crate) fn validate_program_context_entry(
+    state: &CoreAgentState,
+    entry: &ContextEntry,
+) -> Result<(), DomainError> {
+    let invalid = |message: &str| Err(DomainError::InvariantViolation(message.to_owned()));
+    let from_run = match &entry.source {
+        ContextEntrySource::ProgramRun { run_id } => Some(Some(*run_id)),
+        ContextEntrySource::Runtime { label } if label == PROGRAM_CONTEXT_SEED_SOURCE => Some(None),
+        _ => None,
+    };
+    let is_program_state = entry.kind == ContextEntryKind::ProgramState;
+    let Some(from_run) = from_run else {
+        return if is_program_state {
+            invalid("program context entries come only from program runs or a seed")
+        } else {
+            Ok(())
+        };
+    };
+    if !is_program_state {
+        return invalid("a program run's context entry must be program state");
+    }
+    if !is_program_session(state) {
+        return invalid("program context requires a program session");
+    }
+    if entry.key.is_some()
+        || entry.content.media_type.as_deref() != Some(PROGRAM_CONTEXT_MEDIA_TYPE)
+    {
+        return invalid("program context entries are unkeyed JSON");
+    }
+    match from_run {
+        Some(run_id) => {
+            if state
+                .runs
+                .active
+                .as_ref()
+                .is_none_or(|run| run.run_id != run_id)
+            {
+                return invalid("program context must come from the active run");
+            }
+        }
+        None => {
+            if state.runs.active.is_some() || program_context(state).is_some() {
+                return invalid("a program context seed must precede every run's context");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The context a completing run kept, as the entry to append and the
+/// removals that keep the program's newest `context_retained` entries.
+fn program_context_proposals(
+    state: &CoreAgentState,
+    run_id: RunId,
+    joins: &CoreAgentJoins,
+) -> Result<Vec<CoreAgentEventProposal>, PlanningError> {
+    let Some(context) = state
+        .code_tools
+        .scopes
+        .values()
+        .filter(|scope| scope.spec.owner == crate::ScopeOwner::Run { run_id })
+        .find_map(|scope| scope.program_context.as_ref())
+    else {
+        return Ok(Vec::new());
+    };
+    let retained = state
+        .lifecycle
+        .driver
+        .program()
+        .map_or(DEFAULT_PROGRAM_CONTEXT_RETAINED, |program| {
+            program.limits.context_retained
+        })
+        .max(1) as usize;
+    let entries = super::context::context_entries_from_inputs(
+        state,
+        vec![(
+            None,
+            ContextEntrySource::ProgramRun { run_id },
+            context.entry_input(),
+        )],
+    )?;
+    let mut proposals = vec![CoreAgentEventProposal::new(
+        joins.clone(),
+        CoreAgentEvent::Context(ContextEvent::EntriesApplied {
+            base_revision: state.context.revision,
+            entries,
+        }),
+    )];
+    let existing = state
+        .context
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == ContextEntryKind::ProgramState)
+        .map(|entry| entry.entry_id)
+        .collect::<Vec<_>>();
+    // The new entry counts toward the retained ones.
+    let excess = (existing.len() + 1).saturating_sub(retained);
+    if excess > 0 {
+        proposals.push(CoreAgentEventProposal::new(
+            joins.clone(),
+            CoreAgentEvent::Context(ContextEvent::EntriesRemoved {
+                base_revision: state.context.revision.checked_add(1).ok_or_else(|| {
+                    DomainError::InvariantViolation("context revision exhausted".to_owned())
+                })?,
+                entry_ids: existing.into_iter().take(excess).collect(),
+                reason: ContextRemovalReason::ProgramContextRetention,
+            }),
+        ));
+    }
+    Ok(proposals)
+}
+
+/// Admission of a seed: it copies a predecessor's newest program
+/// context into a program session before its first run.
+pub(crate) fn seed_program_context_proposals(
+    state: &CoreAgentState,
+    context: ProgramContextInput,
+) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
+    context.validate()?;
+    if program_context(state).is_some_and(|current| {
+        current.content.content_ref == context.content_ref
+            && current.source
+                == (ContextEntrySource::Runtime {
+                    label: PROGRAM_CONTEXT_SEED_SOURCE.to_owned(),
+                })
+    }) {
+        return Ok(Vec::new());
+    }
+    let entries = super::context::context_entries_from_inputs(
+        state,
+        vec![(
+            None,
+            ContextEntrySource::Runtime {
+                label: PROGRAM_CONTEXT_SEED_SOURCE.to_owned(),
+            },
+            context.entry_input(),
+        )],
+    )?;
+    // A seed that arrives too late is rejected at admission, not at append.
+    for entry in &entries {
+        validate_program_context_entry(state, entry)?;
+    }
+    Ok(vec![CoreAgentEventProposal::new(
+        CoreAgentJoins::default(),
+        CoreAgentEvent::Context(ContextEvent::EntriesApplied {
+            base_revision: state.context.revision,
+            entries,
+        }),
+    )])
 }
 
 pub fn is_program_session(state: &CoreAgentState) -> bool {
@@ -467,19 +694,24 @@ pub fn plan_next(
                     )
                     .into());
                 };
+                let mut proposals = Vec::new();
                 let event = match promise.status {
                     PromiseStatus::Pending => return Ok(Vec::new()),
-                    PromiseStatus::Resolved => RunEvent::Completed {
-                        run_id: run.run_id,
-                        output: promise
-                            .payload_ref
-                            .clone()
-                            .map(|content_ref| crate::ContentRef {
-                                content_ref,
-                                media_type: Some("application/json".to_owned()),
-                                provider_kind: None,
+                    PromiseStatus::Resolved => {
+                        // A completed run's context is written with its
+                        // completion; any other end leaves the old one.
+                        proposals = program_context_proposals(state, run.run_id, &joins)?;
+                        RunEvent::Completed {
+                            run_id: run.run_id,
+                            output: promise.payload_ref.clone().map(|content_ref| {
+                                crate::ContentRef {
+                                    content_ref,
+                                    media_type: Some("application/json".to_owned()),
+                                    provider_kind: None,
+                                }
                             }),
-                    },
+                        }
+                    }
                     PromiseStatus::Failed | PromiseStatus::Cancelled => RunEvent::Failed {
                         run_id: run.run_id,
                         failure: RunFailure {
@@ -488,7 +720,8 @@ pub fn plan_next(
                         },
                     },
                 };
-                Ok(vec![proposal(CoreAgentEvent::Run(event))])
+                proposals.push(proposal(CoreAgentEvent::Run(event)));
+                Ok(proposals)
             }
         },
         RunStatus::Cancelling => {

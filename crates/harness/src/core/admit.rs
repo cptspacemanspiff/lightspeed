@@ -57,8 +57,13 @@ pub fn admit_command(
         CoreAgentCommand::CloseCodeToolScope {
             execution_id,
             cancel,
-        } => crate::close_code_tool_scope_proposals(state, execution_id, cancel)
+            program_context,
+        } => crate::close_code_tool_scope_proposals(state, execution_id, cancel, program_context)
             .map_err(command_rejection_from_domain),
+        CoreAgentCommand::SeedProgramContext { context } => {
+            crate::core::components::program::seed_program_context_proposals(state, context)
+                .map_err(command_rejection_from_domain)
+        }
         CoreAgentCommand::OpenSession { mut config, driver } => {
             if state.lifecycle.status != CoreAgentStatus::New {
                 return reject(

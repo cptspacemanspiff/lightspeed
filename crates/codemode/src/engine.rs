@@ -32,6 +32,7 @@ struct State {
     calls: u32,
     jobs: u64,
     startup_micros: u64,
+    program_context: Option<Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +230,7 @@ fn run(
         output: std::mem::take(&mut state.output),
         selections: std::mem::take(&mut state.selections),
         return_value,
+        program_context: state.program_context.take(),
         error: execution_error,
         pending_request_ids: state.pending.iter().cloned().collect(),
         metrics: ExecutionMetrics {
@@ -471,6 +473,25 @@ fn run_context<'js>(
         },
     )
     .map_err(|failure| js_error(&ctx, failure))?;
+    // `ctx.setContext`: keeps the program's context for the host. An
+    // oversized value is an ordinary exception the program can catch.
+    let keep_state = state.clone();
+    let keep = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, json: String| -> rquickjs::Result<()> {
+            if json.len() > MAX_PROGRAM_CONTEXT_BYTES {
+                return Err(Exception::throw_range(
+                    &ctx,
+                    &format!("program context exceeds {MAX_PROGRAM_CONTEXT_BYTES} bytes of JSON"),
+                ));
+            }
+            let value = serde_json::from_str(&json)
+                .map_err(|_| Exception::throw_type(&ctx, "program context is not JSON"))?;
+            keep_state.borrow_mut().program_context = Some(value);
+            Ok(())
+        },
+    )
+    .map_err(|failure| js_error(&ctx, failure))?;
     let prelude: Function = ctx
         .eval(PRELUDE)
         .map_err(|failure| js_error(&ctx, failure))?;
@@ -482,7 +503,7 @@ fn run_context<'js>(
         None => String::new(),
     };
     let controls: Object = prelude
-        .call((send, emit, select, catalog, program))
+        .call((send, emit, select, keep, catalog, program))
         .map_err(|failure| js_error(&ctx, failure))?;
     let deliver: Function = controls
         .get("deliver")
