@@ -1,6 +1,7 @@
 use super::*;
 
 use serde_json::json;
+use std::{collections::HashSet, time::Duration};
 
 fn input(source: &str) -> ExecutionInput {
     ExecutionInput {
@@ -1527,4 +1528,183 @@ async fn with_reminders_nudges_on_an_interval_then_reassigns() {
             "opaque-input.reassign",
         ]
     );
+}
+
+/// One recorded completion: what the live host fed the program, in the
+/// order the program received it.
+type Journal = Vec<HostCompletion>;
+
+const CONFORMANCE_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const started = Date.now();
+            const fan = [1, 2, 3, 4, 5, 6].map((n) =>
+                env.test.call({ n, draw: Math.floor(Math.random() * 1000) }));
+            const first = await Promise.race(fan.map((call) =>
+                call.then((value) => value.n, (error) => error.message)));
+            const settled = await Promise.allSettled(fan);
+            const order = [];
+            await Promise.all([7, 8, 9].map((n) => env.test.call({ n }).then((value) => {
+                order.push(value.n);
+                return env.test.call({ n: value.n * 10, after: order.length });
+            })));
+            for (let i = 0; i < 50; i++) await null;
+            return {
+                first,
+                settled: settled.map((entry) => entry.status),
+                order,
+                elapsed: Date.now() - started,
+                draw: Math.random(),
+            };
+        },
+    };
+"#;
+
+fn conformance_outcome(request: &HostRequest) -> Result<Value, HostError> {
+    if request.arguments["n"] == json!(4) {
+        Err(HostError {
+            kind: "tool_failed".into(),
+            message: "four fails".into(),
+            value: None,
+        })
+    } else {
+        Ok(request.arguments.clone())
+    }
+}
+
+/// Drive a program live, completing each request after a pseudo-random
+/// delay drawn from `timing`, and record the completions in the order the
+/// program was sent them.
+async fn run_live(timing: u64) -> (Vec<HostRequest>, ExecutionReport, Journal) {
+    let mut execution = start(
+        program_input(CONFORMANCE_PROGRAM, &["test.call"], SEED),
+        Cancellation::default(),
+    )
+    .unwrap();
+    let sender = execution.completion_sender();
+    let journal = std::sync::Arc::new(std::sync::Mutex::new(Journal::new()));
+    let mut state = timing.max(1);
+    let mut requests = Vec::new();
+    let mut tasks = Vec::new();
+    while let Some(event) = execution.next_event().await {
+        match event {
+            ExecutionEvent::Request(request) => {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let delay = Duration::from_micros(state % 4_000);
+                let (sender, journal) = (sender.clone(), journal.clone());
+                let outcome = conformance_outcome(&request);
+                let request_id = request.request_id.clone();
+                requests.push(request);
+                tasks.push(tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let mut journal = journal.lock().unwrap();
+                    let completion = HostCompletion {
+                        request_id,
+                        outcome,
+                        completed_at_ms: Some(2_000 + journal.len() as u64),
+                    };
+                    if sender.complete(completion.clone()).is_ok() {
+                        journal.push(completion);
+                    }
+                }));
+            }
+            ExecutionEvent::Finished(report) => {
+                for task in tasks {
+                    task.await.unwrap();
+                }
+                let journal = journal.lock().unwrap().clone();
+                return (requests, report, journal);
+            }
+        }
+    }
+    panic!("execution ended without a report");
+}
+
+/// Replay a program against a journal, sending the recorded completions in
+/// order as fast as the completion queue takes them, without waiting for
+/// the program to issue their requests.
+async fn replay(input: ExecutionInput, journal: Journal) -> (Vec<HostRequest>, ExecutionReport) {
+    let mut execution = start(input, Cancellation::default()).unwrap();
+    let sender = execution.completion_sender();
+    let mut journal = journal.into_iter().peekable();
+    let mut requests = Vec::new();
+    loop {
+        while let Some(completion) = journal.peek() {
+            match sender.complete(completion.clone()) {
+                Ok(()) => {
+                    journal.next();
+                }
+                Err(CompletionError::Full | CompletionError::Stopped) => break,
+                Err(error) => panic!("replay completion refused: {error}"),
+            }
+        }
+        let event = tokio::time::timeout(Duration::from_millis(5), execution.next_event()).await;
+        match event {
+            Ok(Some(ExecutionEvent::Request(request))) => requests.push(request),
+            Ok(Some(ExecutionEvent::Finished(report))) => return (requests, report),
+            Ok(None) => panic!("execution ended without a report"),
+            Err(_) => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_replayed_program_makes_the_same_calls_and_returns_the_same_output() {
+    let mut journals = HashSet::new();
+    for timing in 1..=24 {
+        let (live_requests, live, journal) = run_live(timing).await;
+        assert_eq!(live.error, None, "live run {timing} failed");
+        assert_eq!(live_requests.len(), 12);
+        journals.insert(
+            journal
+                .iter()
+                .map(|completion| completion.request_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        let (replayed_requests, replayed) = replay(
+            program_input(CONFORMANCE_PROGRAM, &["test.call"], SEED),
+            journal,
+        )
+        .await;
+        assert_eq!(replayed.error, None, "replay of run {timing} failed");
+        assert_eq!(
+            replayed_requests, live_requests,
+            "run {timing} calls differ"
+        );
+        assert_eq!(
+            replayed.return_value, live.return_value,
+            "run {timing} output differs"
+        );
+    }
+    // The timings must actually have produced different completion orders,
+    // or the test proves nothing about order independence.
+    assert!(
+        journals.len() > 4,
+        "only {} distinct orders",
+        journals.len()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_recorded_completion_for_an_unissued_request_is_nondeterminism() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                await env.test.call({ n: 1 });
+                return "done";
+            },
+        };
+    "#;
+    let journal = vec![HostCompletion {
+        request_id: "call-2".into(),
+        outcome: Ok(Value::Null),
+        completed_at_ms: None,
+    }];
+    let (requests, report) = replay(program_input(source, &["test.call"], SEED), journal).await;
+    assert_eq!(requests.len(), 1);
+    let error = report.error.unwrap();
+    assert_eq!(error.kind, ExecutionErrorKind::Nondeterminism);
+    assert!(error.message.contains("call-2"), "{}", error.message);
 }
