@@ -350,7 +350,7 @@ presentation was active. Add a program-facing contract layer in `crates/tools`:
   `proxyInits`). Here `env` is built by the host from the pinned bindings in
   `PinnedProgram.requires`, one namespace per contract family (`env.vfs.read`,
   `env.web.fetch`, `env.agent.run`, `env.program.run`, `env.mcp.<server>.<tool>`,
-  `env.time.sleep`). Each entry wraps an opaque binding handle from the scope
+  `env.time.sleep`, and from D14 `env.input.request` and `env.state`). Each entry wraps an opaque binding handle from the scope
   (D3); the guest holds no names it can forge. `ctx` carries `say`, `step` and
   the run's `startedAt` (D11). Calls are methods only, arguments by value as
   JSON, no property reads across the boundary. The host never rejects across
@@ -782,6 +782,92 @@ no nondeterministic local work to capture, and a recorded step would shift
   parent can catch it, retry with a different child, or fail in turn.
 - **Both directions.** Agent sessions can call `program.run`.
 
+### D14. Waiting, human input and bots
+
+A program that needs a person's decision should read as straight-line code,
+not as a state machine spread over several runs:
+
+```js
+const findings = await env.agent.run({ agent: "pr-reviewer", input: { pr } });
+const review   = await env.input.request({ ask: "Merge?", findings, assignees });
+if (review.approved) await env.bots.emit({ to: "merge-bot", data: { pr } });
+return { outcome: "handled", summary: review.approved ? "queued for merge" : "rejected" };
+```
+
+**A wait is a suspended run, not a new run.** A run is one invocation: one
+input, one terminal, one output. While the program waits, its run stays
+`Active`, the attempt suspends and drops the interpreter (D7), and only the
+call journal and a pending promise remain. When the answer arrives the program
+is replayed against the journal: recorded calls, including the sub-agent,
+return their recorded outcomes without running again, and the new outcome is
+delivered at the `await`. This needs D8's determinism contract and pins the
+run to the program revision it started with. A finished run is never resumed:
+a follow-up months later (a new comment on the issue) is a new run (below).
+
+**Human input is a promise-returning tool, not an incoming event.** There are
+two ways an answer can reach a session, and only one of them works while a run
+waits:
+
+| Arrives as | Path | Blocked by the waiting run? |
+|---|---|---|
+| A bot event (webhook, chat message) | bot controller → the session's run queue | Yes. It queues behind the run it should resume. |
+| A promise resolution (a tool's reply) | delivered to that promise by id | No. This is how a run makes progress. |
+
+So `input.request` is a workflow tool with a joined reply promise, like
+`agent_run` or `program-execute`. Its workflow presents the request (the
+Lightspeed web inbox first; Slack, email or a GitHub review request as later
+backends), waits durably for the answer, and resolves the reply. The program
+sees the answer as the call's outcome. The contract (D4) carries:
+
+- `ask`, a payload to show, an optional response schema, and assignees.
+- A deadline with an on-expiry policy: fail the call (a typed error the
+  program can catch), or escalate to other assignees. There is no unbounded
+  wait: the default deadline comes from `FeaturesConfig.program`.
+- Reassignment while pending, so a reviewer on leave can be replaced without
+  touching the run.
+
+Approval parking (D3 `ApprovalPolicy::Park`) is the same mechanism: the
+approval decision is a session-owned promise and a parked call is a slow
+call. Both land together.
+
+**Bots and waiting runs.** Today a bot lane waits up to
+`BOT_EVENT_TERMINAL_TIMEOUT` (24 hours) for a run terminal and then records
+`run_failed`, even if the run is still legitimately waiting. Changes:
+
+- A program run that suspends on an `input.request` (or a parked approval)
+  emits a non-terminal **waiting** notification to `notify_on_terminal`
+  holders. A new run-notification body, so a workflow-contract change.
+- The bot records the delivery `deferred` (its existing meaning: waiting on
+  something), releases the lane, and stops the terminal timeout for that run.
+  The eventual terminal updates the delivery's outcome and sends any receipt.
+- The session stays busy while its run waits: one active run per session.
+  With `perKey` and `perEvent` routing that blocks only that key; with the
+  main session it blocks the whole bot. Bots whose profile has a program and
+  whose triggers route to the main session should warn when a program can
+  wait. Later events for the waiting key follow a per-trigger **while-waiting**
+  policy: `queue` (default) or `supersede` (cancel the waiting run and start
+  a fresh one, for example a new push to a PR under review).
+- Delivering a bot event *into* a waiting run (the program analogue of
+  steering) is not needed when answers come through `input.request`. Keep it
+  out of scope until a use case needs it.
+
+**A program run's verdict comes from its output.** An agent resolves a
+delivery through `bot_event_resolve`, because the controller cannot read
+free text. A program's output is already structured: if it has
+`{ outcome, summary }` with a model-decision outcome (`handled`, `deferred`,
+`ignored`, `blocked`), that is the delivery's outcome; a completed run without
+one is `handled`. A program may still call `bot_event_resolve`; an explicit
+resolve wins.
+
+**Follow-up runs and key-scoped state.** A program session keeps nothing
+between runs: a second run gets only its own input. A follow-up months later
+therefore rebuilds its view from the outside world (the issue thread, labels)
+or from state the program stored. Add an `env.state` contract: small JSON
+documents keyed per session key (a routed session's key, or the main
+session), stored in the session's universe, readable and writable by the
+program, and recorded as ordinary calls so replay is deterministic. Storage
+backs onto the VFS or a small table; that choice is open.
+
 ## API surface
 
 - **Session creation:** `SessionStartParams` / `ManagedSessionStartParams`
@@ -800,9 +886,13 @@ no nondeterministic local work to capture, and a recorded step would shift
 - **Regenerate:** `cargo run -p api --bin export-schema`, the SDK and
   configurator-mcp generators, the config and method-role scripts, and
   `cargo run -p temporal-workflow --bin export-workflow-contract`.
-- **Bots** need no new API. A bot with a program profile gets a program session
-  from `ensure_session`, and `start_run`
-  (`temporal-runtime/src/bots/sessions.rs:593-629`) sends `Program { input }`.
+- **Bots** need no new public API for program runs (done in Phase 2,
+  `d235d146`). A bot whose profile has a program creates its sessions from the
+  named profile; `start_run` sends `Program { input }` with
+  `{ events: [{ id, seq, event: <stored envelope>, media }] }`; steer and append
+  deliveries queue on program sessions; a profile whose program differs from a
+  session's pin rotates that session. D14 adds the waiting notification, the
+  per-trigger while-waiting policy and output verdicts.
 
 ## Phases
 
@@ -829,16 +919,29 @@ regenerated contracts).
      Phase 4 adds replay.
    - Tests: harness replay tests for a program run with calls, including a joined
      child and an `await`, plus fork rejection. Live Temporal suite, serialised.
-3. **Canonical contracts** (D4).
+   - **Follow-up before Phase 3: routed program sessions keep a stale pin.**
+     See "Known issue: routed program sessions keep a stale pin" below.
+3. **Canonical contracts and human input** (D4, D14).
    - Changes: digest-pinned contracts for built-ins, including `time.sleep`;
      MCP schema pinning; `requires` admission at creation and at every attempt;
      the `env`/`ctx` guest surface with the host-owned globals from D8.
+   - D14: the `input.request` workflow tool with the web inbox backend,
+     deadlines, escalation and reassignment; approval `Park`; the waiting run
+     notification and its bot handling (`deferred`, no terminal timeout while
+     waiting, while-waiting policy); verdicts from program output; `env.state`.
+   - Until Phase 4 a wait holds a live attempt, so it is bounded by the
+     attempt's wall clock (`max_wall_clock_ms`, 10 minutes by default) and a
+     worker loss fails the run. Phase 3 tests use short waits; multi-day waits
+     need Phase 4's suspension.
 4. **Durable execution** (D7, D8, D9).
    - Changes: indexed retention; canonical argument digests; retryable
      attempts; the hold window, suspension and wake; `ProgramRunWorkflow`
      continue-as-new; the executor protocol; QuickJS durable mode with
      quiescent, log-order delivery.
-   - Tests: conformance tests, and a live kill-and-resume test.
+   - Tests: conformance tests, a live kill-and-resume test, and a live
+     multi-attempt human-input test: suspend on `input.request`, kill every
+     worker, answer, and check the run resumes without re-running the
+     sub-agent.
 5. **Composition** (D13).
    - Changes: the child-session workflow; `program.run`/`program.spawn`; schemas;
      program-owned fan-out budgets; `env` capability passing; the grant subset
@@ -855,6 +958,44 @@ regenerated contracts).
 
 Phases 1–6 cover the issue-pipeline bots. Phase 7 delivers "hand it to an AI to
 fix".
+
+### Known issue: routed program sessions keep a stale pin
+
+Found 2026-10-14, after `d235d146`. To fix before Phase 3.
+
+- **Symptom.** A bot on a program profile with `perKey` (or `perEvent`)
+  routing keeps running the program revision each routed session was created
+  with, for as long as that session stays open. The default
+  `routedSessionCloseAfterMs` is never, so a PR or issue thread opened months
+  ago still runs the old program while new keys get the current one. The main
+  session is not affected: it rotates on a profile revision change.
+- **Cause.** `ensure_routed_session`
+  (`temporal-workflow/src/workflows/bots/controller/lanes.rs`) returns early
+  for a session the controller already tracks (`observe_routed_session`), so
+  `ensure_session` never runs `apply_profile` for it, and the pin check in
+  `check_profile_driver` (`gateway/service/profiles.rs`) never sees the new
+  revision. The comment there states the intent: "Routed sessions take the
+  profile at creation". That is right for agent bots, whose thread
+  conversation should survive a profile edit. A program session has no
+  conversation to keep, so a stale pin only does harm.
+- **Fix.**
+  - Record the profile revision each routed session was ensured under
+    (`ManagedSession.profile_revision`, `serde(default)`, carried across
+    continue-as-new).
+  - When the bot's sessions are program sessions (`program_sessions`) and a
+    known routed session's revision differs from the controller's applied
+    revision, run the ordinary ensure for it. `apply_profile` refuses the
+    differing pin, the result is `ProfileUnapplicable`, and the existing
+    rotation moves the key to its next generation (`…-g2`) with the new
+    program. The key, and so routing and coalescing, is unchanged.
+  - Only an idle session rotates. A run that is active or waiting (D14) keeps
+    its pinned program until it ends; the rotation happens on the next
+    delivery after that. Agent bots keep today's behaviour.
+- **Tests.** A controller unit test (a stale revision on a known program
+  session triggers an ensure; on an agent session it does not), and a
+  `bots_live` test: a `perKey` program bot handles an event for key `a`, the
+  profile gets a new program revision, the next event for `a` runs the new
+  program in `…-g2`.
 
 ## Open questions
 
@@ -880,7 +1021,15 @@ fix".
   subset check extend to agent children?
 - **Env handles** (D13): is a child's `env` recorded as canonical contract ids,
   or as the parent's binding handles resolved again at child admission?
-- **Approval parking** (D3): which phase gets `Park`, and does the TTL live on
-  the program profile or on `FeaturesConfig.program`?
+- **Approval parking** (D3, D14): `Park` lands in Phase 3 with
+  `input.request`. Does the default deadline live on the program profile or on
+  `FeaturesConfig.program`?
+- **Input backends** (D14): after the web inbox, which come first: chat
+  channels, email, or a GitHub review request? Does a backend answer by
+  calling a public API method, or by its own workflow-tool emission?
+- **While-waiting policy** (D14): is `queue | supersede` per trigger enough, or
+  does `supersede` need a filter (only on a new commit, not on a comment)?
+- **Key-scoped state** (D14): VFS-backed or a small table; size limits; and
+  whether agent sessions should get it too.
 - **Inspect grants** (D10): scoped to the subtree, to bot-owned sessions, or to
   explicit session ids?
