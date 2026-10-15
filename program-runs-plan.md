@@ -361,9 +361,10 @@ presentation was active. Add a program-facing contract layer in `crates/tools`:
   `proxyInits`). Here `env` is built by the host from the pinned bindings in
   `PinnedProgram.requires`, one namespace per contract family (`env.vfs.read`,
   `env.web.fetch`, `env.agent.run`, `env.program.run`, `env.mcp.<server>.<tool>`,
-  `env.time.sleep`, and from D14 `env.input.request` and `env.state`). Each entry wraps an opaque binding handle from the scope
-  (D3); the guest holds no names it can forge. `ctx` carries `say`, `step` and
-  the run's `startedAt` (D11). Calls are methods only, arguments by value as
+  `env.time.sleep`, and from D14 `env.input.request`). Each entry wraps an opaque binding handle from the scope
+  (D3); the guest holds no names it can forge. `ctx` carries `say`, `step`,
+  the run's `startedAt` (D11), and from D14 the program context
+  (`ctx.context`, `ctx.setContext`). Calls are methods only, arguments by value as
   JSON, no property reads across the boundary. The host never rejects across
   the bridge: a pause, a failed outcome or a host error come back as a control
   value and the generated wrapper throws locally, so the program's own
@@ -917,12 +918,28 @@ resolve wins.
 **Follow-up runs and key-scoped state.** A program session keeps nothing
 between runs: a second run gets only its own input. A follow-up months later
 therefore rebuilds its view from the outside world (the issue thread, labels)
-or from state the program stored. Add an `env.state` contract: small JSON
-documents keyed per session key (a routed session's key, or the main
-session), stored in the session's universe, readable and writable by the
-program, and recorded as ordinary calls so replay is deterministic. Storage
-is a small table (transactional, per key, size-capped), not the VFS; a
-program that wants a readable document writes it to a workspace instead.
+or from state the program stored. A program session's equivalent of an
+agent's context is a **program context**: a JSON document the program
+keeps between runs. A run reads the newest as `ctx.context` (read when the
+run starts and recorded with its inputs, so replay sees the same value)
+and sets its own with a helper (`ctx.setContext(value)`); the runtime
+appends it when the run completes, so a failed run leaves the previous
+context in place. Each run's context is its own ordinary context entry (a
+`ProgramState` kind, JSON content in the content store, tagged with the
+run), so the active context holds a history of recent runs' states and a
+later fork can start from the end of any retained run. Retention is the
+program's compaction: after each run completes, older `ProgramState`
+entries beyond `ProgramLimits.context_retained` (default 10) leave the
+active context; the session log keeps them all. Nothing is summarized,
+since each entry is already complete. This mirrors agent compaction (a
+per-session policy with a default, applied automatically), measured in
+entries and bytes because a program has no model context window. One
+entry is capped at 64 KiB. It shows wherever context does (session view,
+events). A routed key moves to a new session (its next generation) when
+its program changes; the new session opens with the newest program
+context seeded, as profile instructions are published at open. Not the
+VFS: a program that wants a readable document writes it to a workspace
+instead.
 
 ## API surface
 
@@ -987,7 +1004,9 @@ regenerated contracts).
      `Park` with the same settings; the `withReminders` helper library; the
      waiting run notification and its bot handling (`deferred`, no terminal
      timeout while waiting, `queue`/`supersede`); verdicts from program output;
-     `env.state` on a small table.
+     the program context (`ctx.context` / `ctx.setContext`, one context
+     entry per run written at completion, the last `context_retained`
+     (default 10) kept active, carried across a routed key's generations).
    - Until Phase 4 a wait holds a live attempt, so it is bounded by the
      attempt's wall clock (`max_wall_clock_ms`, 10 minutes by default) and a
      worker loss fails the run. Phase 3 tests use short waits; multi-day waits
@@ -1089,7 +1108,8 @@ with both tests.
 - **Input backends** (D14): after the web inbox, which come first: chat
   channels, email, or a GitHub review request? Does a backend answer by
   calling a public API method, or by its own workflow-tool emission?
-- **Key-scoped state** (D14): size limits, and whether agent sessions should
-  get it too.
+- **Program context** (D14): may operators replace or clear a session's
+  program context through the API (to repair a stuck key), or is it
+  written only by runs?
 - **Inspect grants** (D10): scoped to the subtree, to bot-owned sessions, or to
   explicit session ids?
