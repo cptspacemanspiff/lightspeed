@@ -1662,6 +1662,40 @@
       ],
       "type": "object"
     },
+    "AgentApiOutcomeOfInboxRequestListResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/InboxRequestListResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "AgentApiOutcomeOfInboxRequestResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/InboxRequestResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
     "AgentApiOutcomeOfInitializeResponse": {
       "properties": {
         "notifications": {
@@ -11050,6 +11084,103 @@
       ],
       "type": "object"
     },
+    "InboxRequestAnswerParams": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "description": "Approve or reject the request.",
+          "type": "boolean"
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "value": {
+          "description": "An approval's value: required exactly when the request has a\nresponse schema, and it must satisfy it. A rejection has none."
+        }
+      },
+      "required": [
+        "requestId",
+        "approved"
+      ],
+      "type": "object"
+    },
+    "InboxRequestListParams": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "At most this many requests, newest first. Defaults to 50.",
+          "format": "uint32",
+          "maximum": 200,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "Only requests from this session.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InputRequestStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only requests in this state; every state when omitted."
+        }
+      },
+      "type": "object"
+    },
+    "InboxRequestListResponse": {
+      "properties": {
+        "requests": {
+          "items": {
+            "$ref": "#/definitions/InputRequestView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "requests"
+      ],
+      "type": "object"
+    },
+    "InboxRequestReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId"
+      ],
+      "type": "object"
+    },
+    "InboxRequestResponse": {
+      "properties": {
+        "request": {
+          "$ref": "#/definitions/InputRequestView"
+        }
+      },
+      "required": [
+        "request"
+      ],
+      "type": "object"
+    },
     "InitializeParams": {
       "properties": {
         "capabilities": {
@@ -11310,6 +11441,163 @@
           "type": "object"
         }
       ]
+    },
+    "InputRequestAnswer": {
+      "description": "The recorded answer to a request.",
+      "properties": {
+        "answeredAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "answeredBy": {
+          "$ref": "#/definitions/Attribution"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": true
+      },
+      "required": [
+        "approved",
+        "answeredBy",
+        "answeredAtMs"
+      ],
+      "type": "object"
+    },
+    "InputRequestStatus": {
+      "description": "Where a human-input request stands. Only a pending request can be\nanswered; the others are final.",
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "answered"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The deadline passed unanswered, after any escalation.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The waiting program call was withdrawn.",
+          "type": "string"
+        }
+      ]
+    },
+    "InputRequestView": {
+      "description": "A question a program run asked people, as the universe's inbox shows it.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InputRequestAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ask": {
+          "type": "string"
+        },
+        "assignees": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "closedAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deadlineAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "escalateTo": {
+          "description": "Who takes the request over, once, if its deadline passes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "escalated": {
+          "description": "Whether the request has been escalated to `escalateTo`.",
+          "type": "boolean"
+        },
+        "lastRemindedAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "payload": true,
+        "remindAfterMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reminderCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "responseSchema": {
+          "description": "JSON Schema an approval's `value` must satisfy. Without one, an\nanswer is an approval or a rejection with an optional comment."
+        },
+        "runId": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessionId": {
+          "description": "The program session whose run is waiting.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/InputRequestStatus"
+        }
+      },
+      "required": [
+        "requestId",
+        "sessionId",
+        "runId",
+        "ask",
+        "assignees",
+        "escalated",
+        "status",
+        "createdAtMs",
+        "deadlineAtMs",
+        "reminderCount"
+      ],
+      "type": "object"
     },
     "JsonRpcError": {
       "properties": {
@@ -12296,7 +12584,7 @@
         },
         {
           "const": "session",
-          "description": "`session/*`, `blobs/read` and `blobs/has`.",
+          "description": "`session/*`, `blobs/read`, `blobs/has` and the human-input inbox.",
           "type": "string"
         },
         {
@@ -13327,6 +13615,16 @@
       "additionalProperties": false,
       "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
       "properties": {
+        "inputDeadlineMs": {
+          "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+          "format": "uint64",
+          "maximum": 2592000000,
+          "minimum": 1000,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxCalls": {
           "format": "uint32",
           "minimum": 1,

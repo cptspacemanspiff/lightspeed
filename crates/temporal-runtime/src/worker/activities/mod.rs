@@ -37,6 +37,7 @@ mod common;
 mod compaction;
 mod context_refresh;
 mod environment_jobs;
+pub(crate) mod input_requests;
 mod llm;
 mod transcriptions;
 pub use context_refresh::subagent_catalog_snapshot;
@@ -299,6 +300,14 @@ mod tests {
         assert_eq!(
             WorkerActivities::subagent_close.name(),
             temporal_workflow::WorkflowActivities::subagent_close.name()
+        );
+        assert_eq!(
+            WorkerActivities::input_request_open.name(),
+            temporal_workflow::WorkflowActivities::input_request_open.name()
+        );
+        assert_eq!(
+            WorkerActivities::input_request_step.name(),
+            temporal_workflow::WorkflowActivities::input_request_step.name()
         );
     }
 
@@ -757,6 +766,26 @@ impl WorkerActivities {
         workflow_tools::cancel_execution(state.workflow_tool_executions(), request).await
     }
 
+    #[activity(name = temporal_workflow::ACTIVITY_INPUT_REQUEST_OPEN)]
+    pub async fn input_request_open(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        request: temporal_workflow::InputRequestOpenActivityRequest,
+    ) -> Result<temporal_workflow::InputRequestOpenActivityResult, ActivityError> {
+        let state = self.state_for_universe(request.start.universe_id).await?;
+        input_requests::open(inbox_store(&state)?, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_INPUT_REQUEST_STEP)]
+    pub async fn input_request_step(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        request: temporal_workflow::InputRequestStepActivityRequest,
+    ) -> Result<temporal_workflow::InputRequestStepResult, ActivityError> {
+        let state = self.state_for_universe(request.universe_id).await?;
+        input_requests::step(inbox_store(&state)?, request).await
+    }
+
     #[activity(name = ACTIVITY_SUBAGENT_PREPARE)]
     pub async fn subagent_prepare(
         self: Arc<Self>,
@@ -797,6 +826,13 @@ fn preparation_activity_result<T>(
         }
         other => Ok(other),
     }
+}
+
+fn inbox_store(state: &ActivityState) -> Result<&PgStore, ActivityError> {
+    state
+        .preparation_store
+        .as_deref()
+        .ok_or_else(|| common::activity_error(anyhow::anyhow!("the inbox store is not configured")))
 }
 
 fn preparation_service(

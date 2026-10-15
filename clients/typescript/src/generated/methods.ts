@@ -60,6 +60,9 @@ export const METHODS = [
   "transcriptions/cancel",
   "models/defaults/read",
   "models/defaults/put",
+  "inbox/requests/list",
+  "inbox/requests/read",
+  "inbox/requests/answer",
   "models/list",
   "profiles/create",
   "profiles/read",
@@ -477,6 +480,24 @@ export const METHOD_INFO = {
     access: {"action":"configure_resource","kind":"universe"},
     summary: "Set a universe model default",
     description: "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery.",
+  },
+  "inbox/requests/list": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "List human-input requests",
+    description: "Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.",
+  },
+  "inbox/requests/read": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "Read a human-input request",
+    description: "Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.",
+  },
+  "inbox/requests/answer": {
+    scope: "universe",
+    access: {"action":"control_session","kind":"universe"},
+    summary: "Answer a human-input request",
+    description: "Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.",
   },
   "models/list": {
     scope: "universe",
@@ -1497,6 +1518,33 @@ export interface MethodMap {
   "models/defaults/put": {
     params: Api.ModelDefaultsPutParams;
     result: Api.AgentApiOutcomeOfModelDefaultsResponse;
+  };
+  /**
+   * List human-input requests
+   *
+   * Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.
+   */
+  "inbox/requests/list": {
+    params: Api.InboxRequestListParams;
+    result: Api.AgentApiOutcomeOfInboxRequestListResponse;
+  };
+  /**
+   * Read a human-input request
+   *
+   * Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.
+   */
+  "inbox/requests/read": {
+    params: Api.InboxRequestReadParams;
+    result: Api.AgentApiOutcomeOfInboxRequestResponse;
+  };
+  /**
+   * Answer a human-input request
+   *
+   * Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.
+   */
+  "inbox/requests/answer": {
+    params: Api.InboxRequestAnswerParams;
+    result: Api.AgentApiOutcomeOfInboxRequestResponse;
   };
   /**
    * Discover available models
@@ -2712,6 +2760,30 @@ export const rpc = {
    */
   modelsDefaultsPut(client: RpcCaller, params: Api.ModelDefaultsPutParams): Promise<Api.AgentApiOutcomeOfModelDefaultsResponse> {
     return client.call("models/defaults/put", params);
+  },
+  /**
+   * List human-input requests
+   *
+   * Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.
+   */
+  inboxRequestsList(client: RpcCaller, params: Api.InboxRequestListParams): Promise<Api.AgentApiOutcomeOfInboxRequestListResponse> {
+    return client.call("inbox/requests/list", params);
+  },
+  /**
+   * Read a human-input request
+   *
+   * Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.
+   */
+  inboxRequestsRead(client: RpcCaller, params: Api.InboxRequestReadParams): Promise<Api.AgentApiOutcomeOfInboxRequestResponse> {
+    return client.call("inbox/requests/read", params);
+  },
+  /**
+   * Answer a human-input request
+   *
+   * Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.
+   */
+  inboxRequestsAnswer(client: RpcCaller, params: Api.InboxRequestAnswerParams): Promise<Api.AgentApiOutcomeOfInboxRequestResponse> {
+    return client.call("inbox/requests/answer", params);
   },
   /**
    * Discover available models

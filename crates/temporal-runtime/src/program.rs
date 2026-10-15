@@ -329,7 +329,8 @@ impl ProgramRunner {
                                 outcome,
                                 descriptor.limits.max_result_bytes,
                             )
-                            .await,
+                            .await
+                            .map_err(structured_failure),
                             completed_at_ms: outcome.completed_at_ms,
                         };
                         if let Err(error) = deliver(completion) {
@@ -420,6 +421,37 @@ impl ProgramRunner {
     }
 }
 
+/// A tool failure whose error is a `{ code, message }` document (an
+/// input request's `deadline_exceeded`, say) reaches the program with
+/// `code` as the error's kind, so it can be caught by kind.
+fn structured_failure(error: HostError) -> HostError {
+    if error.kind != "tool_failed" {
+        return error;
+    }
+    let Ok(document) = serde_json::from_str::<Value>(&error.message) else {
+        return error;
+    };
+    match (
+        document.get("code").and_then(Value::as_str),
+        document.get("message").and_then(Value::as_str),
+    ) {
+        (Some(code), Some(message)) if is_failure_code(code) => HostError {
+            kind: code.to_owned(),
+            message: message.to_owned(),
+            value: error.value,
+        },
+        _ => error,
+    }
+}
+
+fn is_failure_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 /// A program's catalog: the scope's bindings for the contracts the program
 /// was pinned to, named by contract. Fails when the scope no longer binds a
 /// pinned contract at its digest.
@@ -488,6 +520,27 @@ mod tests {
         harness::ContractBinding {
             contract: contract.into(),
             digest: digest.into(),
+        }
+    }
+
+    #[test]
+    fn structured_tool_failures_surface_their_code_as_the_kind() {
+        let failure = |message: &str| HostError {
+            kind: "tool_failed".into(),
+            message: message.into(),
+            value: None,
+        };
+        let deadline = structured_failure(failure(
+            r#"{"code":"deadline_exceeded","message":"not answered in time"}"#,
+        ));
+        assert_eq!(deadline.kind, "deadline_exceeded");
+        assert_eq!(deadline.message, "not answered in time");
+        for unchanged in [
+            "plain text",
+            r#"{"code":"Bad Code","message":"x"}"#,
+            r#"{"code":"x"}"#,
+        ] {
+            assert_eq!(structured_failure(failure(unchanged)).kind, "tool_failed");
         }
     }
 

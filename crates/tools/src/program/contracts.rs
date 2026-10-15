@@ -29,8 +29,8 @@ macro_rules! contracts {
 }
 
 /// Every contract, one tool each. Built-in tools keep their logical ids; the
-/// promise controls take the `promise` family. Workflow-backed tools (jobs,
-/// sub-agents) have no contracts yet.
+/// promise controls take the `promise` family. Of the workflow-backed tools
+/// only `input.request` has a contract yet (jobs and sub-agents do not).
 const CONTRACTS: &[ContractDefinition] = contracts! {
     "blob.info" => "blob.info",
     "blob.read" => "blob.read",
@@ -65,6 +65,7 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "promise.cancel" => "concurrency.cancel",
     "promise.detach" => "concurrency.detach",
     "time.sleep" => crate::concurrency::TIME_SLEEP_TOOL_ID,
+    "input.request" => crate::human_input::INPUT_REQUEST_TOOL_ID,
 };
 
 /// Every contract a program can require, in name order.

@@ -1550,6 +1550,14 @@ export type EnvironmentRegistrationKeyStatusView = "active" | "revoked" | "expir
  */
 export type EnvironmentRegistrationSecretView = string;
 /**
+ * Where a human-input request stands. Only a pending request can be
+ * answered; the others are final.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InputRequestStatus".
+ */
+export type InputRequestStatus = ("pending" | "answered") | "expired" | "cancelled";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "McpServerAuthPolicy".
  */
@@ -5594,6 +5602,89 @@ export interface EnvironmentTemplateReadResponse {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfInboxRequestListResponse".
+ */
+export interface AgentApiOutcomeOfInboxRequestListResponse {
+  notifications?: AgentNotification[];
+  result: InboxRequestListResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InboxRequestListResponse".
+ */
+export interface InboxRequestListResponse {
+  requests: InputRequestView[];
+}
+/**
+ * A question a program run asked people, as the universe's inbox shows it.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InputRequestView".
+ */
+export interface InputRequestView {
+  answer?: InputRequestAnswer | null;
+  ask: string;
+  assignees: string[];
+  closedAtMs?: number | null;
+  createdAtMs: number;
+  deadlineAtMs: number;
+  /**
+   * Who takes the request over, once, if its deadline passes.
+   */
+  escalateTo?: string[];
+  /**
+   * Whether the request has been escalated to `escalateTo`.
+   */
+  escalated: boolean;
+  lastRemindedAtMs?: number | null;
+  payload?: unknown;
+  remindAfterMs?: number | null;
+  reminderCount: number;
+  requestId: string;
+  /**
+   * JSON Schema an approval's `value` must satisfy. Without one, an
+   * answer is an approval or a rejection with an optional comment.
+   */
+  responseSchema?: {
+    [k: string]: unknown;
+  };
+  runId: number;
+  /**
+   * The program session whose run is waiting.
+   */
+  sessionId: string;
+  status: InputRequestStatus;
+}
+/**
+ * The recorded answer to a request.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InputRequestAnswer".
+ */
+export interface InputRequestAnswer {
+  answeredAtMs: number;
+  answeredBy: Attribution;
+  approved: boolean;
+  comment?: string | null;
+  value?: unknown;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfInboxRequestResponse".
+ */
+export interface AgentApiOutcomeOfInboxRequestResponse {
+  notifications?: AgentNotification[];
+  result: InboxRequestResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InboxRequestResponse".
+ */
+export interface InboxRequestResponse {
+  request: InputRequestView;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentApiOutcomeOfInitializeResponse".
  */
 export interface AgentApiOutcomeOfInitializeResponse {
@@ -6063,6 +6154,11 @@ export interface ProgramSpec {
  * via the `definition` "ProgramLimitsInput".
  */
 export interface ProgramLimitsInput {
+  /**
+   * How long a human-input request waits when the call sets no deadline:
+   * 1 second to 30 days, 7 days when omitted.
+   */
+  inputDeadlineMs?: number | null;
   maxCalls?: number | null;
   maxInFlight?: number | null;
   maxWallClockMs?: number | null;
@@ -7941,6 +8037,50 @@ export interface EnvironmentTemplateListParams {
 export interface EnvironmentTemplateReadParams {
   bindingId: string;
   templateId: string;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InboxRequestAnswerParams".
+ */
+export interface InboxRequestAnswerParams {
+  /**
+   * Approve or reject the request.
+   */
+  approved: boolean;
+  comment?: string | null;
+  requestId: string;
+  /**
+   * An approval's value: required exactly when the request has a
+   * response schema, and it must satisfy it. A rejection has none.
+   */
+  value?: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InboxRequestListParams".
+ */
+export interface InboxRequestListParams {
+  /**
+   * At most this many requests, newest first. Defaults to 50.
+   */
+  limit?: number | null;
+  /**
+   * Only requests from this session.
+   */
+  session?: string | null;
+  /**
+   * Only requests in this state; every state when omitted.
+   */
+  status?: InputRequestStatus | null;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InboxRequestReadParams".
+ */
+export interface InboxRequestReadParams {
+  requestId: string;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

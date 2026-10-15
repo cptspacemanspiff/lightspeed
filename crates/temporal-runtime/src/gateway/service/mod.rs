@@ -16,6 +16,7 @@ mod environments;
 mod errors;
 mod event_history;
 mod github_api;
+mod inbox_api;
 mod input;
 mod mcp_api;
 pub(crate) mod mcp_discovery;
@@ -2103,6 +2104,27 @@ impl AgentApiService for GatewayAgentApi {
         params: TranscriptionCancelParams,
     ) -> Result<AgentApiOutcome<TranscriptionResponse>, AgentApiError> {
         self.cancel_transcription_impl(params).await
+    }
+
+    async fn list_inbox_requests(
+        &self,
+        params: api::InboxRequestListParams,
+    ) -> Result<AgentApiOutcome<api::InboxRequestListResponse>, AgentApiError> {
+        self.list_inbox_requests_impl(params).await
+    }
+
+    async fn read_inbox_request(
+        &self,
+        params: api::InboxRequestReadParams,
+    ) -> Result<AgentApiOutcome<api::InboxRequestResponse>, AgentApiError> {
+        self.read_inbox_request_impl(params).await
+    }
+
+    async fn answer_inbox_request(
+        &self,
+        params: api::InboxRequestAnswerParams,
+    ) -> Result<AgentApiOutcome<api::InboxRequestResponse>, AgentApiError> {
+        self.answer_inbox_request_impl(params).await
     }
 
     async fn read_model_defaults(

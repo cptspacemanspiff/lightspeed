@@ -215,9 +215,13 @@ async fn read_json(store: &store_pg::PgStore, reference: &str) -> anyhow::Result
     )?)
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires local Temporal and PostgreSQL; run serially"]
-async fn program_session_runs_its_pinned_program_and_returns_its_output() -> anyhow::Result<()> {
+type ProgramTestBody = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>;
+
+/// Run `body` against a gateway with a session worker and a code worker on
+/// fresh queues, with no model.
+async fn with_program_workers(
+    body: impl FnOnce(Arc<GatewayAgentApi>, Arc<store_pg::PgStore>, SessionId) -> ProgramTestBody,
+) -> anyhow::Result<()> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -249,7 +253,25 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
             let shutdown = worker.shutdown_handle();
             let worker_run = worker.run();
             tokio::pin!(worker_run);
-            let body = Box::pin(async {
+            let result = tokio::select! {
+                result = body(api, store, session_id) => result,
+                result = &mut worker_run => Err(anyhow::anyhow!("code worker stopped early: {result:?}")),
+            };
+            shutdown();
+            let stopped = tokio::time::timeout(Duration::from_secs(15), &mut worker_run).await;
+            result?;
+            stopped.map_err(|_| anyhow::anyhow!("code worker did not stop"))??;
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn program_session_runs_its_pinned_program_and_returns_its_output() -> anyhow::Result<()> {
+    with_program_workers(|api, store, session_id| {
+        Box::pin(async move {
                 let profile_id =
                     api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
                 api.create_profile(api::ProfileCreateParams {
@@ -380,18 +402,184 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                     profile_id: failing_id,
                 })
                 .await?;
-                Ok::<_, anyhow::Error>(())
+                Ok(())
+        })
+    })
+    .await
+}
+
+const ASKING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            if (input.claim === "unanswered") {
+                try {
+                    await env.input.request({ ask: "Anyone?", deadline_ms: 1000, escalate_to: ["lead"] });
+                    return { claim: input.claim, slept: 0, kind: "answered" };
+                } catch (error) {
+                    return { claim: input.claim, slept: 0, kind: error.kind };
+                }
+            }
+            const answer = await env.input.request({
+                ask: "Merge " + input.claim + "?",
+                payload: { pr: input.claim },
+                assignees: ["alice"],
+                response_schema: {
+                    type: "object",
+                    required: ["label"],
+                    properties: { label: { type: "string" } },
+                },
             });
-            let result = tokio::select! {
-                result = body => result,
-                result = &mut worker_run => Err(anyhow::anyhow!("code worker stopped early: {result:?}")),
+            return { claim: input.claim, slept: 0, answer };
+        }
+    };
+"#;
+
+/// The session's requests in the inbox, once `count` exist.
+async fn wait_for_requests(
+    api: &GatewayAgentApi,
+    session_id: &SessionId,
+    count: usize,
+) -> anyhow::Result<Vec<api::InputRequestView>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = api
+            .list_inbox_requests(api::InboxRequestListParams {
+                session: Some(session_id.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .result
+            .requests;
+        if requests.len() >= count {
+            return Ok(requests);
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "no input request appeared for {session_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_waits_for_a_human_answer_and_catches_an_expired_request() -> anyhow::Result<()> {
+    with_program_workers(|api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, ASKING_PROGRAM, &[("input.request", None)]),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // The run waits on its question, which the inbox shows.
+            let run = start_program_run(&api, &session_id, json!({"claim": "pr-7"})).await?;
+            let [request] = <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?)
+                .map_err(|requests| anyhow::anyhow!("one request expected: {requests:?}"))?;
+            assert_eq!(request.status, api::InputRequestStatus::Pending);
+            assert_eq!(request.ask, "Merge pr-7?");
+            assert_eq!(request.payload, Some(json!({"pr": "pr-7"})));
+            assert_eq!(request.assignees, vec!["alice".to_owned()]);
+            assert!(
+                request.deadline_at_ms >= request.created_at_ms + 7 * 24 * 60 * 60 * 1_000,
+                "the default deadline is seven days: {request:?}"
+            );
+            let read = api
+                .read_inbox_request(api::InboxRequestReadParams {
+                    request_id: request.request_id.clone(),
+                })
+                .await?
+                .result
+                .request;
+            assert_eq!(read, request);
+
+            // An approval must satisfy the response schema.
+            let invalid = api
+                .answer_inbox_request(api::InboxRequestAnswerParams {
+                    request_id: request.request_id.clone(),
+                    approved: true,
+                    value: Some(json!({"wrong": 1})),
+                    comment: None,
+                })
+                .await;
+            assert!(
+                invalid
+                    .as_ref()
+                    .is_err_and(|error| error.kind == api::AgentApiErrorKind::InvalidRequest),
+                "{invalid:?}"
+            );
+            let answer = |approved: bool| api::InboxRequestAnswerParams {
+                request_id: request.request_id.clone(),
+                approved,
+                value: approved.then(|| json!({"label": "ship"})),
+                comment: Some("lgtm".to_owned()),
             };
-            shutdown();
-            let stopped = tokio::time::timeout(Duration::from_secs(15), &mut worker_run).await;
-            result?;
-            stopped.map_err(|_| anyhow::anyhow!("code worker did not stop"))??;
+            let answered = api.answer_inbox_request(answer(true)).await?.result.request;
+            assert_eq!(answered.status, api::InputRequestStatus::Answered);
+            // The same answer again is accepted; a different one conflicts.
+            api.answer_inbox_request(answer(true)).await?;
+            let conflict = api.answer_inbox_request(answer(false)).await;
+            assert!(
+                conflict
+                    .as_ref()
+                    .is_err_and(|error| error.kind == api::AgentApiErrorKind::Conflict),
+                "{conflict:?}"
+            );
+
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+            assert_eq!(
+                output["answer"]["value"],
+                json!({"label": "ship"}),
+                "{output}"
+            );
+            assert_eq!(output["answer"]["comment"], json!("lgtm"), "{output}");
+            assert!(output["answer"]["answered_by"].is_string(), "{output}");
+            assert_eq!(
+                scoped_call_tools(&store, &session_id).await?,
+                vec!["input.request"]
+            );
+
+            // Unanswered, the request escalates once with a fresh deadline,
+            // then expires; the program catches the failure by its kind.
+            let run = start_program_run(&api, &session_id, json!({"claim": "unanswered"})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                json!({"claim": "unanswered", "slept": 0, "kind": "deadline_exceeded"})
+            );
+            let expired = api
+                .list_inbox_requests(api::InboxRequestListParams {
+                    status: Some(api::InputRequestStatus::Expired),
+                    session: Some(session_id.to_string()),
+                    limit: None,
+                })
+                .await?
+                .result
+                .requests;
+            let [expired] = <[_; 1]>::try_from(expired).map_err(|requests| {
+                anyhow::anyhow!("one expired request expected: {requests:?}")
+            })?;
+            assert!(expired.escalated, "{expired:?}");
+            assert_eq!(expired.assignees, vec!["lead".to_owned()]);
+            assert!(expired.answer.is_none());
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
             Ok(())
-        },
-    )
+        })
+    })
     .await
 }

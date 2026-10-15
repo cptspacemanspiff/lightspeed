@@ -68,8 +68,8 @@ pub fn worker_runtime() -> anyhow::Result<Runtime> {
     Ok(Runtime::from_current_tokio(RuntimeOptions::default())?)
 }
 
-/// The `sessions` worker runs session, environment-job, and sub-agent
-/// workflows together with their activities.
+/// The `sessions` worker runs session, environment-job, sub-agent and
+/// input-request workflows together with their activities.
 pub fn sessions_worker(
     runtime: &Runtime,
     client: Client,
@@ -81,6 +81,7 @@ pub fn sessions_worker(
         .register_workflow::<temporal_workflow::TranscriptionWorkflow>()?
         .register_workflow::<EnvironmentJobWorkflow>()?
         .register_workflow::<SubagentExecutionWorkflow>()?
+        .register_workflow::<temporal_workflow::InputRequestWorkflow>()?
         .register_activities(activities)
         .build();
     Ok(Worker::new(runtime, client, worker_options)?)

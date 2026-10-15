@@ -1379,6 +1379,81 @@
         "action": "read",
         "kind": "universe"
       },
+      "description": "Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.",
+      "group": "session",
+      "method": "inbox/requests/list",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/InboxRequestListParams"
+        },
+        "type": "InboxRequestListParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfInboxRequestListResponse"
+        },
+        "type": "AgentApiOutcome<InboxRequestListResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "List human-input requests",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.",
+      "group": "session",
+      "method": "inbox/requests/read",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/InboxRequestReadParams"
+        },
+        "type": "InboxRequestReadParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfInboxRequestResponse"
+        },
+        "type": "AgentApiOutcome<InboxRequestResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "Read a human-input request",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "control_session",
+        "kind": "universe"
+      },
+      "description": "Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.",
+      "group": "session",
+      "method": "inbox/requests/answer",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/InboxRequestAnswerParams"
+        },
+        "type": "InboxRequestAnswerParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfInboxRequestResponse"
+        },
+        "type": "AgentApiOutcome<InboxRequestResponse>"
+      },
+      "role": "contributor",
+      "scope": "universe",
+      "summary": "Answer a human-input request",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "read",
+        "kind": "universe"
+      },
       "description": "Queries supported providers directly, with a brief process-local burst cache, and returns best-effort selectable routes. One provider failure does not discard successful results from others.",
       "group": "models",
       "method": "models/list",
