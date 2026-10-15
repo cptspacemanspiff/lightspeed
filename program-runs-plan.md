@@ -81,6 +81,13 @@ session-owned effects are stronger, called out in D7 and D8.
 
 ## Key decisions
 
+**Status (2026-10-14).** The user ratified D6, D7 and "programs get no turns"
+first, then, after the D14 discussion, D4 (digest pinning now, named
+versions later, with the caveat that tool versioning still needs real
+design before the first incompatible change: see the open question), D8 as
+written, D13 as written, and D14 with the recommended defaults recorded in
+it. Questions for the maintainer stay under "Open questions".
+
 ### D1. A session type at the edges, the shared harness in the middle
 
 **The session kind** is fixed when the session is created and recorded in the
@@ -312,7 +319,11 @@ presentation was active. Add a program-facing contract layer in `crates/tools`:
   written against, and a changed schema fails that binding with a typed
   `ContractChanged` error. Named contract versions, with old versions kept alive
   while pinned programs use them, come when the first incompatible change to a
-  built-in schema is actually needed, not before.
+  built-in schema is actually needed, not before. Ratified with a caveat:
+  digest pinning only detects a change, it does not keep an old program
+  working, so how versions are named, how long old ones live, and how a
+  pinned program moves to a new one need design before the first breaking
+  change ships (open questions).
 - **MCP tools.** Exposed as `mcp.<server>.<tool>`, with the contract pinned to the
   tool's input schema hash at session creation. A changed upstream schema fails
   that binding with a typed `ContractChanged` error, not silent drift.
@@ -789,7 +800,7 @@ not as a state machine spread over several runs:
 
 ```js
 const findings = await env.agent.run({ agent: "pr-reviewer", input: { pr } });
-const review   = await env.input.request({ ask: "Merge?", findings, assignees });
+const review   = await env.input.request({ ask: "Merge?", findings, assignees: ["alice"] });
 if (review.approved) await env.bots.emit({ to: "merge-bot", data: { pr } });
 return { outcome: "handled", summary: review.approved ? "queued for merge" : "rejected" };
 ```
@@ -813,22 +824,64 @@ waits:
 | A bot event (webhook, chat message) | bot controller → the session's run queue | Yes. It queues behind the run it should resume. |
 | A promise resolution (a tool's reply) | delivered to that promise by id | No. This is how a run makes progress. |
 
-So `input.request` is a workflow tool with a joined reply promise, like
-`agent_run` or `program-execute`. Its workflow presents the request (the
-Lightspeed web inbox first; Slack, email or a GitHub review request as later
-backends), waits durably for the answer, and resolves the reply. The program
-sees the answer as the call's outcome. The contract (D4) carries:
+So human input is an `input` contract family backed by a workflow tool with
+a reply promise, like `agent_run`/`agent_spawn`. Its workflow presents the
+request, waits durably for the answer, and resolves the reply. The first
+backend is the **Lightspeed web inbox**: pending requests per universe, with
+approve, reject or a schema-checked JSON answer. Chat, email and GitHub review
+requests are later backends behind the same contract.
 
-- `ask`, a payload to show, an optional response schema, and assignees.
-- A deadline with an on-expiry policy: fail the call (a typed error the
-  program can catch), or escalate to other assignees. There is no unbounded
-  wait: the default deadline comes from `FeaturesConfig.program`.
-- Reassignment while pending, so a reviewer on leave can be replaced without
-  touching the run.
+- **`env.input.open(spec)`** creates the request and returns a **handle**
+  `{ id }` at once. The handle's operations are calls like any other:
+  - `answer()`: the pending answer, a promise that may outlive many attempts;
+  - `remind()`: notify the assignees again through the backend;
+  - `reassign({ to })`: replace the assignees without touching the run;
+  - `cancel()`: withdraw the request; `answer()` then fails as cancelled.
+- **`env.input.request(spec)`** is shorthand for `open` and an immediate
+  `answer()`.
+- **Spec:** `ask`, a payload to show, an optional response schema,
+  assignees, an optional `deadline`, an optional `remind_after` interval and
+  an optional escalation list.
+- **Deadline.** Every request has one: there is no unbounded wait. The
+  program profile's limits set the default (7 days unless set), the universe's
+  `FeaturesConfig.program` caps it (at least 30 days recommended, so a
+  two-week absence fits), and a call may ask for anything up to the cap.
+- **Expiry.** If an escalation list is configured (the call's own, else the
+  trigger's, else the bot's), the request is reassigned to it once with a
+  fresh deadline and the program does not notice. Otherwise, or on the second
+  expiry, `answer()` fails with a typed `DeadlineExceeded` the program can
+  catch.
+- **Built-in reminders.** With `remind_after`, the input workflow reminds the
+  assignees on that interval until the answer or the deadline. This is the
+  default for programs that want no custom logic.
 
-Approval parking (D3 `ApprovalPolicy::Park`) is the same mechanism: the
+**Program-side reminder policy.** Custom cadences, escalation to a PR's owner
+and similar policies are written in the program itself, from a durable sleep
+raced against the handle:
+
+```js
+const ask = await env.input.open({ ask: "Merge?", findings, assignees: ["alice"], deadline: "14d" });
+let review;
+for (let nudges = 0; ; nudges++) {
+  const next = await Promise.race([ask.answer(), env.time.sleep({ ms: 3 * DAY }).then(() => null)]);
+  if (next) { review = next; break; }
+  await (nudges === 2 ? ask.reassign({ to: ["team-lead"] }) : ask.remind());
+}
+```
+
+The race replays identically because outcomes are delivered in log order
+(D8), and each wake is one attempt replaying the journal in memory (D7). The
+common patterns ship as a small JavaScript helper library with the program
+runtime, for example `withReminders(ask, { every: "3d", max: 2, then:
+"reassign" })`, built only on the primitives above. No separate service is
+needed.
+
+**Approval parking** (D3 `ApprovalPolicy::Park`) is the same mechanism: the
 approval decision is a session-owned promise and a parked call is a slow
-call. Both land together.
+call. A parked approval happens in tool admission, not in program code, so
+the program has no hook for a reminder loop: approvals use the built-in
+`remind_after`, deadline and escalation settings, configured on the program
+profile (overridable per bot). Both land together.
 
 **Bots and waiting runs.** Today a bot lane waits up to
 `BOT_EVENT_TERMINAL_TIMEOUT` (24 hours) for a run terminal and then records
@@ -846,7 +899,9 @@ call. Both land together.
   whose triggers route to the main session should warn when a program can
   wait. Later events for the waiting key follow a per-trigger **while-waiting**
   policy: `queue` (default) or `supersede` (cancel the waiting run and start
-  a fresh one, for example a new push to a PR under review).
+  a fresh one, for example a new push to a PR under review). Start with
+  these two; a filter that supersedes only on some events (a new commit,
+  not a comment) waits for a real need.
 - Delivering a bot event *into* a waiting run (the program analogue of
   steering) is not needed when answers come through `input.request`. Keep it
   out of scope until a use case needs it.
@@ -866,7 +921,8 @@ or from state the program stored. Add an `env.state` contract: small JSON
 documents keyed per session key (a routed session's key, or the main
 session), stored in the session's universe, readable and writable by the
 program, and recorded as ordinary calls so replay is deterministic. Storage
-backs onto the VFS or a small table; that choice is open.
+is a small table (transactional, per key, size-capped), not the VFS; a
+program that wants a readable document writes it to a workspace instead.
 
 ## API surface
 
@@ -925,10 +981,13 @@ regenerated contracts).
    - Changes: digest-pinned contracts for built-ins, including `time.sleep`;
      MCP schema pinning; `requires` admission at creation and at every attempt;
      the `env`/`ctx` guest surface with the host-owned globals from D8.
-   - D14: the `input.request` workflow tool with the web inbox backend,
-     deadlines, escalation and reassignment; approval `Park`; the waiting run
-     notification and its bot handling (`deferred`, no terminal timeout while
-     waiting, while-waiting policy); verdicts from program output; `env.state`.
+   - D14: the `input` contract (`open` with handle operations `answer`,
+     `remind`, `reassign`, `cancel`; `request` shorthand) with the web inbox
+     backend; deadlines, escalation lists and built-in `remind_after`; approval
+     `Park` with the same settings; the `withReminders` helper library; the
+     waiting run notification and its bot handling (`deferred`, no terminal
+     timeout while waiting, `queue`/`supersede`); verdicts from program output;
+     `env.state` on a small table.
    - Until Phase 4 a wait holds a live attempt, so it is bounded by the
      attempt's wall clock (`max_wall_clock_ms`, 10 minutes by default) and a
      worker loss fails the run. Phase 3 tests use short waits; multi-day waits
@@ -1005,9 +1064,14 @@ with both tests.
   API or internal.
 - **Optional joins** (`CallContext`, D3): is that acceptable to the maintainer, or
   should scoped calls get a separate request type?
-- **Contract versioning** (D4): digest pinning defers this, but once a built-in
-  schema must change incompatibly, how long are old contracts supported and who
-  owns the compatibility promise?
+- **Tool versioning** (D4, flagged by the user as needing real thought):
+  digest pinning only detects a changed contract. Before the first
+  incompatible change to a built-in: how are versions named, how long do old
+  ones stay callable while pinned programs and suspended runs (D14, possibly
+  weeks long) still use them, who owns that promise, and how does a pinned
+  program move to a new version (republish, or an adapter)? MCP tools change
+  upstream without notice, so their side of this is a policy (fail, or adapt)
+  rather than a support window.
 - **Hold window** (D7): what poll interval and hold window keep short tool calls
   inside one attempt without loading the session worker? Needs measurement.
 - **Profiles** (D2): should a program profile extend `ProfileDocument` or be a
@@ -1022,15 +1086,10 @@ with both tests.
   subset check extend to agent children?
 - **Env handles** (D13): is a child's `env` recorded as canonical contract ids,
   or as the parent's binding handles resolved again at child admission?
-- **Approval parking** (D3, D14): `Park` lands in Phase 3 with
-  `input.request`. Does the default deadline live on the program profile or on
-  `FeaturesConfig.program`?
 - **Input backends** (D14): after the web inbox, which come first: chat
   channels, email, or a GitHub review request? Does a backend answer by
   calling a public API method, or by its own workflow-tool emission?
-- **While-waiting policy** (D14): is `queue | supersede` per trigger enough, or
-  does `supersede` need a filter (only on a new commit, not on a comment)?
-- **Key-scoped state** (D14): VFS-backed or a small table; size limits; and
-  whether agent sessions should get it too.
+- **Key-scoped state** (D14): size limits, and whether agent sessions should
+  get it too.
 - **Inspect grants** (D10): scoped to the subtree, to bot-owned sessions, or to
   explicit session ids?
