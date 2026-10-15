@@ -294,6 +294,8 @@ pub enum EmissionDisposition {
         token: String,
         status: RunStatus,
         failure_message_ref: Option<BlobRef>,
+        /// The run's output, which decides a program run's delivery.
+        output_ref: Option<BlobRef>,
     },
     /// Nothing for the controller (a pull tool, a resolution, a cancel).
     Ignore,
@@ -1324,14 +1326,15 @@ pub fn classify_emission(
             token,
             run_id,
             status,
+            output,
             failure_message_ref,
-            ..
         } => EmissionDisposition::Terminal {
             session_id: producer_session,
             run_id: format!("run_{}", run_id.as_u64()),
             token,
             status,
             failure_message_ref,
+            output_ref: output.map(|output| output.content_ref),
         },
         EmissionBody::SourceResolution { .. } | EmissionBody::InvocationCancellation { .. } => {
             EmissionDisposition::Ignore
