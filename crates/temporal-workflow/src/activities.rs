@@ -59,8 +59,11 @@ pub const ACTIVITY_CODE_PREPARE: &str = "WorkflowActivities::code_prepare";
 pub const ACTIVITY_CODE_RUN: &str = "WorkflowActivities::code_run";
 pub const ACTIVITY_CODE_FINALIZE: &str = "WorkflowActivities::code_finalize";
 pub const ACTIVITY_PROGRAM_PREPARE: &str = "WorkflowActivities::program_prepare";
-pub const ACTIVITY_PROGRAM_ATTEMPT: &str = "WorkflowActivities::program_attempt";
 pub const ACTIVITY_PROGRAM_FINALIZE: &str = "WorkflowActivities::program_finalize";
+pub const ACTIVITY_PROGRAM_LOAD: &str = "WorkflowActivities::program_load";
+pub const ACTIVITY_PROGRAM_ADMIT: &str = "WorkflowActivities::program_admit";
+pub const ACTIVITY_PROGRAM_COLLECT: &str = "WorkflowActivities::program_collect";
+pub const ACTIVITY_PROGRAM_CONCLUDE: &str = "WorkflowActivities::program_conclude";
 pub const ACTIVITY_INPUT_REQUEST_OPEN: &str = "WorkflowActivities::input_request_open";
 pub const ACTIVITY_INPUT_REQUEST_STEP: &str = "WorkflowActivities::input_request_step";
 pub const ACTIVITY_INPUT_REQUEST_EXECUTE: &str = "WorkflowActivities::input_request_execute";
@@ -101,10 +104,34 @@ impl WorkflowActivities {
         unimplemented!("workflow activity definition only")
     }
 
-    #[activity(name = ACTIVITY_PROGRAM_ATTEMPT)]
-    pub async fn program_attempt(
+    #[activity(name = ACTIVITY_PROGRAM_LOAD)]
+    pub async fn program_load(
         _ctx: ActivityContext,
-        _request: crate::ProgramAttemptActivityRequest,
+        _request: crate::ProgramLoadActivityRequest,
+    ) -> Result<crate::ProgramLoadActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_ADMIT)]
+    pub async fn program_admit(
+        _ctx: ActivityContext,
+        _request: crate::ProgramAdmitActivityRequest,
+    ) -> Result<crate::ProgramAdmitActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_COLLECT)]
+    pub async fn program_collect(
+        _ctx: ActivityContext,
+        _request: crate::ProgramCollectActivityRequest,
+    ) -> Result<crate::ProgramCollectActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_CONCLUDE)]
+    pub async fn program_conclude(
+        _ctx: ActivityContext,
+        _request: crate::ProgramConcludeActivityRequest,
     ) -> Result<crate::ProgramAttemptActivityResult, ActivityError> {
         unimplemented!("workflow activity definition only")
     }

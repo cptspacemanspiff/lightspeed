@@ -163,13 +163,6 @@ impl From<&harness::CodeToolScope> for CodeToolScopeReport {
 pub struct CodeToolCallOutcome {
     pub request_id: String,
     pub call_id: ToolCallId,
-    /// The binding and arguments the request was admitted with: a replaying
-    /// program re-issues the request and must match both. Absent on reports
-    /// stored before they were recorded here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arguments_ref: Option<BlobRef>,
     pub status: CodeToolCallStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<BlobRef>,
@@ -188,8 +181,6 @@ impl From<&harness::CodeToolCall> for CodeToolCallOutcome {
         let mut outcome = Self {
             request_id: call.spec.origin.request_id.clone(),
             call_id: call.call_id.clone(),
-            binding_id: Some(call.spec.binding_id.clone()),
-            arguments_ref: Some(call.spec.arguments_ref.clone()),
             status: CodeToolCallStatus::Pending,
             output_ref: None,
             error_ref: None,

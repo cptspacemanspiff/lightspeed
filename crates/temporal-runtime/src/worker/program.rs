@@ -12,9 +12,9 @@ use serde_json::Value;
 use temporal_workflow::{
     CodeExecutionLimits, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
     CodeToolScopeReportRequest, DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, OpenCodeToolScopeRequest,
-    ProgramAttemptActivityRequest, ProgramAttemptActivityResult, ProgramAttemptOutcome,
-    ProgramFinalizeActivityRequest, ProgramPrepareActivityRequest, ProgramPrepareActivityResult,
-    ProgramRunDescriptor, ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
+    ProgramAttemptActivityResult, ProgramAttemptOutcome, ProgramFinalizeActivityRequest,
+    ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
+    ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
 };
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
@@ -24,7 +24,7 @@ use super::code::{
 use crate::{
     code::{CodeRunError, read_bounded},
     gateway::GatewayAgentApi,
-    program::{AttemptEnd, CodeRunReport, ProgramRunner, program_catalog, put_json},
+    program::{AdmitStepError, CodeRunReport, ProgramRunner, program_catalog, put_json},
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,7 +47,6 @@ fn runner(activities: &CodeWorkerActivities, api: &GatewayAgentApi) -> ProgramRu
         activities.capacity(),
         CLEANUP_TIMEOUT,
     )
-    .with_hold_window(activities.program_hold_window())
 }
 
 fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), PreparationError> {
@@ -254,9 +253,6 @@ struct ProgramRunReport {
     /// earlier try was lost with its worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity_attempt: Option<u32>,
-    /// Present when the attempt suspended instead of finishing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    suspended: Option<ProgramAttemptOutcome>,
 }
 
 async fn store_report(
@@ -291,28 +287,43 @@ async fn store_report(
     Ok(reference)
 }
 
-pub(super) async fn attempt_activity(
+/// Run `work` for an activity, heartbeating until it finishes.
+async fn heartbeating<T>(
+    ctx: &ActivityContext,
+    work: impl std::future::Future<Output = Result<T, ActivityError>>,
+) -> Result<T, ActivityError> {
+    tokio::pin!(work);
+    let heartbeats = heartbeat(ctx);
+    tokio::pin!(heartbeats);
+    tokio::select! {
+        result = &mut work => result,
+        () = &mut heartbeats => unreachable!("heartbeats run until activity exits"),
+    }
+}
+
+fn universe_of(descriptor: &ProgramRunDescriptor) -> Result<uuid::Uuid, ActivityError> {
+    temporal_workflow::split_workflow_id(&descriptor.session_workflow_id)
+        .map(|(universe_id, _)| universe_id)
+        .ok_or_else(|| non_retryable("invalid program session identity"))
+}
+
+pub(super) async fn load_activity(
     activities: &CodeWorkerActivities,
     ctx: ActivityContext,
-    request: ProgramAttemptActivityRequest,
-) -> Result<ProgramAttemptActivityResult, ActivityError> {
-    // A retried attempt replays the run's recorded calls (see
-    // `ProgramRunner`), so a lost worker is not a lost run.
-    let activity_attempt = Some(ctx.info().attempt);
+    request: temporal_workflow::ProgramLoadActivityRequest,
+) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
     let descriptor = request.descriptor;
-    descriptor.validate().map_err(non_retryable)?;
     require_activity_owner(&ctx, &descriptor.execution_id)?;
-    let (universe_id, _) = temporal_workflow::split_workflow_id(&descriptor.session_workflow_id)
-        .ok_or_else(|| non_retryable("invalid program session identity"))?;
-    let cancellation = program_engine::Cancellation::default();
-    let work = async {
+    let universe_id = universe_of(&descriptor)?;
+    heartbeating(&ctx, async {
         let api = activities.universes().api_for(universe_id).await?;
-        let runner = runner(activities, &api);
-        let report = match runner
-            .run_attempt(descriptor.clone(), cancellation.clone())
-            .await
-        {
-            Ok(report) => report,
+        match runner(activities, &api).load(&descriptor).await {
+            Ok(loaded) => Ok(temporal_workflow::ProgramLoadActivityResult::Loaded {
+                source: loaded.source,
+                input: loaded.input,
+                context: loaded.context,
+                bindings: loaded.bindings,
+            }),
             // A pinned contract that changed or was revoked fails the run
             // with its typed kind, before the program starts.
             Err(CodeRunError::Contract(error)) => {
@@ -321,76 +332,106 @@ pub(super) async fn attempt_activity(
                     &ProgramRunReport {
                         version: 1,
                         execution_id: descriptor.execution_id.clone(),
-                        attempt: request.attempt,
+                        attempt: 1,
                         descriptor: Some(descriptor.clone()),
                         execution: None,
                         scope: None,
                         interruption: None,
                         cleanup_error: None,
                         report_unavailable: None,
-                        activity_attempt,
-                        suspended: None,
+                        activity_attempt: None,
                     },
                 )
                 .await?;
-                return Ok(ProgramAttemptActivityResult {
-                    report_ref,
-                    outcome: ProgramAttemptOutcome::Threw {
-                        error_kind: error.kind().to_owned(),
-                        message: error.to_string(),
+                Ok(temporal_workflow::ProgramLoadActivityResult::Refused {
+                    result: ProgramAttemptActivityResult {
+                        report_ref,
+                        outcome: ProgramAttemptOutcome::Threw {
+                            error_kind: error.kind().to_owned(),
+                            message: error.to_string(),
+                        },
                     },
-                });
+                })
             }
-            Err(error) => return Err(non_retryable(error)),
-        };
-        let report = match report {
-            AttemptEnd::Finished(report) => *report,
-            AttemptEnd::Suspended {
-                recorded,
-                waiting_on,
-            } => {
-                let outcome = ProgramAttemptOutcome::Suspended {
-                    recorded,
-                    waiting_on,
-                };
-                let report_ref = store_report(
-                    api.store().as_ref(),
-                    &ProgramRunReport {
-                        version: 1,
-                        execution_id: descriptor.execution_id.clone(),
-                        attempt: request.attempt,
-                        descriptor: Some(descriptor.clone()),
-                        execution: None,
-                        scope: None,
-                        interruption: None,
-                        cleanup_error: None,
-                        report_unavailable: None,
-                        activity_attempt,
-                        suspended: Some(outcome.clone()),
-                    },
-                )
-                .await?;
-                return Ok(ProgramAttemptActivityResult {
-                    report_ref,
-                    outcome,
-                });
-            }
-        };
+            Err(CodeRunError::Preparation(message)) => Err(retryable(message)),
+            Err(error) => Err(non_retryable(error)),
+        }
+    })
+    .await
+}
+
+pub(super) async fn admit_activity(
+    activities: &CodeWorkerActivities,
+    ctx: ActivityContext,
+    request: temporal_workflow::ProgramAdmitActivityRequest,
+) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
+    let descriptor = request.descriptor;
+    require_activity_owner(&ctx, &descriptor.execution_id)?;
+    let universe_id = universe_of(&descriptor)?;
+    heartbeating(&ctx, async {
+        let api = activities.universes().api_for(universe_id).await?;
+        match runner(activities, &api)
+            .admit_step(&descriptor, request.requests)
+            .await
+        {
+            Ok(rejected) => Ok(temporal_workflow::ProgramAdmitActivityResult { rejected }),
+            Err(error @ AdmitStepError::Transport(_)) => Err(retryable(error)),
+            Err(error @ AdmitStepError::Diverged(_)) => Err(non_retryable(error)),
+        }
+    })
+    .await
+}
+
+pub(super) async fn collect_activity(
+    activities: &CodeWorkerActivities,
+    ctx: ActivityContext,
+    request: temporal_workflow::ProgramCollectActivityRequest,
+) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
+    let (universe_id, _) = temporal_workflow::split_workflow_id(&request.session_workflow_id)
+        .ok_or_else(|| non_retryable("invalid program session identity"))?;
+    heartbeating(&ctx, async {
+        let api = activities.universes().api_for(universe_id).await?;
+        let completions = runner(activities, &api)
+            .collect(
+                &request.session_workflow_id,
+                &request.execution_id,
+                request.after,
+                request.max_result_bytes,
+            )
+            .await
+            .map_err(retryable)?;
+        Ok(temporal_workflow::ProgramCollectActivityResult { completions })
+    })
+    .await
+}
+
+pub(super) async fn conclude_activity(
+    activities: &CodeWorkerActivities,
+    ctx: ActivityContext,
+    request: temporal_workflow::ProgramConcludeActivityRequest,
+) -> Result<ProgramAttemptActivityResult, ActivityError> {
+    let descriptor = request.descriptor;
+    require_activity_owner(&ctx, &descriptor.execution_id)?;
+    let universe_id = universe_of(&descriptor)?;
+    heartbeating(&ctx, async {
+        let api = activities.universes().api_for(universe_id).await?;
+        let report = runner(activities, &api)
+            .conclude(&descriptor, request.report)
+            .await;
         let outcome = attempt_outcome(api.store().as_ref(), &report).await?;
         let report_ref = store_report(
             api.store().as_ref(),
             &ProgramRunReport {
                 version: 1,
                 execution_id: descriptor.execution_id.clone(),
-                attempt: request.attempt,
+                attempt: 1,
                 descriptor: Some(descriptor.clone()),
                 execution: Some(report.execution.clone()),
                 scope: report.scope.clone(),
                 interruption: None,
                 cleanup_error: report.cleanup_error.clone(),
                 report_unavailable: None,
-                activity_attempt,
-                suspended: None,
+                activity_attempt: Some(ctx.info().attempt),
             },
         )
         .await?;
@@ -398,21 +439,8 @@ pub(super) async fn attempt_activity(
             report_ref,
             outcome,
         })
-    };
-    tokio::pin!(work);
-    let heartbeats = heartbeat(&ctx);
-    tokio::pin!(heartbeats);
-    let mut cancellation_received = false;
-    loop {
-        tokio::select! {
-            result = &mut work => return result,
-            () = &mut heartbeats => unreachable!("heartbeats run until activity exits"),
-            () = ctx.cancelled(), if !cancellation_received => {
-                cancellation_received = true;
-                cancellation.cancel();
-            }
-        }
-    }
+    })
+    .await
 }
 
 /// What the program did, from the runner's receipt: its return value is
@@ -523,7 +551,6 @@ async fn finalize(
         cleanup_error,
         report_unavailable: None,
         activity_attempt: None,
-        suspended: None,
     };
     let report_ref = store_report(store.as_ref(), &report).await?;
     let failure = |status: &str, message: String, attempt_report: Option<&BlobRef>| {
@@ -582,19 +609,6 @@ async fn finalize(
         ) => failure(
             "threw",
             format!("{error_kind}: {message}"),
-            Some(attempt_ref),
-        ),
-        // The workflow resumes a suspended attempt rather than finishing
-        // with it; a suspended receipt as the terminal is a workflow bug.
-        (
-            ProgramRunTerminal::Completed { .. },
-            Some(ProgramAttemptActivityResult {
-                outcome: ProgramAttemptOutcome::Suspended { .. },
-                report_ref: attempt_ref,
-            }),
-        ) => failure(
-            "interrupted",
-            "the run ended on a suspended attempt".into(),
             Some(attempt_ref),
         ),
         (ProgramRunTerminal::Rejected { error_ref }, _) => {

@@ -396,8 +396,6 @@ fn code_tool_vectors() -> Value {
     let outcome = CodeToolCallOutcome {
         request_id: request_id.clone(),
         call_id: ToolCallId::new("code-tool:vector"),
-        binding_id: Some(binding_id.clone()),
-        arguments_ref: Some(BlobRef::from_bytes(b"{\"path\":\"notes.md\"}")),
         status: CodeToolCallStatus::Succeeded,
         output_ref: Some(BlobRef::from_bytes(b"{\"text\":\"done\"}")),
         error_ref: None,

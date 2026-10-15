@@ -1,7 +1,7 @@
 use super::*;
 
 use serde_json::json;
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionInput {
     ExecutionInput {
@@ -14,7 +14,6 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             })
             .collect(),
         limits: ExecutionLimits {
-            timeout_ms: 2_000,
             max_memory_bytes: 16 * 1024 * 1024,
             max_stack_bytes: 256 * 1024,
             max_source_bytes: 64 * 1024,
@@ -34,37 +33,53 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
     }
 }
 
-/// Drive a program, answering each request in issue order with the
-/// outcome and completion time `complete` gives it.
-async fn run_program(
+/// Step a program to its end, answering every request it issues with the
+/// completions `respond` gives for it (none holds the request), delivered
+/// in issue order with the step after it was issued.
+fn drive(
+    input: ExecutionInput,
+    mut respond: impl FnMut(&HostRequest) -> Vec<HostCompletion>,
+) -> (Vec<HostRequest>, ExecutionReport) {
+    let (mut instance, mut step) = ProgramInstance::start(input, StepBudget::default()).unwrap();
+    let mut requests = Vec::new();
+    loop {
+        let (issued, finished) = match step {
+            Step::Waiting { requests } => (requests, None),
+            Step::Finished { requests, report } => (requests, Some(report)),
+        };
+        let ready = issued.iter().flat_map(&mut respond).collect::<Vec<_>>();
+        requests.extend(issued);
+        if let Some(report) = finished {
+            return (requests, report);
+        }
+        assert!(
+            !ready.is_empty(),
+            "the program waits with nothing to deliver"
+        );
+        step = instance.step(ready);
+    }
+}
+
+/// Drive a program, answering each request with the outcome and
+/// completion time `complete` gives it.
+fn run_program(
     input: ExecutionInput,
     mut complete: impl FnMut(&HostRequest) -> (Result<Value, HostError>, Option<u64>),
 ) -> (Vec<HostRequest>, ExecutionReport) {
-    let mut execution = start(input, Cancellation::default()).unwrap();
-    let sender = execution.completion_sender();
-    let mut requests = Vec::new();
-    while let Some(event) = execution.next_event().await {
-        match event {
-            ExecutionEvent::Request(request) => {
-                let (outcome, completed_at_ms) = complete(&request);
-                let result = sender.complete(HostCompletion {
-                    request_id: request.request_id.clone(),
-                    outcome,
-                    completed_at_ms,
-                });
-                assert!(result.is_ok() || result == Err(CompletionError::Stopped));
-                requests.push(request);
-            }
-            ExecutionEvent::Finished(report) => return (requests, report),
-        }
-    }
-    panic!("execution ended without a report");
+    drive(input, |request| {
+        let (outcome, completed_at_ms) = complete(request);
+        vec![HostCompletion {
+            request_id: request.request_id.clone(),
+            outcome,
+            completed_at_ms,
+        }]
+    })
 }
 
 const SEED: [u32; 4] = [1, 2, 3, 4];
 
-#[tokio::test(flavor = "current_thread")]
-async fn programs_run_a_module_handler_with_contract_namespaces() {
+#[test]
+fn programs_run_a_module_handler_with_contract_namespaces() {
     let source = r#"
         export default {
             async run(input, env, ctx) {
@@ -84,8 +99,7 @@ async fn programs_run_a_module_handler_with_contract_namespaces() {
     let (requests, report) = run_program(
         program_input(source, &["web.fetch", "vfs.read_file"], SEED),
         |request| (Ok(json!(request.binding_id)), None),
-    )
-    .await;
+    );
     assert_eq!(report.error, None);
     assert_eq!(
         requests
@@ -107,8 +121,8 @@ async fn programs_run_a_module_handler_with_contract_namespaces() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
+#[test]
+fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
     let source = r#"
         export default {
             async run(input, env, ctx) {
@@ -127,7 +141,7 @@ async fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
     "#;
     let mut input = program_input(source, &[], SEED);
     input.program.context = Some(json!({"round": 1}));
-    let (_, report) = run_program(input, |_| unreachable!()).await;
+    let (_, report) = run_program(input, |_| unreachable!());
     assert_eq!(report.error, None);
     assert_eq!(
         report.return_value,
@@ -142,21 +156,20 @@ async fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
     let source = r#"
         export default { async run(input, env, ctx) { return ctx.context === undefined; } };
     "#;
-    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!()).await;
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
     assert_eq!(report.return_value, Some(json!(true)));
     assert_eq!(report.program_context, None);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_program_needs_a_default_export_with_run_and_compiles_before_effects() {
+#[test]
+fn a_program_needs_a_default_export_with_run_and_compiles_before_effects() {
     for source in [
         "export const run = async () => 1;",
         "export default { run: 1 };",
     ] {
         let (_, report) = run_program(program_input(source, &[], SEED), |_| {
             (Ok(Value::Null), None)
-        })
-        .await;
+        });
         assert_eq!(
             report.error.unwrap().kind,
             ExecutionErrorKind::Javascript,
@@ -170,8 +183,7 @@ async fn a_program_needs_a_default_export_with_run_and_compiles_before_effects()
             SEED,
         ),
         |_| (Ok(Value::Null), None),
-    )
-    .await;
+    );
     assert!(requests.is_empty());
     assert_eq!(report.error.unwrap().kind, ExecutionErrorKind::Javascript);
     let (_, report) = run_program(
@@ -181,13 +193,12 @@ async fn a_program_needs_a_default_export_with_run_and_compiles_before_effects()
             SEED,
         ),
         |_| (Ok(Value::Null), None),
-    )
-    .await;
+    );
     assert!(report.error.is_some());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn the_clock_is_the_recorded_start_and_advances_only_with_completions() {
+#[test]
+fn the_clock_is_the_recorded_start_and_advances_only_with_completions() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -215,8 +226,7 @@ async fn the_clock_is_the_recorded_start_and_advances_only_with_completions() {
     let mut times = [5_000, 4_000].into_iter();
     let (_, report) = run_program(program_input(source, &["test.call"], SEED), |_| {
         (Ok(Value::Null), times.next())
-    })
-    .await;
+    });
     assert_eq!(report.error, None);
     assert_eq!(
         report.return_value,
@@ -234,8 +244,8 @@ async fn the_clock_is_the_recorded_start_and_advances_only_with_completions() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn randomness_is_drawn_from_the_execution_seed() {
+#[test]
+fn randomness_is_drawn_from_the_execution_seed() {
     let source = r#"
         export default {
             async run() {
@@ -248,25 +258,24 @@ async fn randomness_is_drawn_from_the_execution_seed() {
             }
         };
     "#;
-    let draw = |seed| async move {
+    let draw = |seed| {
         let (_, report) = run_program(program_input(source, &[], seed), |_| {
             (Ok(Value::Null), None)
-        })
-        .await;
+        });
         assert_eq!(report.error, None);
         report.return_value.unwrap()
     };
-    let first = draw(SEED).await;
-    assert_eq!(first, draw(SEED).await);
-    assert_ne!(first, draw([4, 3, 2, 1]).await);
+    let first = draw(SEED);
+    assert_eq!(first, draw(SEED));
+    assert_ne!(first, draw([4, 3, 2, 1]));
     let uuid = first["uuid"].as_str().unwrap();
     assert_eq!(uuid.len(), 36);
     assert_eq!(&uuid[14..15], "4");
     assert!(first["random"][0].as_f64().unwrap() < 1.0);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn programs_cannot_generate_code_from_strings() {
+#[test]
+fn programs_cannot_generate_code_from_strings() {
     let source = r#"
         export default {
             async run() {
@@ -289,8 +298,7 @@ async fn programs_cannot_generate_code_from_strings() {
     "#;
     let (_, report) = run_program(program_input(source, &[], SEED), |_| {
         (Ok(Value::Null), None)
-    })
-    .await;
+    });
     assert_eq!(report.error, None);
     assert_eq!(
         report.return_value,
@@ -317,8 +325,8 @@ fn sleep_outcome(request: &HostRequest) -> (Result<Value, HostError>, Option<u64
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
+#[test]
+fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -334,7 +342,7 @@ async fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
         };
     "#;
     let (requests, report) =
-        run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome).await;
+        run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome);
     assert_eq!(report.error, None);
     // Each wait, timer or explicit sleep, is exactly one recorded call.
     assert!(
@@ -367,8 +375,8 @@ async fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
+#[test]
+fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
     let source = r#"
         export default {
             async run() {
@@ -377,8 +385,7 @@ async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
             }
         };
     "#;
-    let (_, report) =
-        run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome).await;
+    let (_, report) = run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome);
     assert_eq!(report.error.unwrap().message, "timer failed");
 
     let (_, report) = run_program(
@@ -388,8 +395,7 @@ async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
             SEED,
         ),
         |_| (Ok(Value::Null), None),
-    )
-    .await;
+    );
     assert!(
         report
             .error
@@ -399,8 +405,8 @@ async fn a_throwing_timer_fails_the_program_and_timers_need_the_contract() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn module_code_cannot_tamper_with_env_construction() {
+#[test]
+fn module_code_cannot_tamper_with_env_construction() {
     let source = r#"
         String.prototype.split = () => ["evil"];
         Array.prototype.slice = () => { throw new Error("tampered"); };
@@ -414,8 +420,7 @@ async fn module_code_cannot_tamper_with_env_construction() {
     let (_, report) = run_program(
         program_input(source, &["web.fetch", "time.sleep"], SEED),
         sleep_outcome,
-    )
-    .await;
+    );
     assert_eq!(report.error, None);
     assert_eq!(report.return_value, Some(json!(["web", "time"])));
 }
@@ -442,8 +447,8 @@ fn control(status: &str) -> Value {
     json!({"request_id": "inp_abc", "status": status, "assignees": ["bob"], "reminder_count": 1})
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn an_open_input_request_is_a_handle_over_ordinary_calls() {
+#[test]
+fn an_open_input_request_is_a_handle_over_ordinary_calls() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -461,32 +466,28 @@ async fn an_open_input_request_is_a_handle_over_ordinary_calls() {
         };
     "#;
     let mut awaits = 0;
-    let (requests, report) = run_program(
-        program_input(source, INPUT_CONTRACTS, SEED),
-        |request| {
-            let outcome = match request.binding_id.as_str() {
-                "opaque-input.open" => opened(),
-                "opaque-input.remind" | "opaque-input.reassign" => control("pending"),
-                "opaque-promise.await" => {
-                    awaits += 1;
-                    if awaits == 1 {
-                        json!({"outcome": "completed", "results": [
-                            {"promise_id": "promise_3", "status": "resolved", "output": {"approved": true}}
-                        ]})
-                    } else {
-                        json!({"outcome": "completed", "results": [
-                            {"promise_id": "promise_3", "status": "failed",
-                             "error": {"code": "deadline_exceeded", "message": "too late"}}
-                        ]})
-                    }
+    let (requests, report) = run_program(program_input(source, INPUT_CONTRACTS, SEED), |request| {
+        let outcome = match request.binding_id.as_str() {
+            "opaque-input.open" => opened(),
+            "opaque-input.remind" | "opaque-input.reassign" => control("pending"),
+            "opaque-promise.await" => {
+                awaits += 1;
+                if awaits == 1 {
+                    json!({"outcome": "completed", "results": [
+                        {"promise_id": "promise_3", "status": "resolved", "output": {"approved": true}}
+                    ]})
+                } else {
+                    json!({"outcome": "completed", "results": [
+                        {"promise_id": "promise_3", "status": "failed",
+                         "error": {"code": "deadline_exceeded", "message": "too late"}}
+                    ]})
                 }
-                "opaque-promise.cancel" => json!({"promises": []}),
-                other => panic!("unexpected call {other}"),
-            };
-            (Ok(outcome), None)
-        },
-    )
-    .await;
+            }
+            "opaque-promise.cancel" => json!({"promises": []}),
+            other => panic!("unexpected call {other}"),
+        };
+        (Ok(outcome), None)
+    });
     assert_eq!(report.error, None);
     let calls = requests
         .iter()
@@ -525,8 +526,8 @@ async fn an_open_input_request_is_a_handle_over_ordinary_calls() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn with_reminders_nudges_on_an_interval_then_reassigns() {
+#[test]
+fn with_reminders_nudges_on_an_interval_then_reassigns() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -535,54 +536,41 @@ async fn with_reminders_nudges_on_an_interval_then_reassigns() {
             }
         };
     "#;
-    let mut execution = start(
-        program_input(source, INPUT_CONTRACTS, SEED),
-        Cancellation::default(),
-    )
-    .unwrap();
-    let sender = execution.completion_sender();
     let mut held_await = None;
-    let mut calls = Vec::new();
-    let report = loop {
-        match execution.next_event().await.expect("execution event") {
-            ExecutionEvent::Request(request) => {
-                calls.push(request.binding_id.clone());
-                let outcome = match request.binding_id.as_str() {
-                    "opaque-input.open" => Some(opened()),
-                    // The answer arrives only once the request is reassigned.
-                    "opaque-promise.await" => {
-                        held_await = Some(request.request_id.clone());
-                        None
-                    }
-                    "opaque-time.sleep" => Some(json!({"fire_at_ms": 61_000})),
-                    "opaque-input.remind" => Some(control("pending")),
-                    "opaque-input.reassign" => {
-                        sender
-                            .complete(HostCompletion {
-                                request_id: held_await.take().expect("awaiting"),
-                                outcome: Ok(json!({"outcome": "completed", "results": [
-                                    {"promise_id": "promise_3", "status": "resolved", "output": {"approved": false}}
-                                ]})),
-                                completed_at_ms: None,
-                            })
-                            .unwrap();
-                        Some(control("pending"))
-                    }
-                    other => panic!("unexpected call {other}"),
-                };
-                if let Some(outcome) = outcome {
-                    sender
-                        .complete(HostCompletion {
-                            request_id: request.request_id,
-                            outcome: Ok(outcome),
-                            completed_at_ms: None,
-                        })
-                        .unwrap();
-                }
-            }
-            ExecutionEvent::Finished(report) => break report,
-        }
+    let complete = |request_id: String, outcome: Value| HostCompletion {
+        request_id,
+        outcome: Ok(outcome),
+        completed_at_ms: None,
     };
+    let (requests, report) = drive(program_input(source, INPUT_CONTRACTS, SEED), |request| {
+        let outcome = match request.binding_id.as_str() {
+            "opaque-input.open" => opened(),
+            // The answer arrives only once the request is reassigned.
+            "opaque-promise.await" => {
+                held_await = Some(request.request_id.clone());
+                return Vec::new();
+            }
+            "opaque-time.sleep" => json!({"fire_at_ms": 61_000}),
+            "opaque-input.remind" => control("pending"),
+            "opaque-input.reassign" => {
+                return vec![
+                    complete(
+                        held_await.take().expect("awaiting"),
+                        json!({"outcome": "completed", "results": [
+                            {"promise_id": "promise_3", "status": "resolved", "output": {"approved": false}}
+                        ]}),
+                    ),
+                    complete(request.request_id.clone(), control("pending")),
+                ];
+            }
+            other => panic!("unexpected call {other}"),
+        };
+        vec![complete(request.request_id.clone(), outcome)]
+    });
+    let calls = requests
+        .iter()
+        .map(|request| request.binding_id.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(report.error, None);
     assert_eq!(report.return_value, Some(json!({"approved": false})));
     assert_eq!(
@@ -642,114 +630,77 @@ fn conformance_outcome(request: &HostRequest) -> Result<Value, HostError> {
     }
 }
 
-/// Drive a program live, completing each request after a pseudo-random
-/// delay drawn from `timing`, and record the completions in the order the
-/// program was sent them.
-async fn run_live(timing: u64) -> (Vec<HostRequest>, ExecutionReport, Journal) {
-    let mut execution = start(
+/// Run the conformance program, delivering its outstanding completions in
+/// an order and grouping drawn from `seed`, as a host whose calls finish at
+/// arbitrary times would, and record the order delivered.
+fn run_shuffled(seed: u64) -> (Vec<HostRequest>, ExecutionReport, Journal) {
+    let (mut instance, mut step) = ProgramInstance::start(
         program_input(CONFORMANCE_PROGRAM, &["test.call"], SEED),
-        Cancellation::default(),
+        StepBudget::default(),
     )
     .unwrap();
-    let sender = execution.completion_sender();
-    let journal = std::sync::Arc::new(std::sync::Mutex::new(Journal::new()));
-    let mut state = timing.max(1);
+    let mut state = seed.max(1);
+    let mut draw = move |below: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % below as u64) as usize
+    };
     let mut requests = Vec::new();
-    let mut tasks = Vec::new();
-    while let Some(event) = execution.next_event().await {
-        match event {
-            ExecutionEvent::Request(request) => {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                let delay = Duration::from_micros(state % 4_000);
-                let (sender, journal) = (sender.clone(), journal.clone());
-                let outcome = conformance_outcome(&request);
-                let request_id = request.request_id.clone();
-                requests.push(request);
-                tasks.push(tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    let mut journal = journal.lock().unwrap();
-                    let completion = HostCompletion {
-                        request_id,
-                        outcome,
-                        completed_at_ms: Some(2_000 + journal.len() as u64),
-                    };
-                    if sender.complete(completion.clone()).is_ok() {
-                        journal.push(completion);
-                    }
-                }));
-            }
-            ExecutionEvent::Finished(report) => {
-                for task in tasks {
-                    task.await.unwrap();
-                }
-                let journal = journal.lock().unwrap().clone();
-                return (requests, report, journal);
-            }
-        }
-    }
-    panic!("execution ended without a report");
-}
-
-/// Replay a program against a journal, sending the recorded completions in
-/// order as fast as the completion queue takes them, without waiting for
-/// the program to issue their requests.
-async fn replay(input: ExecutionInput, journal: Journal) -> (Vec<HostRequest>, ExecutionReport) {
-    let mut execution = start(input, Cancellation::default()).unwrap();
-    let sender = execution.completion_sender();
-    let mut journal = journal.into_iter().peekable();
-    let mut requests = Vec::new();
+    let mut outstanding = Vec::new();
+    let mut journal = Journal::new();
     loop {
-        while let Some(completion) = journal.peek() {
-            match sender.complete(completion.clone()) {
-                Ok(()) => {
-                    journal.next();
-                }
-                Err(CompletionError::Full | CompletionError::Stopped) => break,
-                Err(error) => panic!("replay completion refused: {error}"),
-            }
+        let (issued, finished) = match step {
+            Step::Waiting { requests } => (requests, None),
+            Step::Finished { requests, report } => (requests, Some(report)),
+        };
+        for request in &issued {
+            outstanding.push((request.request_id.clone(), conformance_outcome(request)));
         }
-        let event = tokio::time::timeout(Duration::from_millis(5), execution.next_event()).await;
-        match event {
-            Ok(Some(ExecutionEvent::Request(request))) => requests.push(request),
-            Ok(Some(ExecutionEvent::Finished(report))) => return (requests, report),
-            Ok(None) => panic!("execution ended without a report"),
-            Err(_) => {}
+        requests.extend(issued);
+        if let Some(report) = finished {
+            return (requests, report, journal);
         }
+        let mut batch = Vec::new();
+        for _ in 0..=draw(outstanding.len()) {
+            let (request_id, outcome) = outstanding.remove(draw(outstanding.len()));
+            batch.push(HostCompletion {
+                request_id,
+                outcome,
+                completed_at_ms: Some(2_000 + (journal.len() + batch.len()) as u64),
+            });
+        }
+        journal.extend(batch.iter().cloned());
+        step = instance.step(batch);
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_replayed_program_makes_the_same_calls_and_returns_the_same_output() {
+#[test]
+fn a_program_makes_the_same_calls_and_returns_the_same_output_from_its_journal() {
     let mut journals = HashSet::new();
-    for timing in 1..=24 {
-        let (live_requests, live, journal) = run_live(timing).await;
-        assert_eq!(live.error, None, "live run {timing} failed");
-        assert_eq!(live_requests.len(), 12);
+    for seed in 1..=24 {
+        let (shuffled_requests, shuffled, journal) = run_shuffled(seed);
+        assert_eq!(shuffled.error, None, "run {seed}");
+        assert_eq!(shuffled_requests.len(), 12);
         journals.insert(
             journal
                 .iter()
                 .map(|completion| completion.request_id.clone())
                 .collect::<Vec<_>>(),
         );
-        let (replayed_requests, replayed) = replay(
-            program_input(CONFORMANCE_PROGRAM, &["test.call"], SEED),
-            journal,
-        )
-        .await;
-        assert_eq!(replayed.error, None, "replay of run {timing} failed");
-        assert_eq!(
-            replayed_requests, live_requests,
-            "run {timing} calls differ"
-        );
-        assert_eq!(
-            replayed.return_value, live.return_value,
-            "run {timing} output differs"
-        );
+        // Replayed one completion per step, a few at a time or all at once,
+        // the program does exactly what it did.
+        for group in [1, 3, journal.len()] {
+            let (requests, report) = step_through(&journal, group);
+            assert_eq!(report.error, None, "run {seed} in groups of {group}");
+            assert_eq!(
+                requests, shuffled_requests,
+                "run {seed} in groups of {group}"
+            );
+            assert_eq!(report.return_value, shuffled.return_value);
+        }
     }
-    // The timings must actually have produced different completion orders,
-    // or the test proves nothing about order independence.
+    // The orders must actually differ, or the test proves nothing.
     assert!(
         journals.len() > 4,
         "only {} distinct orders",
@@ -757,8 +708,8 @@ async fn a_replayed_program_makes_the_same_calls_and_returns_the_same_output() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_recorded_completion_for_an_unissued_request_is_nondeterminism() {
+#[test]
+fn a_recorded_completion_for_an_unissued_request_is_nondeterminism() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -767,13 +718,16 @@ async fn a_recorded_completion_for_an_unissued_request_is_nondeterminism() {
             },
         };
     "#;
-    let journal = vec![HostCompletion {
+    let (mut instance, step) =
+        ProgramInstance::start(program_input(source, &["test.call"], SEED), STEP_BUDGET).unwrap();
+    assert!(matches!(step, Step::Waiting { requests } if requests.len() == 1));
+    let Step::Finished { report, .. } = instance.step(vec![HostCompletion {
         request_id: "call-2".into(),
         outcome: Ok(Value::Null),
         completed_at_ms: None,
-    }];
-    let (requests, report) = replay(program_input(source, &["test.call"], SEED), journal).await;
-    assert_eq!(requests.len(), 1);
+    }]) else {
+        panic!("a divergent completion ends the program")
+    };
     let error = report.error.unwrap();
     assert_eq!(error.kind, ExecutionErrorKind::Nondeterminism);
     assert!(error.message.contains("call-2"), "{}", error.message);
@@ -815,21 +769,6 @@ fn step_through(journal: &Journal, group: usize) -> (Vec<HostRequest>, Execution
                 );
                 return (requests, report);
             }
-        }
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a_stepped_program_replays_a_live_run_however_its_completions_are_grouped() {
-    for timing in 1..=8 {
-        let (live_requests, live, journal) = run_live(timing).await;
-        assert_eq!(live.error, None);
-        for group in [1, 3, journal.len()] {
-            let (requests, report) = step_through(&journal, group);
-            assert_eq!(report.error, None, "run {timing} in groups of {group}");
-            assert_eq!(requests, live_requests, "run {timing} in groups of {group}");
-            assert_eq!(report.return_value, live.return_value);
-            assert_eq!(report.metrics.tool_calls, live.metrics.tool_calls);
         }
     }
 }
@@ -914,65 +853,16 @@ fn terminal_error(report: &ExecutionReport) -> &ExecutionErrorKind {
     &report.error.as_ref().expect("an error").kind
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn the_deadline_stops_synchronous_and_microtask_loops() {
-    for source in [
-        "export default { run() { for (;;) {} } };",
-        "export default { async run() { for (;;) await null; } };",
-    ] {
-        let mut input = program_input(source, &[], SEED);
-        input.limits.timeout_ms = 100;
-        let (_, report) = run_program(input, |_| unreachable!()).await;
-        assert_eq!(
-            terminal_error(&report),
-            &ExecutionErrorKind::TimedOut,
-            "{source}"
-        );
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cancellation_stops_a_running_and_a_waiting_program() {
-    for source in [
-        "export default { run() { for (;;) {} } };",
-        "export default { async run(input, env) { await env.test.call({}); } };",
-    ] {
-        let cancellation = Cancellation::default();
-        let mut execution = start(
-            program_input(source, &["test.call"], SEED),
-            cancellation.clone(),
-        )
-        .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        cancellation.cancel();
-        let report = loop {
-            match tokio::time::timeout(Duration::from_secs(1), execution.next_event())
-                .await
-                .expect("the program stops")
-            {
-                Some(ExecutionEvent::Finished(report)) => break report,
-                Some(ExecutionEvent::Request(_)) => {}
-                None => panic!("execution ended without a report"),
-            }
-        };
-        assert_eq!(
-            terminal_error(&report),
-            &ExecutionErrorKind::Cancelled,
-            "{source}"
-        );
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn the_memory_limit_ends_the_program() {
+#[test]
+fn the_memory_limit_ends_the_program() {
     let source =
         "export default { run() { const a = []; for (;;) a.push(new Array(1e5).fill(1)); } };";
-    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!()).await;
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
     assert_eq!(terminal_error(&report), &ExecutionErrorKind::LimitExceeded);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn unknown_and_duplicate_completions_end_the_program() {
+#[test]
+fn a_duplicate_completion_ends_the_program() {
     let source = r#"
         export default {
             async run(input, env) {
@@ -981,46 +871,40 @@ async fn unknown_and_duplicate_completions_end_the_program() {
             },
         };
     "#;
-    for duplicate in [false, true] {
-        let mut execution = start(
-            program_input(source, &["test.call"], SEED),
-            Cancellation::default(),
-        )
-        .unwrap();
-        let sender = execution.completion_sender();
-        let Some(ExecutionEvent::Request(first)) = execution.next_event().await else {
-            panic!("first request")
+    let done = |request_id: &str| HostCompletion {
+        request_id: request_id.into(),
+        outcome: Ok(Value::Null),
+        completed_at_ms: None,
+    };
+    let (mut instance, _) =
+        ProgramInstance::start(program_input(source, &["test.call"], SEED), STEP_BUDGET).unwrap();
+    assert!(matches!(
+        instance.step(vec![done("call-1")]),
+        Step::Waiting { .. }
+    ));
+    // A completion already delivered is a faulty host, not a divergence.
+    let Step::Finished { report, .. } = instance.step(vec![done("call-1")]) else {
+        panic!("a duplicate completion ends the program")
+    };
+    assert_eq!(terminal_error(&report), &ExecutionErrorKind::Internal);
+    assert_eq!(report.pending_request_ids, ["call-2"]);
+}
+
+#[test]
+fn an_oversized_result_arrives_as_a_failure_the_program_can_catch() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                try {
+                    await env.test.call({});
+                } catch (error) {
+                    return error.kind;
+                }
+            },
         };
-        let complete = |request_id: &str| {
-            sender
-                .complete(HostCompletion {
-                    request_id: request_id.into(),
-                    outcome: Ok(Value::Null),
-                    completed_at_ms: None,
-                })
-                .unwrap()
-        };
-        if duplicate {
-            complete(&first.request_id);
-            let Some(ExecutionEvent::Request(_)) = execution.next_event().await else {
-                panic!("second request")
-            };
-            complete(&first.request_id);
-        } else {
-            complete("call-9");
-        }
-        let Some(ExecutionEvent::Finished(report)) = execution.next_event().await else {
-            panic!("terminal report")
-        };
-        // A completion for a request never issued is a divergence from a
-        // recorded run; one already delivered is a faulty host.
-        assert_eq!(
-            terminal_error(&report),
-            if duplicate {
-                &ExecutionErrorKind::Internal
-            } else {
-                &ExecutionErrorKind::Nondeterminism
-            }
-        );
-    }
+    "#;
+    let (_, report) = run_program(program_input(source, &["test.call"], SEED), |_| {
+        (Ok(json!("x".repeat(32 * 1024))), None)
+    });
+    assert_eq!(report.return_value, Some(json!("payload_too_large")));
 }

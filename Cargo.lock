@@ -3654,7 +3654,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]
@@ -5299,6 +5298,7 @@ dependencies = [
  "harness",
  "hex",
  "jsonschema",
+ "program-engine",
  "schemars",
  "serde",
  "serde_json",

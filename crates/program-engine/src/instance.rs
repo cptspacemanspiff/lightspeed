@@ -11,21 +11,16 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
 };
 
 use rquickjs::{Context, Ctx, Function, Persistent, Promise, Runtime, Value as JsValue};
 
 use crate::{
     engine::{
-        Prepared, RequestSink, State, apply_completion, error, native_error, prepare_context,
-        settled_value, validate,
+        Prepared, State, apply_completion, error, native_error, prepare_context, settled_value,
+        validate,
     },
-    *,
+    serialized_len, *,
 };
 
 /// What a program asks of its host after a step.
@@ -62,10 +57,6 @@ impl Default for StepBudget {
     }
 }
 
-/// Callbacks check a wall-clock deadline that a stepped instance never
-/// reaches; its only limit on work is the interrupt budget.
-const NO_DEADLINE: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
-
 struct Controls {
     deliver: Persistent<Function<'static>>,
     serialize: Persistent<Function<'static>>,
@@ -91,7 +82,7 @@ pub struct ProgramInstance {
 
 impl ProgramInstance {
     /// Compile and start a program, running it until it first has no
-    /// runnable job. `input.limits.timeout_ms` is not used.
+    /// runnable job.
     pub fn start(input: ExecutionInput, budget: StepBudget) -> Result<(Self, Step), StartError> {
         validate(&input)?;
         if budget.interrupts_per_step == 0 {
@@ -99,19 +90,17 @@ impl ProgramInstance {
                 "the step budget must be positive".into(),
             ));
         }
-        let runtime = Runtime::new().map_err(|failure| {
-            StartError::InvalidInput(format!("cannot create a JavaScript runtime: {failure}"))
-        })?;
+        let runtime = Runtime::new().map_err(|failure| StartError::Engine(failure.to_string()))?;
         runtime.set_memory_limit(input.limits.max_memory_bytes as usize);
         runtime.set_max_stack_size(input.limits.max_stack_bytes as usize);
-        let fatal = Arc::new(AtomicBool::new(false));
+        let fatal = Rc::new(Cell::new(false));
         let remaining = Rc::new(Cell::new(budget.interrupts_per_step));
         let exhausted = Rc::new(Cell::new(false));
         let handler_fatal = fatal.clone();
         let handler_remaining = remaining.clone();
         let handler_exhausted = exhausted.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || {
-            if handler_fatal.load(Ordering::Acquire) || handler_exhausted.get() {
+            if handler_fatal.get() || handler_exhausted.get() {
                 return true;
             }
             match handler_remaining.get() {
@@ -125,9 +114,8 @@ impl ProgramInstance {
                 }
             }
         })));
-        let context = Context::full(&runtime).map_err(|failure| {
-            StartError::InvalidInput(format!("cannot create a JavaScript context: {failure}"))
-        })?;
+        let context =
+            Context::full(&runtime).map_err(|failure| StartError::Engine(failure.to_string()))?;
         let mut instance = Self {
             controls: None,
             context,
@@ -140,8 +128,6 @@ impl ProgramInstance {
             exhausted,
             finished: None,
         };
-        let started = Instant::now();
-        let deadline = started + NO_DEADLINE;
         let prepared = instance.context.with(|ctx| {
             let Prepared {
                 deliver,
@@ -152,10 +138,7 @@ impl ProgramInstance {
                 &instance.input,
                 instance.state.clone(),
                 fatal,
-                &Cancellation::default(),
-                deadline,
-                started,
-                RequestSink::Buffer(instance.outbox.clone()),
+                instance.outbox.clone(),
             )?;
             Ok::<_, ExecutionError>(Controls {
                 deliver: Persistent::save(&ctx, deliver),
@@ -228,7 +211,16 @@ impl ProgramInstance {
                 if let Some(value) = settled()? {
                     return Ok(Some(value));
                 }
-                for completion in completions {
+                for mut completion in completions {
+                    // A result too large for the program arrives as a
+                    // failure in its place.
+                    if serialized_len(&completion) > limits.max_result_bytes {
+                        completion.outcome = Err(HostError {
+                            kind: "payload_too_large".into(),
+                            message: "host completion exceeds result budget".into(),
+                            value: None,
+                        });
+                    }
                     apply_completion(&ctx, &deliver, &state, completion)?;
                     if let Some(value) = settled()? {
                         return Ok(Some(value));

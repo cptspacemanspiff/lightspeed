@@ -13,7 +13,7 @@ use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{
     ActivityCancellationType, ActivityCloseTimeouts, ActivityOptions, CancellableFuture,
-    ContinueAsNewOptions, SyncWorkflowContext, WorkflowCancellationToken, WorkflowContext,
+    LocalActivityOptions, SyncWorkflowContext, WorkflowCancellationToken, WorkflowContext,
     WorkflowContextView, WorkflowResult,
 };
 
@@ -26,7 +26,6 @@ use crate::{
 
 const ACTIVITY_HEARTBEAT: Duration = Duration::from_secs(15);
 const ACTIVITY_CANCELLATION_GRACE: Duration = Duration::from_secs(20);
-const RUNNER_MAXIMUM_ATTEMPTS: i32 = 5;
 
 #[workflow]
 #[derive(Default)]
@@ -112,7 +111,7 @@ impl ProgramRunWorkflow {
                         state.snapshot.descriptor = Some((*descriptor).clone());
                         state.snapshot.phase = ProgramRunPhase::Running;
                     });
-                    run_attempts(ctx, &start, *descriptor).await?
+                    run_program(ctx, *descriptor).await
                 }
             }
         };
@@ -288,109 +287,236 @@ fn scope_progress(
         .then_some(*completed)
 }
 
-/// Run attempts until one finishes. A suspended attempt holds nothing: the
-/// workflow waits for the session to report progress on the run's scope,
-/// then starts the next attempt, which replays the program to where it
-/// stopped. Continues as new when its history grows long.
-async fn run_attempts(
+/// Run the pinned program in this workflow. The program is stepped on the
+/// workflow thread: the requests a step issues are admitted to the run's
+/// scope by one activity, and the session's progress emissions wake the
+/// workflow to collect outcomes, which feed the next step. Every input to a
+/// step is in this workflow's history, so a replay after a lost worker or
+/// cache eviction re-runs the program to the same point, and a waiting
+/// program holds nothing but this workflow.
+async fn run_program(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
-    start: &WorkflowToolStartArgs,
     descriptor: ProgramRunDescriptor,
-) -> WorkflowResult<ProgramRunTerminal> {
-    let mut attempt = 1;
+) -> ProgramRunTerminal {
+    let loaded = match cancellable(
+        ctx,
+        ctx.execute_activity(
+            WorkflowActivities::program_load,
+            crate::ProgramLoadActivityRequest {
+                descriptor: descriptor.clone(),
+            },
+            preparation_options(),
+        ),
+    )
+    .await
+    {
+        Err(reason) => return interrupted(reason),
+        Ok(Err(_)) => return interrupted(ProgramRunInterruption::PreparationFailed),
+        Ok(Ok(loaded)) => loaded,
+    };
+    let (source, input, context, bindings) = match loaded {
+        crate::ProgramLoadActivityResult::Refused { result } => {
+            return ProgramRunTerminal::Completed { result };
+        }
+        crate::ProgramLoadActivityResult::Loaded {
+            source,
+            input,
+            context,
+            bindings,
+        } => (source, input, context, bindings),
+    };
+    let started = program_engine::ProgramInstance::start(
+        program_engine::ExecutionInput {
+            source,
+            bindings,
+            limits: engine_limits(&descriptor.limits),
+            program: program_engine::ProgramExecution {
+                input,
+                started_at_ms: descriptor.started_at_ms,
+                random_seed: program_random_seed(&descriptor.execution_id),
+                context,
+            },
+        },
+        program_engine::StepBudget::default(),
+    );
+    let (mut instance, mut step) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            return conclude(
+                ctx,
+                &descriptor,
+                failed_report(
+                    program_engine::ExecutionErrorKind::Internal,
+                    error.to_string(),
+                ),
+            )
+            .await;
+        }
+    };
+    // Completions for the next step, in the order this history received
+    // them: admission rejections and collected outcomes.
+    let mut ready = Vec::new();
+    // Recorded outcomes of the scope already collected.
+    let mut collected = 0u64;
     loop {
-        let terminal = run_attempt(ctx, descriptor.clone(), attempt).await;
-        let ProgramRunTerminal::Completed {
-            result:
-                crate::ProgramAttemptActivityResult {
-                    outcome: crate::ProgramAttemptOutcome::Suspended { recorded, .. },
-                    ..
-                },
-        } = terminal
-        else {
-            return Ok(terminal);
+        let (requests, finished) = match step {
+            program_engine::Step::Waiting { requests } => (requests, None),
+            program_engine::Step::Finished { requests, report } => (requests, Some(report)),
         };
-        ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Suspended);
-        let woken =
-            ctx.wait_for_state(move |state| state.holder_cancelled || state.recorded > recorded);
-        let external_cancel = ctx.cancelled().fuse();
-        futures::pin_mut!(woken, external_cancel);
-        select_biased! {
-            _ = external_cancel => {
-                return Ok(ProgramRunTerminal::Interrupted {
-                    reason: ProgramRunInterruption::WorkflowCancelled,
-                    result: None,
-                });
-            }
-            _ = woken => {}
-        }
-        if ctx.state(|state| state.holder_cancelled) {
-            return Ok(ProgramRunTerminal::Interrupted {
-                reason: ProgramRunInterruption::HolderCancelled,
-                result: None,
-            });
-        }
-        if ctx.continue_as_new_suggested()
-            || ctx.history_length() >= crate::DEFAULT_CONTINUE_AS_NEW_HISTORY_THRESHOLD
-        {
-            // The next run prepares again, which reopens the same scope and
-            // builds the same descriptor, then replays from its journal.
-            match ctx.continue_as_new(start.clone(), ContinueAsNewOptions::default()) {
-                Ok(never) => match never {},
-                Err(termination) => return Err(termination),
+        if !requests.is_empty() {
+            let admitted = cancellable(
+                ctx,
+                ctx.execute_activity(
+                    WorkflowActivities::program_admit,
+                    crate::ProgramAdmitActivityRequest {
+                        descriptor: descriptor.clone(),
+                        requests,
+                    },
+                    admission_options(),
+                ),
+            )
+            .await;
+            match admitted {
+                Err(reason) => return interrupted(reason),
+                Ok(Err(error)) => {
+                    return interrupted(if error.as_timeout().is_some() {
+                        ProgramRunInterruption::ActivityTimedOut
+                    } else {
+                        ProgramRunInterruption::ActivityFailed
+                    });
+                }
+                Ok(Ok(result)) => ready.extend(result.rejected),
             }
         }
-        ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Running);
-        attempt += 1;
+        if let Some(report) = finished {
+            return conclude(ctx, &descriptor, report).await;
+        }
+        if ready.is_empty() {
+            ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Suspended);
+            let progressed = ctx
+                .wait_for_state(move |state| state.holder_cancelled || state.recorded > collected);
+            let external_cancel = ctx.cancelled().fuse();
+            futures::pin_mut!(progressed, external_cancel);
+            select_biased! {
+                _ = external_cancel => {
+                    return interrupted(ProgramRunInterruption::WorkflowCancelled);
+                }
+                _ = progressed => {}
+            }
+            if ctx.state(|state| state.holder_cancelled) {
+                return interrupted(ProgramRunInterruption::HolderCancelled);
+            }
+            ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Running);
+        }
+        if ctx.state(|state| state.recorded > collected) {
+            let page = ctx
+                .execute_local_activity(
+                    WorkflowActivities::program_collect,
+                    crate::ProgramCollectActivityRequest {
+                        session_workflow_id: descriptor.session_workflow_id.clone(),
+                        execution_id: descriptor.execution_id.clone(),
+                        after: collected,
+                        max_result_bytes: descriptor.limits.max_result_bytes,
+                    },
+                    collect_options(),
+                )
+                .await;
+            match page {
+                Ok(page) => {
+                    collected += page.completions.len() as u64;
+                    ready.extend(page.completions);
+                }
+                Err(_) => return interrupted(ProgramRunInterruption::ActivityFailed),
+            }
+        }
+        step = instance.step(std::mem::take(&mut ready));
     }
 }
 
-async fn run_attempt(
+/// Keep the finished program's output, context and report, and close the
+/// run's scope.
+async fn conclude(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
-    descriptor: ProgramRunDescriptor,
-    attempt: u32,
+    descriptor: &ProgramRunDescriptor,
+    report: program_engine::ExecutionReport,
 ) -> ProgramRunTerminal {
-    let options = runner_options(descriptor.limits.timeout_ms);
-    let mut activity = ctx.execute_activity(
-        WorkflowActivities::program_attempt,
-        crate::ProgramAttemptActivityRequest {
-            descriptor,
-            attempt,
-        },
-        options,
-    );
-    let outcome = {
-        let holder_cancel = ctx.wait_for_state(|state| state.holder_cancelled);
-        let external_cancel = ctx.cancelled().fuse();
-        let work = (&mut activity).fuse();
-        futures::pin_mut!(holder_cancel, external_cancel, work);
-        select_biased! {
-            _ = holder_cancel => Err(ProgramRunInterruption::HolderCancelled),
-            _ = external_cancel => Err(ProgramRunInterruption::WorkflowCancelled),
-            result = work => Ok(result),
-        }
-    };
-    match outcome {
-        Ok(Ok(result)) => ProgramRunTerminal::Completed { result },
-        Ok(Err(error)) => ProgramRunTerminal::Interrupted {
-            reason: if error.as_timeout().is_some() {
-                ProgramRunInterruption::ActivityTimedOut
-            } else {
-                ProgramRunInterruption::ActivityFailed
+    let concluded = ctx
+        .execute_activity(
+            WorkflowActivities::program_conclude,
+            crate::ProgramConcludeActivityRequest {
+                descriptor: descriptor.clone(),
+                report,
             },
-            result: None,
-        },
-        Err(reason) => {
-            activity.cancel();
-            let grace = ctx
-                .timer_with_manual_cancellation(ACTIVITY_CANCELLATION_GRACE)
-                .fuse();
-            let work = activity.fuse();
-            futures::pin_mut!(grace, work);
-            let result = select_biased! { result = work => result.ok(), _ = grace => None };
-            ProgramRunTerminal::Interrupted { reason, result }
-        }
+            finalization_options(),
+        )
+        .await;
+    match concluded {
+        Ok(result) => ProgramRunTerminal::Completed { result },
+        Err(_) => interrupted(ProgramRunInterruption::ActivityFailed),
     }
+}
+
+fn interrupted(reason: ProgramRunInterruption) -> ProgramRunTerminal {
+    ProgramRunTerminal::Interrupted {
+        reason,
+        result: None,
+    }
+}
+
+fn failed_report(
+    kind: program_engine::ExecutionErrorKind,
+    message: String,
+) -> program_engine::ExecutionReport {
+    program_engine::ExecutionReport {
+        return_value: None,
+        program_context: None,
+        error: Some(program_engine::ExecutionError { kind, message }),
+        pending_request_ids: Vec::new(),
+        metrics: Default::default(),
+    }
+}
+
+/// Race `work` against the holder's or the workflow's cancellation.
+async fn cancellable<T>(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, ProgramRunInterruption> {
+    let holder_cancel = ctx.wait_for_state(|state| state.holder_cancelled);
+    let external_cancel = ctx.cancelled().fuse();
+    let work = work.fuse();
+    futures::pin_mut!(holder_cancel, external_cancel, work);
+    select_biased! {
+        _ = holder_cancel => Err(ProgramRunInterruption::HolderCancelled),
+        _ = external_cancel => Err(ProgramRunInterruption::WorkflowCancelled),
+        result = work => Ok(result),
+    }
+}
+
+fn engine_limits(limits: &crate::CodeExecutionLimits) -> program_engine::ExecutionLimits {
+    program_engine::ExecutionLimits {
+        max_memory_bytes: limits.max_memory_bytes,
+        max_stack_bytes: limits.max_stack_bytes,
+        max_source_bytes: limits.max_source_bytes,
+        max_catalog_bytes: limits.max_catalog_bytes,
+        max_request_bytes: limits.max_request_bytes,
+        max_result_bytes: limits.max_result_bytes,
+        max_output_bytes: limits.max_output_bytes,
+        max_tool_calls: limits.max_tool_calls,
+        max_outstanding_tool_calls: limits.max_outstanding_tool_calls,
+    }
+}
+
+/// The seed of a program's randomness: a function of its execution id, so
+/// every replay draws the same values.
+pub fn program_random_seed(execution_id: &str) -> [u32; 4] {
+    let digest = harness::BlobRef::from_bytes(execution_id.as_bytes());
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("blob references are sha256 digests");
+    std::array::from_fn(|word| {
+        u32::from_str_radix(&hex[word * 8..word * 8 + 8], 16).expect("hex digest")
+    })
 }
 
 fn validate_start(
@@ -447,15 +573,16 @@ fn preparation_options() -> ActivityOptions {
     bounded_options(Duration::from_secs(60), Duration::from_secs(90), 3)
 }
 
-/// An attempt lost with its worker is retried: the next one replays the
-/// run's recorded calls. Retries share the run's wall-clock budget.
-fn runner_options(timeout_ms: u64) -> ActivityOptions {
-    let timeout = Duration::from_millis(timeout_ms);
-    bounded_options(
-        timeout.saturating_add(Duration::from_secs(30)),
-        timeout.saturating_add(Duration::from_secs(60)),
-        RUNNER_MAXIMUM_ATTEMPTS,
-    )
+/// Admission is idempotent per request id, so it retries freely.
+fn admission_options() -> ActivityOptions {
+    bounded_options(Duration::from_secs(30), Duration::from_secs(120), 5)
+}
+
+fn collect_options() -> LocalActivityOptions {
+    LocalActivityOptions::builder()
+        .schedule_to_close_timeout(Duration::from_secs(60))
+        .start_to_close_timeout(Duration::from_secs(30))
+        .build()
 }
 
 fn finalization_options() -> ActivityOptions {

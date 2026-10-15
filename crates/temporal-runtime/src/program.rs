@@ -1,38 +1,28 @@
-//! Host bridge for one attempt of a program run. The attempt issues the
-//! program's calls through the run's scope and learns their outcomes only
-//! from the scope's recorded-outcome feed, in log order, so a replaying
-//! attempt will see completions in the same order a live one did.
+//! The session side of a program run that its workflow drives: loading the
+//! pinned program, admitting the requests each step issues to the run's
+//! scope, collecting recorded outcomes in log order, and concluding the run
+//! by keeping its output and context and closing the scope.
 //!
-//! The program is a module whose default export has a `run(input, env, ctx)`
-//! handler. Its `env` holds only the contracts it was pinned to, and every
-//! attempt re-checks those pins against the scope before the program starts.
-//!
-//! An attempt after a lost one replays: the program re-issues the calls an
-//! earlier attempt made, which are checked against their recorded binding
-//! and arguments instead of being admitted again, and receives the recorded
-//! outcomes in log order before any new one.
+//! The program itself runs in `ProgramRunWorkflow` on a
+//! `program_engine::ProgramInstance`; nothing here holds an interpreter.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::Duration,
 };
 
-use futures_util::{StreamExt, stream::FuturesUnordered};
 use harness::{BlobRef, storage::BlobStore};
-use program_engine::{ExecutionEvent, HostCompletion, HostError, HostRequest};
+use program_engine::{HostCompletion, HostError, HostRequest};
 use serde_json::Value;
 use temporal_workflow::{
-    CodeToolCallOutcome, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
-    CodeToolScopeReportRequest, InvokeCodeToolRequest, MAX_RECORDED_OUTCOMES_PER_PAGE,
-    ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
+    CodeToolCallOutcome as RecordedOutcome, CodeToolClient, CodeToolRejectionKind,
+    CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
+    MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
-use tokio::{sync::Semaphore, time::Instant};
+use tokio::sync::Semaphore;
 use tools::program::contracts::ContractError;
-
-use program_engine::Cancellation;
-use temporal_workflow::{CodeExecutionLimits, CodeToolCallOutcome as RecordedOutcome};
 
 use crate::code::{CodeRunError, CodeRunner, read_bounded};
 
@@ -54,21 +44,6 @@ pub struct CodeRunReport {
     pub scope: Option<CodeToolScopeReport>,
     /// A missing final receipt means unfinished effect outcomes are unknown.
     pub cleanup_error: Option<String>,
-}
-
-fn engine_limits(limits: &CodeExecutionLimits) -> program_engine::ExecutionLimits {
-    program_engine::ExecutionLimits {
-        timeout_ms: limits.timeout_ms,
-        max_memory_bytes: limits.max_memory_bytes,
-        max_stack_bytes: limits.max_stack_bytes,
-        max_source_bytes: limits.max_source_bytes,
-        max_catalog_bytes: limits.max_catalog_bytes,
-        max_request_bytes: limits.max_request_bytes,
-        max_result_bytes: limits.max_result_bytes,
-        max_output_bytes: limits.max_output_bytes,
-        max_tool_calls: limits.max_tool_calls,
-        max_outstanding_tool_calls: limits.max_outstanding_tool_calls,
-    }
 }
 
 fn host_error(kind: &str, message: impl Into<String>) -> HostError {
@@ -94,72 +69,8 @@ async fn materialize(
         })
 }
 
-async fn cancellable_preparation<T>(
-    deadline: Instant,
-    cancellation: &Cancellation,
-    work: impl std::future::Future<Output = Result<T, CodeRunError>>,
-) -> Result<T, CodeRunError> {
-    let cancelled = async {
-        while !cancellation.is_cancelled() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    };
-    tokio::select! {
-        biased;
-        () = cancelled => Err(CodeRunError::Cancelled),
-        result = tokio::time::timeout_at(deadline, work) => {
-            result.unwrap_or(Err(CodeRunError::PreparationTimedOut))
-        }
-    }
-}
-
 /// Bytes of a program context's JSON shown as its preview.
 const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
-
-/// How often an attempt with calls in flight asks the session for outcomes.
-const OUTCOME_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Overrides how long an attempt holds a program that waits only on calls
-/// before suspending it, in milliseconds.
-pub const PROGRAM_HOLD_WINDOW_ENV: &str = "LIGHTSPEED_PROGRAM_HOLD_WINDOW_MS";
-
-/// Long enough that short tool calls finish inside one attempt.
-pub const DEFAULT_PROGRAM_HOLD_WINDOW: Duration = Duration::from_secs(30);
-
-/// The hold window from [`PROGRAM_HOLD_WINDOW_ENV`], or the default when it
-/// is unset or empty.
-pub fn program_hold_window_from_env() -> Result<Duration, String> {
-    match std::env::var(PROGRAM_HOLD_WINDOW_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        None => Ok(DEFAULT_PROGRAM_HOLD_WINDOW),
-        Some(value) => value
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|millis| *millis > 0)
-            .map(Duration::from_millis)
-            .ok_or_else(|| {
-                format!("{PROGRAM_HOLD_WINDOW_ENV} must be a positive number of milliseconds")
-            }),
-    }
-}
-
-/// How one attempt of a program run ended.
-#[derive(Debug)]
-pub enum AttemptEnd {
-    /// The program returned or failed, and its scope is closed.
-    Finished(Box<CodeRunReport>),
-    /// The program waited only on calls for the hold window. Its interpreter
-    /// is gone and its scope stays open: the next attempt replays to here.
-    Suspended {
-        /// Recorded outcomes the program had received.
-        recorded: u64,
-        /// Requests it was waiting on.
-        waiting_on: Vec<String>,
-    },
-}
 
 #[derive(Clone)]
 pub struct ProgramRunner {
@@ -167,7 +78,6 @@ pub struct ProgramRunner {
     blobs: Arc<dyn BlobStore>,
     capacity: Arc<Semaphore>,
     cleanup_timeout: Duration,
-    hold_window: Duration,
 }
 
 impl ProgramRunner {
@@ -182,14 +92,7 @@ impl ProgramRunner {
             blobs,
             capacity,
             cleanup_timeout,
-            hold_window: DEFAULT_PROGRAM_HOLD_WINDOW,
         }
-    }
-
-    /// Suspend a program that has waited only on calls for `hold_window`.
-    pub fn with_hold_window(mut self, hold_window: Duration) -> Self {
-        self.hold_window = hold_window;
-        self
     }
 
     fn code_runner(&self) -> CodeRunner {
@@ -213,314 +116,154 @@ impl ProgramRunner {
             .await
     }
 
-    /// Run one attempt until the program finishes or suspends. Dropping the
-    /// caller cancels the interpreter; the scope is closed when the program
-    /// finishes or the attempt fails, and stays open when it suspends.
-    pub async fn run_attempt(
+    /// What a workflow needs to run the program itself, with the pins
+    /// re-checked against the run's open scope.
+    pub async fn load(
         &self,
-        descriptor: ProgramRunDescriptor,
-        cancellation: Cancellation,
-    ) -> Result<AttemptEnd, CodeRunError> {
-        struct CancelOnDrop(Cancellation);
-        impl Drop for CancelOnDrop {
-            fn drop(&mut self) {
-                self.0.cancel();
-            }
-        }
-        let _guard = CancelOnDrop(cancellation.clone());
-        let runner = self.clone();
-        tokio::spawn(async move { runner.attempt(descriptor, cancellation).await })
-            .await
-            .map_err(|error| CodeRunError::HostStopped(error.to_string()))?
-    }
-
-    async fn attempt(
-        &self,
-        descriptor: ProgramRunDescriptor,
-        cancellation: Cancellation,
-    ) -> Result<AttemptEnd, CodeRunError> {
+        descriptor: &ProgramRunDescriptor,
+    ) -> Result<LoadedProgram, CodeRunError> {
         descriptor
             .validate()
             .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(descriptor.limits.timeout_ms))
-            .ok_or_else(|| CodeRunError::Configuration("timeout is too large".into()))?;
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
-        let scope = cancellable_preparation(deadline, &cancellation, async {
-            code_tools
-                .report(
-                    CodeToolScopeReportRequest {
-                        execution_id: descriptor.execution_id.clone(),
-                    },
-                    Default::default(),
-                )
-                .await
-                .map_err(|error| CodeRunError::Preparation(error.to_string()))?
-                .map_err(|error| CodeRunError::Preparation(error.to_string()))
-        })
-        .await?;
+        let scope = code_tools
+            .report(
+                CodeToolScopeReportRequest {
+                    execution_id: descriptor.execution_id.clone(),
+                },
+                Default::default(),
+            )
+            .await
+            .map_err(|error| CodeRunError::Preparation(error.to_string()))?
+            .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
         if scope.execution_id != descriptor.execution_id || scope.closed {
             return Err(CodeRunError::Preparation(
-                "program attempt requires the run's open scope".into(),
+                "program requires the run's open scope".into(),
             ));
         }
-        // Calls an earlier attempt of this run admitted. The program issues
-        // them again as it replays, and must issue them the same way.
-        let recorded = scope.calls.clone();
-        let prepare = async {
-            let permit = self
-                .capacity
-                .acquire()
-                .await
-                .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
-            let source = read_bounded(
-                self.blobs.as_ref(),
-                &descriptor.source_ref,
-                descriptor.limits.max_source_bytes,
-            )
-            .await
-            .map_err(|error| CodeRunError::Preparation(error.message))?;
-            let source = String::from_utf8(source)
-                .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
-            let input = read_bounded(
-                self.blobs.as_ref(),
-                &descriptor.input_ref,
-                descriptor.limits.max_request_bytes,
-            )
-            .await
-            .map_err(|error| CodeRunError::Preparation(error.message))?;
-            let input: Value = serde_json::from_slice(&input).map_err(|error| {
-                CodeRunError::Preparation(format!("input is not JSON: {error}"))
-            })?;
-            let context = match &descriptor.context_ref {
-                Some(context_ref) => {
-                    let bytes = read_bounded(
-                        self.blobs.as_ref(),
+        let read = |reference: &BlobRef, limit: u64| {
+            let blobs = self.blobs.clone();
+            let reference = reference.clone();
+            async move {
+                read_bounded(blobs.as_ref(), &reference, limit)
+                    .await
+                    .map_err(|error| CodeRunError::Preparation(error.message))
+            }
+        };
+        let source = String::from_utf8(
+            read(&descriptor.source_ref, descriptor.limits.max_source_bytes).await?,
+        )
+        .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
+        let input: Value = serde_json::from_slice(
+            &read(&descriptor.input_ref, descriptor.limits.max_request_bytes).await?,
+        )
+        .map_err(|error| CodeRunError::Preparation(format!("input is not JSON: {error}")))?;
+        let context = match &descriptor.context_ref {
+            Some(context_ref) => Some(
+                serde_json::from_slice::<Value>(
+                    &read(
                         context_ref,
                         program_engine::MAX_PROGRAM_CONTEXT_BYTES as u64,
                     )
-                    .await
-                    .map_err(|error| CodeRunError::Preparation(error.message))?;
-                    Some(serde_json::from_slice::<Value>(&bytes).map_err(|error| {
-                        CodeRunError::Preparation(format!("program context is not JSON: {error}"))
-                    })?)
+                    .await?,
+                )
+                .map_err(|error| {
+                    CodeRunError::Preparation(format!("program context is not JSON: {error}"))
+                })?,
+            ),
+            None => None,
+        };
+        let catalog: ProgramCatalog = serde_json::from_slice(
+            &read(&descriptor.catalog_ref, descriptor.limits.max_catalog_bytes).await?,
+        )
+        .map_err(|error| CodeRunError::Catalog(error.to_string()))?;
+        if program_catalog(&scope, &descriptor.requires)?.bindings != catalog.bindings {
+            return Err(CodeRunError::Catalog(
+                "program catalog does not match the scope's contract bindings".into(),
+            ));
+        }
+        Ok(LoadedProgram {
+            source,
+            input,
+            context,
+            bindings: catalog.bindings,
+        })
+    }
+
+    /// Admit one step's requests to the run's scope, in issue order, and
+    /// return the failures the program receives for those not admitted. A
+    /// transport failure is returned as an error so the step is retried;
+    /// admission is idempotent per request id.
+    pub async fn admit_step(
+        &self,
+        descriptor: &ProgramRunDescriptor,
+        requests: Vec<HostRequest>,
+    ) -> Result<Vec<HostCompletion>, AdmitStepError> {
+        let code_tools =
+            CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
+        let mut rejected = Vec::new();
+        for request in requests {
+            match self.admit(&code_tools, descriptor, request).await {
+                Ok(_) => {}
+                Err(Admission::Conflict(request_id)) => {
+                    return Err(AdmitStepError::Diverged(request_id));
                 }
-                None => None,
-            };
-            let catalog = read_bounded(
-                self.blobs.as_ref(),
-                &descriptor.catalog_ref,
-                descriptor.limits.max_catalog_bytes,
+                Err(Admission::Rejected(completion)) => {
+                    if matches!(&completion.outcome, Err(error) if error.kind == "transport") {
+                        return Err(AdmitStepError::Transport(completion.request_id));
+                    }
+                    rejected.push(completion);
+                }
+            }
+        }
+        Ok(rejected)
+    }
+
+    /// The scope's recorded outcomes after the first `after`, as the
+    /// completions a program receives, in log order.
+    pub async fn collect(
+        &self,
+        session_workflow_id: &str,
+        execution_id: &str,
+        after: u64,
+        max_result_bytes: u64,
+    ) -> Result<Vec<HostCompletion>, String> {
+        let code_tools = CodeToolClient::new(self.client.clone(), session_workflow_id.to_owned());
+        let page = code_tools
+            .recorded_outcomes(
+                ScopeRecordedOutcomesRequest {
+                    execution_id: execution_id.to_owned(),
+                    after,
+                    limit: MAX_RECORDED_OUTCOMES_PER_PAGE,
+                },
+                Default::default(),
             )
             .await
-            .map_err(|error| CodeRunError::Preparation(error.message))?;
-            let catalog: ProgramCatalog = serde_json::from_slice(&catalog)
-                .map_err(|error| CodeRunError::Catalog(error.to_string()))?;
-            // Re-check the pins against the scope as it is now: a contract
-            // that changed or was revoked fails this attempt before it runs.
-            if program_catalog(&scope, &descriptor.requires)?.bindings != catalog.bindings {
-                return Err(CodeRunError::Catalog(
-                    "program catalog does not match the scope's contract bindings".into(),
-                ));
-            }
-            if cancellation.is_cancelled() {
-                return Err(CodeRunError::Cancelled);
-            }
-            Ok((permit, source, input, context, catalog))
-        };
-        let (_permit, source, input, context, catalog) =
-            match cancellable_preparation(deadline, &cancellation, prepare).await {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    return Err(self
-                        .preparation_failed(&code_tools, &descriptor.execution_id, scope, error)
-                        .await);
-                }
-            };
-        let mut limits = engine_limits(&descriptor.limits);
-        limits.timeout_ms = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-        if limits.timeout_ms == 0 {
-            return Err(self
-                .preparation_failed(
-                    &code_tools,
-                    &descriptor.execution_id,
-                    scope,
-                    CodeRunError::PreparationTimedOut,
-                )
-                .await);
-        }
-        let mut execution = match program_engine::start(
-            program_engine::ExecutionInput {
-                source,
-                bindings: catalog.bindings,
-                limits,
-                program: program_engine::ProgramExecution {
-                    input,
-                    started_at_ms: descriptor.started_at_ms,
-                    random_seed: random_seed(&descriptor.execution_id),
-                    context,
-                },
-            },
-            cancellation,
-        ) {
-            Ok(execution) => execution,
-            Err(error) => {
-                return Err(self
-                    .preparation_failed(&code_tools, &descriptor.execution_id, scope, error.into())
-                    .await);
-            }
-        };
-        let completions = execution.completion_sender();
-        let mut admissions = FuturesUnordered::new();
-        // Requests the program has issued whose outcomes have not been read
-        // from the recorded feed yet.
-        let mut awaited = BTreeSet::new();
-        // Completions in the order the program must receive them: the
-        // recorded feed in log order, which a replaying attempt sends ahead
-        // of the requests they answer.
-        let mut feed = VecDeque::new();
-        let mut journal_read = false;
-        let mut cursor = 0u64;
-        let mut poll = tokio::time::interval(OUTCOME_POLL_INTERVAL);
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut bridge_failure: Option<program_engine::ExecutionError> = None;
-        // When the attempt last saw the program or the session move.
-        let mut idle_since = Instant::now();
-        let report = loop {
-            if bridge_failure.is_none() {
-                match send_feed(&completions, &mut feed) {
-                    Ok(0) => {}
-                    Ok(_) => idle_since = Instant::now(),
-                    Err(error) => {
-                        bridge_failure = Some(error);
-                        execution.cancel();
-                    }
-                }
-            }
-            let suspendable = bridge_failure.is_none()
-                && journal_read
-                && !awaited.is_empty()
-                && feed.is_empty()
-                && admissions.is_empty();
-            tokio::select! {
-                // A program that has waited only on calls for the hold
-                // window is suspended: replaying it later is cheaper than
-                // holding an interpreter while people or long jobs answer.
-                () = tokio::time::sleep_until(idle_since + self.hold_window), if suspendable => {
-                    if execution.is_waiting() {
-                        break None;
-                    }
-                    idle_since = Instant::now();
-                }
-                event = execution.next_event() => match event {
-                    Some(ExecutionEvent::Request(request)) => {
-                        idle_since = Instant::now();
-                        match replay_check(&recorded, &request) {
-                            // A recorded request is not admitted again: its
-                            // outcome, or the wait for it, is in the feed.
-                            Ok(true) => { awaited.insert(request.request_id); }
-                            Ok(false) => admissions.push(self.admit(&code_tools, &descriptor, request)),
-                            Err(error) => if bridge_failure.is_none() {
-                                bridge_failure = Some(error);
-                                execution.cancel();
-                            },
-                        }
-                    }
-                    Some(ExecutionEvent::Finished(mut report)) => {
-                        if let Some(error) = bridge_failure.take() {
-                            report.error = Some(error);
-                        }
-                        break Some(report);
-                    }
-                    None => break Some(program_engine::ExecutionReport {
-                        return_value: None,
-                        program_context: None,
-                        error: Some(program_engine::ExecutionError {
-                            kind: program_engine::ExecutionErrorKind::Internal,
-                            message: "interpreter stopped without a report; consult scope outcomes".into(),
-                        }),
-                        pending_request_ids: Vec::new(), metrics: Default::default(),
-                    }),
-                },
-                Some(admitted) = admissions.next(), if !admissions.is_empty() => match admitted {
-                    Ok(request_id) => {
-                        idle_since = Instant::now();
-                        awaited.insert(request_id);
-                    }
-                    Err(Admission::Rejected(completion)) => feed.push_back(completion),
-                    // The session recorded this request with another binding
-                    // or arguments: an earlier attempt issued it differently.
-                    Err(Admission::Conflict(request_id)) => if bridge_failure.is_none() {
-                        bridge_failure = Some(diverged(&request_id, "was admitted with another binding or arguments"));
-                        execution.cancel();
-                    },
-                },
-                _ = poll.tick(), if !journal_read || !awaited.is_empty() || !feed.is_empty() => {
-                    if journal_read && awaited.is_empty() {
-                        // Only the queue is waiting for room; the loop's
-                        // next pass retries it.
-                        continue;
-                    }
-                    let page = code_tools
-                        .recorded_outcomes(
-                            ScopeRecordedOutcomesRequest {
-                                execution_id: descriptor.execution_id.clone(),
-                                after: cursor,
-                                limit: MAX_RECORDED_OUTCOMES_PER_PAGE,
-                            },
-                            Default::default(),
-                        )
-                        .await;
-                    let page = match page {
-                        Ok(Ok(page)) => page,
-                        Ok(Err(error)) => {
-                            if bridge_failure.is_none() {
-                                bridge_failure = Some(program_engine::ExecutionError {
-                                    kind: program_engine::ExecutionErrorKind::Internal,
-                                    message: format!("recorded outcomes unavailable: {error}"),
-                                });
-                                execution.cancel();
-                            }
-                            continue;
-                        }
-                        Err(_) => continue,
-                    };
-                    journal_read |= page.outcomes.len() < MAX_RECORDED_OUTCOMES_PER_PAGE as usize;
-                    if !page.outcomes.is_empty() {
-                        idle_since = Instant::now();
-                    }
-                    for outcome in &page.outcomes {
-                        cursor += 1;
-                        awaited.remove(&outcome.request_id);
-                        feed.push_back(HostCompletion {
-                            request_id: outcome.request_id.clone(),
-                            outcome: materialize(
-                                self.blobs.as_ref(),
-                                outcome,
-                                descriptor.limits.max_result_bytes,
-                            )
-                            .await
-                            .map_err(structured_failure),
-                            completed_at_ms: outcome.completed_at_ms,
-                        });
-                    }
-                }
-            }
-        };
-        drop(admissions);
-        drop(execution);
-        let Some(report) = report else {
-            return Ok(AttemptEnd::Suspended {
-                recorded: cursor,
-                waiting_on: awaited.into_iter().collect(),
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let mut completions = Vec::with_capacity(page.outcomes.len());
+        for outcome in &page.outcomes {
+            completions.push(HostCompletion {
+                request_id: outcome.request_id.clone(),
+                outcome: materialize(self.blobs.as_ref(), outcome, max_result_bytes)
+                    .await
+                    .map_err(structured_failure),
+                completed_at_ms: outcome.completed_at_ms,
             });
-        };
-        // A program that returned keeps its context with the scope's close;
-        // the session writes it only if the run completes.
+        }
+        Ok(completions)
+    }
+
+    /// Keep a finished program's context with the scope's close, and close
+    /// the run's scope.
+    pub async fn conclude(
+        &self,
+        descriptor: &ProgramRunDescriptor,
+        report: program_engine::ExecutionReport,
+    ) -> CodeRunReport {
+        let code_tools =
+            CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
         let mut cleanup_error = None;
         let program_context = match (&report.error, &report.program_context) {
             (None, Some(value)) => match self.keep_context(value).await {
@@ -534,19 +277,13 @@ impl ProgramRunner {
         };
         let (scope, close_error) = self
             .code_runner()
-            .close_scope(
-                &code_tools,
-                &descriptor.execution_id,
-                Some(scope),
-                program_context,
-            )
+            .close_scope(&code_tools, &descriptor.execution_id, None, program_context)
             .await;
-        let cleanup_error = cleanup_error.or(close_error);
-        Ok(AttemptEnd::Finished(Box::new(CodeRunReport {
+        CodeRunReport {
             execution: report,
             scope,
-            cleanup_error,
-        })))
+            cleanup_error: cleanup_error.or(close_error),
+        }
     }
 
     async fn keep_context(&self, value: &Value) -> Result<harness::ProgramContextInput, String> {
@@ -565,23 +302,6 @@ impl ProgramRunner {
             content_ref,
             preview: Some(preview),
         })
-    }
-
-    async fn preparation_failed(
-        &self,
-        code_tools: &CodeToolClient,
-        execution_id: &str,
-        scope: CodeToolScopeReport,
-        source: CodeRunError,
-    ) -> CodeRunError {
-        let (_, cleanup_error) = self.cleanup(code_tools, execution_id, Some(scope)).await;
-        match cleanup_error {
-            Some(cleanup_error) => CodeRunError::Cleanup {
-                source: Box::new(source),
-                cleanup_error,
-            },
-            None => source,
-        }
     }
 
     /// Admit one call. The reply only acknowledges admission; the outcome
@@ -641,6 +361,24 @@ impl ProgramRunner {
     }
 }
 
+/// A program as a workflow runs it.
+#[derive(Debug)]
+pub struct LoadedProgram {
+    pub source: String,
+    pub input: Value,
+    pub context: Option<Value>,
+    pub bindings: Vec<program_engine::ToolBinding>,
+}
+
+/// Why one step's requests could not all be admitted or refused.
+#[derive(Debug, thiserror::Error)]
+pub enum AdmitStepError {
+    #[error("request {0} was admitted earlier with another binding or arguments")]
+    Diverged(String),
+    #[error("admission of {0} is unknown after a transport failure")]
+    Transport(String),
+}
+
 /// Why a request was not admitted.
 enum Admission {
     /// The program receives this failure in place of an outcome.
@@ -651,79 +389,6 @@ enum Admission {
 
 /// Marks a conflicting admission inside `admit`; never reaches a program.
 const CONFLICT: &str = "conflict";
-
-/// Whether a request the program issued was recorded by an earlier
-/// attempt: `Ok(true)` if it was, with the same binding and arguments,
-/// `Ok(false)` if it is new, and a nondeterminism error if the program
-/// issued it differently this time.
-fn replay_check(
-    recorded: &BTreeMap<String, CodeToolCallOutcome>,
-    request: &HostRequest,
-) -> Result<bool, program_engine::ExecutionError> {
-    let Some(call) = recorded.get(&request.request_id) else {
-        return Ok(false);
-    };
-    if call
-        .binding_id
-        .as_ref()
-        .is_some_and(|binding| *binding != request.binding_id)
-    {
-        return Err(diverged(&request.request_id, "names another binding"));
-    }
-    if let Some(arguments_ref) = &call.arguments_ref {
-        // Argument blobs are serde_json's serialization of a `Value`, whose
-        // objects keep their keys sorted: equal arguments give equal bytes
-        // whatever order the program built them in.
-        let bytes = serde_json::to_vec(&request.arguments)
-            .map_err(|error| diverged(&request.request_id, &error.to_string()))?;
-        if BlobRef::from_bytes(&bytes) != *arguments_ref {
-            return Err(diverged(&request.request_id, "has other arguments"));
-        }
-    }
-    Ok(true)
-}
-
-fn diverged(request_id: &str, how: &str) -> program_engine::ExecutionError {
-    program_engine::ExecutionError {
-        kind: program_engine::ExecutionErrorKind::Nondeterminism,
-        message: format!("replayed request {request_id} {how} than the recorded run"),
-    }
-}
-
-/// Send queued completions in order until the program's completion queue
-/// is full, and count those sent. One too large to deliver is replaced by
-/// a failure in place.
-fn send_feed(
-    completions: &program_engine::CompletionSender,
-    feed: &mut VecDeque<HostCompletion>,
-) -> Result<usize, program_engine::ExecutionError> {
-    let mut sent = 0;
-    while let Some(completion) = feed.front() {
-        match completions.complete(completion.clone()) {
-            Ok(()) => {
-                feed.pop_front();
-                sent += 1;
-            }
-            Err(program_engine::CompletionError::Full) => return Ok(sent),
-            Err(program_engine::CompletionError::TooLarge) => {
-                let request_id = completion.request_id.clone();
-                feed[0] = HostCompletion {
-                    request_id,
-                    outcome: Err(host_error(
-                        "payload_too_large",
-                        "host completion exceeds result budget",
-                    )),
-                    completed_at_ms: completion.completed_at_ms,
-                };
-            }
-            Err(program_engine::CompletionError::Stopped) => {
-                feed.clear();
-                return Ok(sent);
-            }
-        }
-    }
-    Ok(sent)
-}
 
 /// A tool failure whose error is a `{ code, message }` document (an
 /// input request's `deadline_exceeded`, say) reaches the program with
@@ -784,19 +449,6 @@ pub(crate) fn program_catalog(
                 binding_id: handle.clone(),
             })
             .collect(),
-    })
-}
-
-/// The seed of a program's randomness: a function of its execution id, so
-/// every attempt of a run draws the same values.
-pub(crate) fn random_seed(execution_id: &str) -> [u32; 4] {
-    let digest = BlobRef::from_bytes(execution_id.as_bytes());
-    let hex = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .expect("blob references are sha256 digests");
-    std::array::from_fn(|word| {
-        u32::from_str_radix(&hex[word * 8..word * 8 + 8], 16).expect("hex digest")
     })
 }
 
@@ -893,76 +545,5 @@ mod tests {
             program_catalog(&scope, &[pin("env.run_process", &read)]),
             Err(ContractError::Unavailable { .. })
         ));
-    }
-
-    #[test]
-    fn random_seeds_follow_the_execution() {
-        assert_eq!(random_seed("wtx:a"), random_seed("wtx:a"));
-        assert_ne!(random_seed("wtx:a"), random_seed("wtx:b"));
-    }
-
-    fn recorded(binding: &str, arguments: &Value) -> BTreeMap<String, CodeToolCallOutcome> {
-        [(
-            "call-1".to_owned(),
-            CodeToolCallOutcome {
-                request_id: "call-1".into(),
-                call_id: harness::ToolCallId::new("tool-1"),
-                binding_id: Some(binding.into()),
-                arguments_ref: Some(BlobRef::from_bytes(&serde_json::to_vec(arguments).unwrap())),
-                status: temporal_workflow::CodeToolCallStatus::Pending,
-                output_ref: None,
-                error_ref: None,
-                attachments: Vec::new(),
-                completed_at_ms: None,
-            },
-        )]
-        .into()
-    }
-
-    fn request(id: &str, binding: &str, arguments: Value) -> HostRequest {
-        HostRequest {
-            request_id: id.into(),
-            binding_id: binding.into(),
-            arguments,
-        }
-    }
-
-    #[test]
-    fn replayed_requests_must_match_their_recorded_binding_and_arguments() {
-        let journal = recorded("h-fetch", &serde_json::json!({"url": "a", "depth": 1}));
-        // Key order is not part of the arguments.
-        let same: Value = serde_json::from_str(r#"{"depth": 1, "url": "a"}"#).unwrap();
-        assert_eq!(
-            replay_check(&journal, &request("call-1", "h-fetch", same)),
-            Ok(true)
-        );
-        assert_eq!(
-            replay_check(&journal, &request("call-2", "h-other", Value::Null)),
-            Ok(false)
-        );
-        for diverged in [
-            request(
-                "call-1",
-                "h-other",
-                serde_json::json!({"url": "a", "depth": 1}),
-            ),
-            request(
-                "call-1",
-                "h-fetch",
-                serde_json::json!({"url": "b", "depth": 1}),
-            ),
-            request(
-                "call-1",
-                "h-fetch",
-                serde_json::json!({"url": "a", "depth": 1.5}),
-            ),
-        ] {
-            let error = replay_check(&journal, &diverged).unwrap_err();
-            assert_eq!(
-                error.kind,
-                program_engine::ExecutionErrorKind::Nondeterminism
-            );
-            assert!(error.message.contains("call-1"), "{}", error.message);
-        }
     }
 }

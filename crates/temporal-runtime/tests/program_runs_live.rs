@@ -20,7 +20,6 @@ use support::live::{
     LIVE_TEST_LOCK, live_universe_id, read_session_view, require_storage_live_env,
     run_with_live_worker_builder, seed_agent_default, wait_for_terminal_run,
 };
-use temporal_runtime::program::DEFAULT_PROGRAM_HOLD_WINDOW;
 use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
@@ -29,6 +28,8 @@ use temporal_runtime::{
         worker_runtime,
     },
 };
+use temporal_workflow::{ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD};
+use temporalio_sdk::workflow_replayer::{WorkflowReplayer, WorkflowReplayerOptions};
 use tools::human_input::{
     INPUT_DEFAULT_DEADLINE_ENV, INPUT_MIN_DEADLINE_ENV, INPUT_MIN_REMIND_AFTER_ENV, InputTimeouts,
 };
@@ -233,20 +234,15 @@ async fn with_program_workers(
     input_timeouts: InputTimeouts,
     body: impl FnOnce(Arc<GatewayAgentApi>, Arc<store_pg::PgStore>, SessionId) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
-    with_program_workers_holding(
-        input_timeouts,
-        DEFAULT_PROGRAM_HOLD_WINDOW,
-        |api, store, session_id, _| body(api, store, session_id),
-    )
+    with_program_workers_and_client(input_timeouts, |api, store, session_id, _| {
+        body(api, store, session_id)
+    })
     .await
 }
 
-/// [`with_program_workers`] with a code worker that suspends a program
-/// waiting only on calls after `hold_window`; `body` also gets the
-/// Temporal client.
-async fn with_program_workers_holding(
+/// [`with_program_workers`] whose `body` also gets the Temporal client.
+async fn with_program_workers_and_client(
     input_timeouts: InputTimeouts,
-    hold_window: Duration,
     body: impl FnOnce(
         Arc<GatewayAgentApi>,
         Arc<store_pg::PgStore>,
@@ -286,8 +282,7 @@ async fn with_program_workers_holding(
                     .with_input_timeouts(input_timeouts)
                     .build(),
             );
-            let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?
-                .with_program_hold_window(hold_window);
+            let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?;
             let runtime = worker_runtime()?;
             let mut worker = code_worker(&runtime, client.clone(), code_queue, activities)?;
             let shutdown = worker.shutdown_handle();
@@ -1457,10 +1452,9 @@ const SLEEPING_PROGRAM: &str = r#"
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
-async fn a_sleeping_program_suspends_and_resumes_when_its_timer_fires() -> anyhow::Result<()> {
-    with_program_workers_holding(
+async fn a_sleeping_program_waits_in_its_workflow_and_replays_from_history() -> anyhow::Result<()> {
+    with_program_workers_and_client(
         InputTimeouts::default(),
-        Duration::from_millis(300),
         |api, store, session_id, client| {
             Box::pin(async move {
                 let profile_id =
@@ -1481,9 +1475,8 @@ async fn a_sleeping_program_suspends_and_resumes_when_its_timer_fires() -> anyho
                     read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
                     json!({"claim": "nap", "slept": 2, "inOrder": true})
                 );
-                // Each sleep outlasted the hold window, so the run suspended
-                // twice and its third attempt finished; replays re-issued
-                // the first sleep without admitting it again.
+                // The program ran in its workflow: one load, one admission
+                // per step that issued a call, and no call admitted twice.
                 let state = programs::session_state(&store, &session_id).await?;
                 assert_eq!(
                     programs::admitted_tools(&state),
@@ -1497,9 +1490,22 @@ async fn a_sleeping_program_suspends_and_resumes_when_its_timer_fires() -> anyho
                     .into_events()
                     .await?;
                 assert_eq!(
-                    programs::attempt_activities(&events),
-                    [vec![1], vec![1], vec![1]]
+                    programs::activity_attempts(&events, ACTIVITY_PROGRAM_LOAD),
+                    [vec![1]]
                 );
+                assert_eq!(
+                    programs::activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
+                    [vec![1], vec![1]]
+                );
+                // Replaying the history runs the program again to the same
+                // commands.
+                WorkflowReplayer::new(
+                    WorkflowReplayerOptions::new()
+                        .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                        .build(),
+                )?
+                .replay_workflow(handle.fetch_history(Default::default()))
+                .await?;
 
                 let _ = api
                     .close_session(api::SessionCloseParams {
