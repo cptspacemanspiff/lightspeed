@@ -26,6 +26,16 @@ use crate::{
 
 /// Describe the value actually serialized by an owned result DTO, including
 /// output-only required fields and omitted optional values.
+/// A function's argument schema from its Rust type, as deserialization
+/// sees it.
+pub fn input_schema_for<T: schemars::JsonSchema>() -> Value {
+    schemars::generate::SchemaSettings::draft2020_12()
+        .for_deserialize()
+        .into_generator()
+        .into_root_schema_for::<T>()
+        .to_value()
+}
+
 pub fn output_schema_for<T: schemars::JsonSchema>() -> Value {
     schemars::generate::SchemaSettings::draft2020_12()
         .for_serialize()
@@ -197,6 +207,7 @@ pub fn resolve(
             }),
         ),
         crate::concurrency::TIME_SLEEP_TOOL_ID => crate::concurrency::time_sleep_definition(),
+        crate::human_input::INPUT_REQUEST_TOOL_ID => crate::human_input::input_request_definition(),
         name if name.starts_with("concurrency.") => {
             concurrency_tool_definitions(&ConcurrencyToolsetConfig::timer())?
                 .into_iter()

@@ -48,6 +48,27 @@ pub trait AgentApiService: Send + Sync {
         Err(AgentApiError::internal("model defaults are unavailable"))
     }
 
+    async fn list_inbox_requests(
+        &self,
+        _params: InboxRequestListParams,
+    ) -> Result<AgentApiOutcome<InboxRequestListResponse>, AgentApiError> {
+        Err(AgentApiError::internal("the inbox is unavailable"))
+    }
+
+    async fn read_inbox_request(
+        &self,
+        _params: InboxRequestReadParams,
+    ) -> Result<AgentApiOutcome<InboxRequestResponse>, AgentApiError> {
+        Err(AgentApiError::internal("the inbox is unavailable"))
+    }
+
+    async fn answer_inbox_request(
+        &self,
+        _params: InboxRequestAnswerParams,
+    ) -> Result<AgentApiOutcome<InboxRequestResponse>, AgentApiError> {
+        Err(AgentApiError::internal("the inbox is unavailable"))
+    }
+
     async fn list_models(
         &self,
         params: ModelListParams,

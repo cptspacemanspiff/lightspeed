@@ -236,6 +236,9 @@ pub struct ProgramLimits {
     pub max_in_flight: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wall_clock_ms: Option<u64>,
+    /// How long a human-input request waits when the call sets no deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_deadline_ms: Option<u64>,
 }
 
 impl Default for ProgramLimits {
@@ -244,6 +247,7 @@ impl Default for ProgramLimits {
             max_calls: 1024,
             max_in_flight: 64,
             max_wall_clock_ms: None,
+            input_deadline_ms: None,
         }
     }
 }
@@ -254,6 +258,7 @@ impl ProgramLimits {
             || self.max_in_flight == 0
             || self.max_in_flight > self.max_calls
             || self.max_wall_clock_ms == Some(0)
+            || self.input_deadline_ms == Some(0)
         {
             return Err(DomainError::InvariantViolation(
                 "program limits are outside their bounded ranges".into(),

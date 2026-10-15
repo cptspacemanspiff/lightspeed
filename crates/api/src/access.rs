@@ -44,7 +44,7 @@ impl AccessScope {
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 pub enum MethodGroup {
-    /// `session/*`, `blobs/read` and `blobs/has`.
+    /// `session/*`, `blobs/read`, `blobs/has` and the human-input inbox.
     #[serde(rename = "session")]
     Session,
     /// Destructive session operations and deletion retention.
@@ -180,7 +180,7 @@ impl MethodGroup {
             Self::SessionDelete
         } else if group("deployment/sessions/") {
             Self::DeploymentSessions
-        } else if group("session/") || group("blobs/") {
+        } else if group("session/") || group("blobs/") || group("inbox/") {
             Self::Session
         } else if group("transcriptions/") {
             Self::Transcriptions

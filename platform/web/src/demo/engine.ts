@@ -417,7 +417,7 @@ export function startRun(
   }
   const source = {
     type: "input" as const,
-    items: input.source?.items ?? [
+    items: (input.source?.type === "input" ? input.source.items : undefined) ?? [
       ...(input.media ?? []).map((attachment) => ({ type: "media" as const, origin: input.origin, ...attachment })),
       ...(input.text.trim() ? [{ type: "text" as const, text: input.text, origin: input.origin }] : []),
     ],

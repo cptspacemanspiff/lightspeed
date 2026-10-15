@@ -442,6 +442,12 @@ api_methods! {
         ["Read universe model defaults", "Returns the revision and independent agentRun and speechToText selections. Revision zero means no update has been made. Does not contact model providers."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_MODELS_DEFAULTS_PUT => put_model_defaults(ModelDefaultsPutParams) -> ModelDefaultsResponse =>
         ["Set a universe model default", "Sets or explicitly clears one purpose slot using its current expected revision. Existing sessions and admitted work keep their model. Validates the purpose and protocol without contacting provider discovery."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
+    METHOD_INBOX_REQUESTS_LIST => list_inbox_requests(InboxRequestListParams) -> InboxRequestListResponse =>
+        ["List human-input requests", "Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's."], access: MethodAccess::Universe(UniverseAction::Read),
+    METHOD_INBOX_REQUESTS_READ => read_inbox_request(InboxRequestReadParams) -> InboxRequestResponse =>
+        ["Read a human-input request", "Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer."], access: MethodAccess::Universe(UniverseAction::Read),
+    METHOD_INBOX_REQUESTS_ANSWER => answer_inbox_request(InboxRequestAnswerParams) -> InboxRequestResponse =>
+        ["Answer a human-input request", "Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict."], access: MethodAccess::Universe(UniverseAction::ControlSession),
     METHOD_MODELS_LIST => list_models(ModelListParams) -> ModelListResponse =>
         ["Discover available models", "Queries supported providers directly, with a brief process-local burst cache, and returns best-effort selectable routes. One provider failure does not discard successful results from others."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_PROFILES_CREATE => create_profile(ProfileCreateParams) -> ProfileCreateResponse =>

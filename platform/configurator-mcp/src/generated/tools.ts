@@ -872,6 +872,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "inputDeadlineMs": {
+              "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+              "format": "uint64",
+              "maximum": 2592000000,
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "maxCalls": {
               "format": "uint32",
               "minimum": 1,
@@ -4693,6 +4703,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "inputDeadlineMs": {
+              "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+              "format": "uint64",
+              "maximum": 2592000000,
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "maxCalls": {
               "format": "uint32",
               "minimum": 1,
@@ -6151,6 +6171,138 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_inbox_requests_list",
+    "method": "inbox/requests/list",
+    "group": "session",
+    "summary": "List human-input requests",
+    "description": "Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.",
+    "paramsType": "InboxRequestListParams",
+    "resultType": "AgentApiOutcome<InboxRequestListResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "limit": {
+          "description": "At most this many requests, newest first. Defaults to 50.",
+          "format": "uint32",
+          "maximum": 200,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "Only requests from this session.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InputRequestStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only requests in this state; every state when omitted."
+        }
+      },
+      "type": "object",
+      "definitions": {
+        "InputRequestStatus": {
+          "description": "Where a human-input request stands. Only a pending request can be\nanswered; the others are final.",
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "answered"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "expired",
+              "description": "The deadline passed unanswered, after any escalation.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "The waiting program call was withdrawn.",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "lightspeed_inbox_requests_read",
+    "method": "inbox/requests/read",
+    "group": "session",
+    "summary": "Read a human-input request",
+    "description": "Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.",
+    "paramsType": "InboxRequestReadParams",
+    "resultType": "AgentApiOutcome<InboxRequestResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "requestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "lightspeed_inbox_requests_answer",
+    "method": "inbox/requests/answer",
+    "group": "session",
+    "summary": "Answer a human-input request",
+    "description": "Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.",
+    "paramsType": "InboxRequestAnswerParams",
+    "resultType": "AgentApiOutcome<InboxRequestResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "approved": {
+          "description": "Approve or reject the request.",
+          "type": "boolean"
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "value": {
+          "description": "An approval's value: required exactly when the request has a\nresponse schema, and it must satisfy it. A rejection has none."
+        }
+      },
+      "required": [
+        "requestId",
+        "approved"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "lightspeed_models_list",
     "method": "models/list",
     "group": "models",
@@ -6902,6 +7054,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "inputDeadlineMs": {
+              "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+              "format": "uint64",
+              "maximum": 2592000000,
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "maxCalls": {
               "format": "uint32",
               "minimum": 1,
@@ -8184,6 +8346,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
+            "inputDeadlineMs": {
+              "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+              "format": "uint64",
+              "maximum": 2592000000,
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "maxCalls": {
               "format": "uint32",
               "minimum": 1,

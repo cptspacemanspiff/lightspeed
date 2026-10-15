@@ -17,6 +17,7 @@ pub mod environment;
 pub mod environment_protocol;
 pub mod error;
 pub mod fs;
+pub mod human_input;
 pub mod limits;
 pub mod program;
 pub mod prompts;

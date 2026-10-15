@@ -14,6 +14,7 @@ mod channels;
 mod deployment;
 mod environment;
 mod environment_registration;
+mod input_requests;
 mod mcp;
 mod migrations;
 mod model_defaults;
@@ -38,6 +39,9 @@ use uuid::Uuid;
 
 pub use access::AccessFilter;
 pub use access::{AccessStoreError, PgAccessStore, ResourceAccess};
+pub use input_requests::{
+    InputRequestClosure, InputRequestRecord, InputRequestStoreError, NewInputRequest,
+};
 pub use model_defaults::ModelDefaultsStoreError;
 
 /// A session page with the access summary each view carries.

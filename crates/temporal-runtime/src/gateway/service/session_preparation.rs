@@ -93,7 +93,9 @@ impl SessionPreparationService {
         Self::program_toolset_config(&mut config);
         let toolset = register_toolset(&config)
             .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;
-        let tools = toolset.tools.into_values().collect::<Vec<_>>();
+        let mut tools = toolset.tools.into_values().collect::<Vec<_>>();
+        // Every program session binds the input-request workflow tool.
+        tools.push(tools::human_input::input_request_tool_spec());
         tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
             .await
             .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))
@@ -364,6 +366,57 @@ impl SessionPreparationService {
         ))
     }
 
+    /// The system binding behind a program's `input.request`: a joined
+    /// start of the input-request workflow, which records the request in
+    /// the universe's inbox and replies with the answer.
+    pub(crate) async fn core_input_request_workflow_tool_declaration(
+        &self,
+    ) -> Result<WorkflowToolDeclaration, AgentApiError> {
+        let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
+            workflow_type: tools::human_input::INPUT_REQUEST_WORKFLOW_TYPE.to_owned(),
+            task_queue: self.task_queue.clone(),
+        })
+        .map_err(|error| {
+            AgentApiError::internal(format!("encode input-request workflow recipe: {error}"))
+        })?;
+        let recipe_fingerprint = temporal_workflow::workflow_tool_recipe_fingerprint(&recipe_bytes);
+        let recipe_ref = self
+            .store
+            .put_bytes(recipe_bytes)
+            .await
+            .map_err(map_blob_store_error)?;
+        let reply_schema_ref = self
+            .store
+            .put_bytes(
+                serde_json::to_vec(&tools::definitions::output_schema_for::<
+                    tools::human_input::InputAnswer,
+                >())
+                .map_err(|error| AgentApiError::internal(error.to_string()))?,
+            )
+            .await
+            .map_err(map_blob_store_error)?;
+        Ok(WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: WorkflowToolId::new(tools::human_input::INPUT_REQUEST_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: tools::human_input::INPUT_REQUEST_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool: tools::human_input::input_request_tool_spec(),
+            },
+            WorkflowToolTarget::Start {
+                start: WorkflowStartRef {
+                    recipe_format: temporal_workflow::WORKFLOW_TOOL_RECIPE_FORMAT_V1,
+                    revision: 1,
+                    recipe_ref,
+                    recipe_fingerprint,
+                },
+            },
+            WorkflowToolCompletion::Joined {
+                reply_schema_ref: Some(reply_schema_ref),
+                deadline_after_ms: tools::human_input::INPUT_REQUEST_DEADLINE_CEILING_MS,
+            },
+        ))
+    }
+
     pub(crate) async fn prepare_toolset(
         &self,
         source: SessionToolsetSource,
@@ -383,6 +436,7 @@ impl SessionPreparationService {
                 self.core_program_execute_workflow_tool_declaration()
                     .await?,
             );
+            declarations.push(self.core_input_request_workflow_tool_declaration().await?);
         }
         if jobs {
             declarations.extend(
@@ -440,6 +494,9 @@ impl SessionPreparationService {
                     && (code_mode
                         || binding.definition.tool_id.as_str()
                             != tools::code::CODE_EXECUTE_WORKFLOW_TOOL_ID)
+                    && (source.driver.is_program()
+                        || binding.definition.tool_id.as_str()
+                            != tools::human_input::INPUT_REQUEST_WORKFLOW_TOOL_ID)
             })
             .collect::<Vec<_>>();
         let mut config = Self::session_toolset_config(

@@ -178,7 +178,7 @@ impl ProgramRunWorkflow {
         if self
             .start
             .as_ref()
-            .is_some_and(|start| is_holder_cancellation(start, &envelope))
+            .is_some_and(|start| crate::workflows::is_joined_holder_cancellation(start, &envelope))
         {
             self.holder_cancelled = true;
         }
@@ -337,39 +337,6 @@ fn descriptor_matches_start(
     descriptor.validate().is_ok()
         && descriptor.execution_id == start.execution_id
         && descriptor.session_workflow_id == start.holder_workflow_id
-}
-
-fn is_holder_cancellation(
-    start: &WorkflowToolStartArgs,
-    envelope: &harness::EmissionEnvelope,
-) -> bool {
-    let harness::EmissionProducer::Session {
-        universe_id,
-        session_id,
-        ..
-    } = &envelope.producer
-    else {
-        return false;
-    };
-    let harness::EmissionBody::InvocationCancellation {
-        invocation_id,
-        completion_key,
-        promise_id,
-    } = &envelope.body
-    else {
-        return false;
-    };
-    *universe_id == start.universe_id
-        && *session_id == start.invocation.session_id
-        && crate::compose_workflow_id(*universe_id, session_id) == start.holder_workflow_id
-        && *invocation_id == start.invocation.invocation_id
-        && completion_key == harness::REPLY_COMPLETION_KEY
-        && start
-            .invocation
-            .completion_promises
-            .as_ref()
-            .and_then(|promises| promises.get(harness::REPLY_COMPLETION_KEY))
-            == Some(promise_id)
 }
 
 fn recovery_result(snapshot: &ProgramRunSnapshot) -> WorkflowToolRecoveryResult {

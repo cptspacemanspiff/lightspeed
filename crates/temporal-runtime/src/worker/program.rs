@@ -610,6 +610,7 @@ mod tests {
                 max_calls: 300,
                 max_in_flight: 20,
                 max_wall_clock_ms: Some(5_000),
+                input_deadline_ms: None,
             },
             requires: Vec::new(),
         };

@@ -727,6 +727,45 @@ Sets or explicitly clears one purpose slot using its current expected revision. 
 - Params: `ModelDefaultsPutParams`
 - Result: `AgentApiOutcome<ModelDefaultsResponse>`
 
+### `inbox/requests/list`
+
+**List human-input requests**
+
+Lists the questions program runs in this universe have asked people, newest first, optionally only one state or one session's.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `session`
+- Role: `viewer`
+- Target: `none`
+- Params: `InboxRequestListParams`
+- Result: `AgentApiOutcome<InboxRequestListResponse>`
+
+### `inbox/requests/read`
+
+**Read a human-input request**
+
+Returns one request: its question, payload, response schema, assignees, deadline, reminders and, once settled, its answer.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `session`
+- Role: `viewer`
+- Target: `none`
+- Params: `InboxRequestReadParams`
+- Result: `AgentApiOutcome<InboxRequestResponse>`
+
+### `inbox/requests/answer`
+
+**Answer a human-input request**
+
+Approves or rejects a pending request; an approval of a request with a response schema carries a value that satisfies it. The waiting program call completes with the answer. Requires controlling the request's session; a settled request is a conflict.
+
+- Access: `{"kind":"universe","action":"control_session"}`
+- Group: `session`
+- Role: `contributor`
+- Target: `none`
+- Params: `InboxRequestAnswerParams`
+- Result: `AgentApiOutcome<InboxRequestResponse>`
+
 ### `models/list`
 
 **Discover available models**

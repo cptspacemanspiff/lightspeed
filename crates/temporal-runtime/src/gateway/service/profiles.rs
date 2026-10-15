@@ -279,6 +279,7 @@ impl GatewayAgentApi {
                 max_calls: limits.max_calls.unwrap_or(defaults.max_calls),
                 max_in_flight: limits.max_in_flight.unwrap_or(defaults.max_in_flight),
                 max_wall_clock_ms: limits.max_wall_clock_ms,
+                input_deadline_ms: limits.input_deadline_ms,
             },
             // Pinned against the session's tools once its configuration is
             // known; see `pin_program_contracts`.
@@ -287,6 +288,14 @@ impl GatewayAgentApi {
         program
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
+        if limits.input_deadline_ms.is_some_and(|deadline| {
+            !(tools::human_input::MIN_INPUT_DEADLINE_MS..=tools::human_input::MAX_INPUT_DEADLINE_MS)
+                .contains(&deadline)
+        }) {
+            return Err(AgentApiError::invalid_request(
+                "inputDeadlineMs must be between 1 second and 30 days",
+            ));
+        }
         Ok(program)
     }
 
