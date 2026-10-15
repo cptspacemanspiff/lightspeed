@@ -27,6 +27,11 @@ pub const INPUT_REMIND_TOOL_ID: &str = "input.remind";
 pub const INPUT_REMIND_TOOL_NAME: &str = "input_remind";
 pub const INPUT_REASSIGN_TOOL_ID: &str = "input.reassign";
 pub const INPUT_REASSIGN_TOOL_NAME: &str = "input_reassign";
+pub use harness::{
+    APPROVAL_TOOL_NAME as APPROVAL_TOOL_ID, APPROVAL_WORKFLOW_SEMANTIC_TYPE,
+    APPROVAL_WORKFLOW_TOOL_ID,
+};
+pub const APPROVAL_TOOL_NAME: &str = "input_approval";
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 /// How long a request waits when neither the call nor the program sets a
@@ -128,6 +133,76 @@ pub const MAX_ANSWER_VALUE_BYTES: usize = 256 * 1024;
 pub const DEADLINE_EXCEEDED_CODE: &str = "deadline_exceeded";
 /// The failure code of a request withdrawn before it was answered.
 pub const INPUT_CANCELLED_CODE: &str = "input_cancelled";
+/// The failure code of a tool call whose approval was rejected.
+pub const APPROVAL_REJECTED_CODE: &str = "approval_rejected";
+
+/// Who decides a program's approval-required tool calls and how long they
+/// wait, from the program's pin and the run's defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalSettings {
+    pub assignees: Vec<String>,
+    pub deadline_ms: Option<u64>,
+    pub remind_after_ms: Option<u64>,
+    pub escalate_to: Vec<String>,
+}
+
+impl ApprovalSettings {
+    /// A program's settings, with what the run's starter (a bot, say) chose
+    /// in their place: its approvers decide, and its escalation list takes
+    /// over.
+    pub fn from_program(
+        program: Option<&harness::ProgramApprovals>,
+        run: Option<&harness::ProgramInputDefaults>,
+    ) -> Self {
+        let program = program.cloned().unwrap_or_default();
+        let pick = |run: Vec<String>, program: Vec<String>| {
+            if run.is_empty() { program } else { run }
+        };
+        Self {
+            assignees: pick(
+                run.map(|run| run.approvers.clone()).unwrap_or_default(),
+                program.assignees,
+            ),
+            deadline_ms: program.deadline_ms,
+            remind_after_ms: program.remind_after_ms,
+            escalate_to: pick(
+                run.map(|run| run.escalate_to.clone()).unwrap_or_default(),
+                program.escalate_to,
+            ),
+        }
+    }
+
+    pub fn validate(&self, timeouts: &InputTimeouts) -> ToolResult<()> {
+        validate_people("assignees", &self.assignees)?;
+        validate_people("escalateTo", &self.escalate_to)?;
+        if let Some(deadline) = self.deadline_ms
+            && !timeouts.allows_deadline(deadline)
+        {
+            return Err(invalid(format!(
+                "deadlineMs must be between {} and {}",
+                timeouts.min_deadline_ms, timeouts.max_deadline_ms
+            )));
+        }
+        if self
+            .remind_after_ms
+            .is_some_and(|interval| interval < timeouts.min_remind_after_ms)
+        {
+            return Err(invalid(format!(
+                "remindAfterMs must be at least {}",
+                timeouts.min_remind_after_ms
+            )));
+        }
+        Ok(())
+    }
+
+    /// The approval's wait: its own deadline, else the deployment's, never
+    /// outside the deployment's bounds.
+    pub fn deadline_after_ms(&self, timeouts: &InputTimeouts) -> u64 {
+        self.deadline_ms
+            .unwrap_or(timeouts.default_deadline_ms)
+            .clamp(timeouts.min_deadline_ms, timeouts.max_deadline_ms)
+    }
+}
 
 /// What a program asks for.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -307,12 +382,38 @@ pub fn input_request_tool_spec() -> harness::ToolSpec {
 }
 
 /// Whether a workflow invocation is a program's `input.request` or
-/// `input.open`: both start the input-request workflow.
+/// `input.open`, or a parked call's approval: all start the input-request
+/// workflow.
 pub fn is_input_request_binding(tool_id: &str, semantic_type: &str) -> bool {
     (tool_id == INPUT_REQUEST_WORKFLOW_TOOL_ID
         && semantic_type == INPUT_REQUEST_WORKFLOW_SEMANTIC_TYPE)
         || (tool_id == INPUT_OPEN_WORKFLOW_TOOL_ID
             && semantic_type == INPUT_OPEN_WORKFLOW_SEMANTIC_TYPE)
+        || is_approval_binding(tool_id, semantic_type)
+}
+
+pub fn is_approval_binding(tool_id: &str, semantic_type: &str) -> bool {
+    tool_id == APPROVAL_WORKFLOW_TOOL_ID && semantic_type == APPROVAL_WORKFLOW_SEMANTIC_TYPE
+}
+
+/// The approval binding's tool. No program calls it: a call its scope
+/// parks emits it with the parked call's own arguments, whatever they are.
+pub fn approval_definition() -> crate::runtime::FunctionDefinition {
+    crate::runtime::FunctionDefinition::new(
+        APPROVAL_TOOL_NAME,
+        "Wait for approval of a parked tool call, then run it. Emitted by the runtime in place of an approval-required call; never called directly.",
+        serde_json::json!({ "type": "object" }),
+    )
+}
+
+/// The session tool behind the approval binding.
+pub fn approval_tool_spec() -> harness::ToolSpec {
+    crate::definitions::register(
+        APPROVAL_TOOL_ID,
+        Default::default(),
+        harness::ToolParallelism::ParallelSafe,
+        Default::default(),
+    )
 }
 
 /// The `input.open` definition: the arguments of `input.request`, and the
@@ -583,6 +684,47 @@ mod tests {
         ] {
             assert!(timeouts_from(vars).is_err(), "{vars:?}");
         }
+    }
+
+    #[test]
+    fn a_runs_approvers_and_escalation_replace_the_programs() {
+        let program = harness::ProgramApprovals {
+            assignees: vec!["alice".into()],
+            deadline_ms: Some(5_000),
+            remind_after_ms: None,
+            escalate_to: vec!["lead".into()],
+        };
+        assert_eq!(
+            ApprovalSettings::from_program(Some(&program), None),
+            ApprovalSettings {
+                assignees: vec!["alice".into()],
+                deadline_ms: Some(5_000),
+                remind_after_ms: None,
+                escalate_to: vec!["lead".into()],
+            }
+        );
+        let run = harness::ProgramInputDefaults {
+            escalate_to: Vec::new(),
+            approvers: vec!["bob".into()],
+        };
+        let merged = ApprovalSettings::from_program(Some(&program), Some(&run));
+        assert_eq!(
+            (merged.assignees, merged.escalate_to),
+            (vec!["bob".to_owned()], vec!["lead".to_owned()])
+        );
+        let timeouts = InputTimeouts::default();
+        assert_eq!(
+            ApprovalSettings::default().deadline_after_ms(&timeouts),
+            timeouts.default_deadline_ms
+        );
+        assert!(
+            ApprovalSettings {
+                remind_after_ms: Some(1),
+                ..Default::default()
+            }
+            .validate(&timeouts)
+            .is_err()
+        );
     }
 
     #[test]

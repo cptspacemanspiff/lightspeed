@@ -70,6 +70,15 @@ pub enum InputRequestStepResult {
     Settled {
         resolution: harness::PromiseResolution,
     },
+    /// An approval request was approved: the workflow runs the parked call
+    /// (`input_request_execute`), whose result is the reply.
+    Approved,
+}
+
+/// Run the call an approval request parked, now that it is approved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRequestExecuteActivityRequest {
+    pub start: crate::WorkflowToolStartArgs,
 }
 
 /// Queryable state of a human-input request.

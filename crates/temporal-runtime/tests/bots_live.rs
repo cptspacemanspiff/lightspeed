@@ -457,6 +457,7 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
                 })),
                 limits: None,
                 requires: Vec::new(),
+                approvals: None,
             }),
             ..ProfileDocument::default()
         },

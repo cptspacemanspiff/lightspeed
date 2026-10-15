@@ -11535,6 +11535,21 @@
       ],
       "type": "object"
     },
+    "InputRequestKind": {
+      "description": "What a request asks for.",
+      "oneOf": [
+        {
+          "const": "input",
+          "description": "A question the program asked (`input.request`, `input.open`).",
+          "type": "string"
+        },
+        {
+          "const": "approval",
+          "description": "A decision on a program's tool call that needs approval. The payload\nnames the call; approving runs it, rejecting fails it.",
+          "type": "string"
+        }
+      ]
+    },
     "InputRequestStatus": {
       "description": "Where a human-input request stands. Only a pending request can be\nanswered; the others are final.",
       "oneOf": [
@@ -11607,6 +11622,14 @@
         "escalated": {
           "description": "Whether the request has been escalated to `escalateTo`.",
           "type": "boolean"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InputRequestKind"
+            }
+          ],
+          "default": "input"
         },
         "lastRemindedAtMs": {
           "format": "uint64",
@@ -13654,6 +13677,45 @@
         }
       ]
     },
+    "ProgramApprovals": {
+      "additionalProperties": false,
+      "description": "Settings for a program's approval requests.",
+      "properties": {
+        "assignees": {
+          "description": "Who decides. Without assignees anyone with inbox access may.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deadlineMs": {
+          "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "escalateTo": {
+          "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "remindAfterMs": {
+          "description": "Remind the assignees on this interval while the call waits.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ProgramContractRequirement": {
       "additionalProperties": false,
       "description": "One tool contract a program calls.",
@@ -13678,6 +13740,13 @@
     "ProgramInputDefaults": {
       "description": "Defaults for a program run's input requests.",
       "properties": {
+        "approvers": {
+          "description": "Who decides the run's approval requests (calls to tools that need\napproval), in place of the program's `approvals.assignees`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "escalateTo": {
           "description": "Who takes over, once and with a fresh deadline, a request that\nnames no escalation list of its own when its deadline passes\nunanswered.",
           "items": {
@@ -13769,6 +13838,17 @@
       "additionalProperties": false,
       "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
       "properties": {
+        "approvals": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProgramApprovals"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+        },
         "inputSchema": {
           "description": "JSON Schema that run input must satisfy."
         },

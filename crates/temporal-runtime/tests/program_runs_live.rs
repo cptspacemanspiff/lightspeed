@@ -96,6 +96,7 @@ fn program_profile(
                         digest: digest.map(str::to_owned),
                     })
                     .collect(),
+                approvals: None,
             }),
             config: Some(api::SessionConfig {
                 features: Some(api::FeaturesConfig {
@@ -968,6 +969,27 @@ async fn mcp_program_profile(
     server_id: &str,
     contracts: &[&str],
 ) -> anyhow::Result<api::ProfileId> {
+    mcp_program_profile_with(
+        api,
+        fixture,
+        server_id,
+        contracts,
+        MCP_PROGRAM,
+        api::RemoteMcpApprovalPolicy::Never,
+        None,
+    )
+    .await
+}
+
+async fn mcp_program_profile_with(
+    api: &GatewayAgentApi,
+    fixture: &McpFixture,
+    server_id: &str,
+    contracts: &[&str],
+    source: &str,
+    approval: api::RemoteMcpApprovalPolicy,
+    approvals: Option<api::ProgramApprovals>,
+) -> anyhow::Result<api::ProfileId> {
     api.put_mcp_server(api::McpServerPutParams {
         server: api::McpServerInput {
             server_id: server_id.to_owned(),
@@ -978,7 +1000,7 @@ async fn mcp_program_profile(
             allowed_tools: None,
             execution: api::RemoteMcpExecution::Native,
             exposure: api::RemoteMcpExposure::Inject,
-            approval: api::RemoteMcpApprovalPolicy::Never,
+            approval,
             defer_loading: None,
             allow_private_network: true,
             auth_policy: api::McpServerAuthPolicy::None,
@@ -993,8 +1015,9 @@ async fn mcp_program_profile(
         .iter()
         .map(|contract| (*contract, None))
         .collect::<Vec<_>>();
-    let mut profile = program_profile(&profile_id, MCP_PROGRAM, &requires);
+    let mut profile = program_profile(&profile_id, source, &requires);
     if let Some(program) = profile.document.program.as_mut() {
+        program.approvals = approvals;
         program.input_schema = Some(json!({
             "type": "object",
             "required": ["claim", "server"],
@@ -1129,6 +1152,165 @@ async fn a_program_calls_an_mcp_tool_by_contract_and_fails_when_its_schema_chang
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
             }
+            Ok(())
+        })
+    })
+    .await
+}
+
+const APPROVING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            try {
+                const created = await env.mcp[input.server].create_issue({ title: input.claim });
+                return { claim: input.claim, slept: 0, created };
+            } catch (error) {
+                return { claim: input.claim, slept: 0, kind: error.kind };
+            }
+        }
+    };
+"#;
+
+/// The session's pending request, once one is open.
+async fn pending_request(
+    api: &GatewayAgentApi,
+    session_id: &SessionId,
+) -> anyhow::Result<api::InputRequestView> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let pending = api
+            .list_inbox_requests(api::InboxRequestListParams {
+                status: Some(api::InputRequestStatus::Pending),
+                session: Some(session_id.to_string()),
+                limit: None,
+            })
+            .await?
+            .result
+            .requests;
+        if let [request] = pending.as_slice() {
+            return Ok(request.clone());
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "no pending request appeared for {session_id}: {pending:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn a_program_call_that_needs_approval_waits_in_the_inbox_and_runs_once_approved()
+-> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let fixture = McpFixture::start().await?;
+            let server = format!(
+                "prog_mcp_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let profile_id = mcp_program_profile_with(
+                &api,
+                &fixture,
+                &server,
+                &[&format!("mcp.{server}.create_issue")],
+                APPROVING_PROGRAM,
+                api::RemoteMcpApprovalPolicy::Always,
+                Some(api::ProgramApprovals {
+                    assignees: vec!["alice".to_owned()],
+                    ..Default::default()
+                }),
+            )
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let output = |run: api::RunView| {
+                let store = store.clone();
+                async move {
+                    assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await
+                }
+            };
+
+            // The call parks: the inbox shows what it would do, and the
+            // server sees nothing until someone approves.
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "first", "server": server}),
+            )
+            .await?;
+            let request = pending_request(&api, &session_id).await?;
+            assert_eq!(request.kind, api::InputRequestKind::Approval);
+            assert_eq!(request.assignees, vec!["alice".to_owned()]);
+            assert_eq!(
+                request.payload,
+                Some(json!({
+                    "server": server,
+                    "serverLabel": server,
+                    "tool": "createIssue",
+                    "arguments": {"title": "first"},
+                }))
+            );
+            assert!(fixture.state.lock().await.calls.is_empty());
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: request.request_id.clone(),
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let approved = output(wait_for_terminal_run(&api, &session_id, &run.id).await?).await?;
+            assert!(
+                approved["created"].to_string().contains("first"),
+                "{approved}"
+            );
+            assert_eq!(
+                fixture.state.lock().await.calls,
+                vec![json!({"name": "createIssue", "arguments": {"title": "first"}})]
+            );
+
+            // A rejection fails the call with a kind the program catches;
+            // the run's starter may name other approvers.
+            let run = api
+                .start_run(api::RunStartParams {
+                    notify_on_terminal: None,
+                    submission_id: None,
+                    session_id: session_id.to_string(),
+                    source: api::RunStartSource::Program {
+                        input: json!({"claim": "second", "server": server}),
+                        input_defaults: Some(api::ProgramInputDefaults {
+                            approvers: vec!["bob".to_owned()],
+                            ..Default::default()
+                        }),
+                    },
+                    config: None,
+                })
+                .await?
+                .result
+                .run;
+            let request = pending_request(&api, &session_id).await?;
+            assert_eq!(request.assignees, vec!["bob".to_owned()]);
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: request.request_id.clone(),
+                approved: false,
+                value: None,
+                comment: Some("not today".to_owned()),
+            })
+            .await?;
+            assert_eq!(
+                output(wait_for_terminal_run(&api, &session_id, &run.id).await?).await?,
+                json!({"claim": "second", "slept": 0, "kind": "approval_rejected"})
+            );
+            assert_eq!(fixture.state.lock().await.calls.len(), 1);
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
             Ok(())
         })
     })

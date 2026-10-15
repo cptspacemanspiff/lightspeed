@@ -284,6 +284,17 @@ impl GatewayAgentApi {
             // Pinned against the session's tools once its configuration is
             // known; see `pin_program_contracts`.
             requires: Vec::new(),
+            approvals: spec
+                .approvals
+                .clone()
+                .map(|approvals| {
+                    Box::new(harness::ProgramApprovals {
+                        assignees: approvals.assignees,
+                        deadline_ms: approvals.deadline_ms,
+                        remind_after_ms: approvals.remind_after_ms,
+                        escalate_to: approvals.escalate_to,
+                    })
+                }),
         };
         program
             .validate()
@@ -295,6 +306,11 @@ impl GatewayAgentApi {
                 "inputDeadlineMs must be between {} and {}",
                 self.input_timeouts.min_deadline_ms, self.input_timeouts.max_deadline_ms
             )));
+        }
+        if let Some(approvals) = &program.approvals {
+            tools::human_input::ApprovalSettings::from_program(Some(approvals), None)
+                .validate(&self.input_timeouts)
+                .map_err(|error| AgentApiError::invalid_request(format!("approvals: {error}")))?;
         }
         Ok(program)
     }

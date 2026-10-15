@@ -19,7 +19,8 @@ impl AgentSessionWorkflow {
             return;
         }
         match envelope.body {
-            harness::EmissionBody::RunTerminal { .. } | harness::EmissionBody::RunWaiting { .. } => {
+            harness::EmissionBody::RunTerminal { .. }
+            | harness::EmissionBody::RunWaiting { .. } => {
                 // A receiving workflow interprets the typed run output and then
                 // sends an authorized SourceResolution. Dropping its encoding
                 // here would expose provider JSON as an ordinary tool result.

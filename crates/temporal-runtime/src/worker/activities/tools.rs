@@ -611,13 +611,20 @@ pub(super) async fn invoke_code_tool(
     }
     // A prior model-call approval must never authorize a code tool invocation.
     // The native adapter reports NeedsApproval before performing the call;
-    // below that becomes a terminal failed result, with no approval lifecycle.
+    // below that parks the call when its scope gave it an approval binding,
+    // and otherwise becomes a terminal failed result.
+    let mut park = None;
     if let Some(remote) = &mut request.call.remote_mcp {
         match remote {
             harness::RemoteMcpCallRuntime::Injected {
-                approval_decision, ..
+                approval_decision,
+                park: approval,
+                ..
+            } => {
+                *approval_decision = None;
+                park = approval.take();
             }
-            | harness::RemoteMcpCallRuntime::Search {
+            harness::RemoteMcpCallRuntime::Search {
                 approval_decision, ..
             } => {
                 *approval_decision = None;
@@ -644,6 +651,9 @@ pub(super) async fn invoke_code_tool(
                 ToolInvokeCallActivityResult::Completed { result } => Outcome::Completed { result },
                 ToolInvokeCallActivityResult::EnvironmentNotReady { environment_id } => {
                     Outcome::EnvironmentNotReady { environment_id }
+                }
+                ToolInvokeCallActivityResult::NeedsApproval { .. } if park.is_some() => {
+                    park_for_approval(deps, request, *park.expect("checked above")).await?
                 }
                 ToolInvokeCallActivityResult::NeedsApproval { .. } => Outcome::Completed {
                     result: super::common::failed_tool_call_result(
@@ -699,6 +709,56 @@ pub(super) async fn invoke_code_tool(
     let mut result = result;
     result.duration_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
     Ok(Outcome::Completed { result })
+}
+
+/// Park an approval-required scoped call: emit the approval workflow tool
+/// for it, with the call's own identity and arguments, so the call waits for
+/// the decision like any joined workflow call. The approval workflow runs
+/// the call once it is approved.
+async fn park_for_approval(
+    deps: &ToolActivityDeps,
+    mut request: harness::ToolInvocationCallRequest,
+    approval: harness::ToolInvocationRequest,
+) -> Result<temporal_workflow::CodeToolInvokeActivityResult, ActivityError> {
+    use temporal_workflow::CodeToolInvokeActivityResult as Outcome;
+    if approval.call_id != request.call.call_id
+        || approval.arguments_ref != request.call.arguments_ref
+        || approval.workflow_tool.is_none()
+    {
+        return Err(activity_error(anyhow::anyhow!(
+            "a parked call's approval does not match the call"
+        )));
+    }
+    request.call = approval;
+    // Program calls use the canonical presentation, whose name for the
+    // approval tool is its definition's.
+    request.call.tool_name = harness::ToolName::new(tools::human_input::APPROVAL_TOOL_NAME);
+    let Some(hosted) = deps.hosted.as_ref() else {
+        return Ok(Outcome::Completed {
+            result: super::common::failed_tool_call_result(
+                deps.blobs.as_ref(),
+                &request,
+                "parking an approval requires the hosted tool runtime".to_owned(),
+            )
+            .await
+            .map_err(activity_error)?,
+        });
+    };
+    match hosted
+        .invoke_code_tool_call_execution(request)
+        .await
+        .map_err(activity_error)?
+    {
+        crate::worker::session_tools::CodeToolCallExecution::Completed(result) => {
+            Ok(Outcome::Completed { result })
+        }
+        crate::worker::session_tools::CodeToolCallExecution::Deferred(spec) => {
+            Ok(Outcome::Deferred { spec })
+        }
+        crate::worker::session_tools::CodeToolCallExecution::EnvironmentNotReady {
+            environment_id,
+        } => Ok(Outcome::EnvironmentNotReady { environment_id }),
+    }
 }
 
 fn validate_code_tool_presentation(call: &harness::ToolInvocationRequest) -> Result<(), String> {
@@ -952,6 +1012,7 @@ mod tests {
                 },
                 remote_tool_name: "hello".to_owned(),
                 approval_decision,
+                park: None,
             }),
         }
     }

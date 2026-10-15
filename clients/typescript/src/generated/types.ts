@@ -1564,6 +1564,13 @@ export type EnvironmentRegistrationKeyStatusView = "active" | "revoked" | "expir
  */
 export type EnvironmentRegistrationSecretView = string;
 /**
+ * What a request asks for.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "InputRequestKind".
+ */
+export type InputRequestKind = "input" | "approval";
+/**
  * Where a human-input request stands. Only a pending request can be
  * answered; the others are final.
  *
@@ -5672,6 +5679,7 @@ export interface InputRequestView {
    * Whether the request has been escalated to `escalateTo`.
    */
   escalated: boolean;
+  kind?: InputRequestKind & string;
   lastRemindedAtMs?: number | null;
   payload?: unknown;
   remindAfterMs?: number | null;
@@ -6158,6 +6166,14 @@ export interface AgentProfile {
  */
 export interface ProgramSpec {
   /**
+   * Who decides the program's calls to tools that need approval, and
+   * how long such a call waits. A call that needs approval waits in the
+   * inbox; approving runs it, rejecting fails it with kind
+   * `approval_rejected`, and an unanswered one fails with
+   * `deadline_exceeded`.
+   */
+  approvals?: ProgramApprovals | null;
+  /**
    * JSON Schema that run input must satisfy.
    */
   inputSchema?: {
@@ -6182,6 +6198,32 @@ export interface ProgramSpec {
    */
   semanticsVersion?: number;
   source: ProgramSource;
+}
+/**
+ * Settings for a program's approval requests.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramApprovals".
+ */
+export interface ProgramApprovals {
+  /**
+   * Who decides. Without assignees anyone with inbox access may.
+   */
+  assignees?: string[];
+  /**
+   * How long a call waits for a decision, in milliseconds. Defaults to
+   * the deployment's input deadline, and is bounded like it.
+   */
+  deadlineMs?: number | null;
+  /**
+   * Who takes a request over, once and with a fresh deadline, when its
+   * deadline passes undecided.
+   */
+  escalateTo?: string[];
+  /**
+   * Remind the assignees on this interval while the call waits.
+   */
+  remindAfterMs?: number | null;
 }
 /**
  * Per-run budgets of a program; omitted fields take the runtime defaults.
@@ -8385,6 +8427,11 @@ export interface ProfileReadParams {
  * via the `definition` "ProgramInputDefaults".
  */
 export interface ProgramInputDefaults {
+  /**
+   * Who decides the run's approval requests (calls to tools that need
+   * approval), in place of the program's `approvals.assignees`.
+   */
+  approvers?: string[];
   /**
    * Who takes over, once and with a fresh deadline, a request that
    * names no escalation list of its own when its deadline passes

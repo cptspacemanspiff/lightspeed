@@ -843,6 +843,47 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             }
           ]
         },
+        "ProgramApprovals": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Settings for a program's approval requests.",
+          "properties": {
+            "assignees": {
+              "description": "Who decides. Without assignees anyone with inbox access may.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "escalateTo": {
+              "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remindAfterMs": {
+              "description": "Remind the assignees on this interval while the call waits.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ProgramContractRequirement": {
           "additionalProperties": {
             "not": {}
@@ -951,6 +992,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
           "properties": {
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramApprovals"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+            },
             "inputSchema": {
               "description": "JSON Schema that run input must satisfy."
             },
@@ -3418,6 +3470,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
         "ProgramInputDefaults": {
           "description": "Defaults for a program run's input requests.",
           "properties": {
+            "approvers": {
+              "description": "Who decides the run's approval requests (calls to tools that need\napproval), in place of the program's `approvals.assignees`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "escalateTo": {
               "description": "Who takes over, once and with a fresh deadline, a request that\nnames no escalation list of its own when its deadline passes\nunanswered.",
               "items": {
@@ -4697,6 +4756,47 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             }
           ]
         },
+        "ProgramApprovals": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Settings for a program's approval requests.",
+          "properties": {
+            "assignees": {
+              "description": "Who decides. Without assignees anyone with inbox access may.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "escalateTo": {
+              "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remindAfterMs": {
+              "description": "Remind the assignees on this interval while the call waits.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ProgramContractRequirement": {
           "additionalProperties": {
             "not": {}
@@ -4805,6 +4905,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
           "properties": {
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramApprovals"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+            },
             "inputSchema": {
               "description": "JSON Schema that run input must satisfy."
             },
@@ -7047,6 +7158,47 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "ProgramApprovals": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Settings for a program's approval requests.",
+          "properties": {
+            "assignees": {
+              "description": "Who decides. Without assignees anyone with inbox access may.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "escalateTo": {
+              "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remindAfterMs": {
+              "description": "Remind the assignees on this interval while the call waits.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ProgramContractRequirement": {
           "additionalProperties": {
             "not": {}
@@ -7155,6 +7307,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
           "properties": {
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramApprovals"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+            },
             "inputSchema": {
               "description": "JSON Schema that run input must satisfy."
             },
@@ -8338,6 +8501,47 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "ProgramApprovals": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Settings for a program's approval requests.",
+          "properties": {
+            "assignees": {
+              "description": "Who decides. Without assignees anyone with inbox access may.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "escalateTo": {
+              "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remindAfterMs": {
+              "description": "Remind the assignees on this interval while the call waits.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ProgramContractRequirement": {
           "additionalProperties": {
             "not": {}
@@ -8446,6 +8650,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           },
           "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
           "properties": {
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramApprovals"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+            },
             "inputSchema": {
               "description": "JSON Schema that run input must satisfy."
             },

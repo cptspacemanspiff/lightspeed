@@ -3,7 +3,9 @@
 //! transition is guarded on `pending`, so an answer and an expiry cannot
 //! both win.
 
-use api::{Attribution, InputRequestAnswer, InputRequestStatus, InputRequestView};
+use api::{
+    Attribution, InputRequestAnswer, InputRequestKind, InputRequestStatus, InputRequestView,
+};
 use serde_json::Value;
 use sqlx::Row;
 use thiserror::Error;
@@ -34,6 +36,7 @@ pub struct InputRequestRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewInputRequest {
     pub request_id: String,
+    pub kind: InputRequestKind,
     pub execution_id: String,
     pub session_id: String,
     pub run_id: u64,
@@ -54,8 +57,8 @@ pub enum InputRequestClosure {
     Cancelled,
 }
 
-const COLUMNS: &str = "i.request_id, i.execution_id, i.session_id, i.run_id, i.ask, i.payload,
-    i.response_schema, i.assignees, i.escalate_to, i.escalated, i.status, i.created_at_ms,
+const COLUMNS: &str = "i.request_id, i.kind, i.execution_id, i.session_id, i.run_id, i.ask,
+    i.payload, i.response_schema, i.assignees, i.escalate_to, i.escalated, i.status, i.created_at_ms,
     i.deadline_at_ms, i.remind_after_ms, i.reminder_count, i.last_reminded_at_ms, i.approved,
     i.answer_value, i.answer_comment, i.answered_by, i.closed_at_ms";
 
@@ -68,8 +71,8 @@ impl PgStore {
         sqlx::query(
             "INSERT INTO input_requests (universe_id, request_id, execution_id, session_id, run_id,
                  ask, payload, response_schema, assignees, escalate_to, status, created_at_ms,
-                 deadline_at_ms, remind_after_ms)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13)
+                 deadline_at_ms, remind_after_ms, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13, $14)
              ON CONFLICT DO NOTHING",
         )
         .bind(self.config.universe_id)
@@ -85,6 +88,7 @@ impl PgStore {
         .bind(to_i64(request.created_at_ms)?)
         .bind(to_i64(request.deadline_at_ms)?)
         .bind(request.remind_after_ms.map(to_i64).transpose()?)
+        .bind(request.kind.as_str())
         .execute(&self.pool)
         .await?;
         let record = self
@@ -322,6 +326,8 @@ fn decode(row: &sqlx::postgres::PgRow) -> Result<InputRequestRecord, InputReques
         execution_id: row.try_get("execution_id")?,
         view: InputRequestView {
             request_id: row.try_get("request_id")?,
+            kind: InputRequestKind::parse(row.try_get::<&str, _>("kind")?)
+                .ok_or_else(|| decode_error("kind"))?,
             session_id: row.try_get("session_id")?,
             run_id: to_u64(row.try_get("run_id")?)?,
             ask: row.try_get("ask")?,

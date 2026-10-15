@@ -224,6 +224,35 @@ pub struct ProgramSpec {
     /// granted by the session's configuration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<ProgramContractRequirement>,
+    /// Who decides the program's calls to tools that need approval, and
+    /// how long such a call waits. A call that needs approval waits in the
+    /// inbox; approving runs it, rejecting fails it with kind
+    /// `approval_rejected`, and an unanswered one fails with
+    /// `deadline_exceeded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<ProgramApprovals>,
+}
+
+/// Settings for a program's approval requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramApprovals {
+    /// Who decides. Without assignees anyone with inbox access may.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<String>,
+    /// How long a call waits for a decision, in milliseconds. Defaults to
+    /// the deployment's input deadline, and is bounded like it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub deadline_ms: Option<u64>,
+    /// Remind the assignees on this interval while the call waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub remind_after_ms: Option<u64>,
+    /// Who takes a request over, once and with a fresh deadline, when its
+    /// deadline passes undecided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
 }
 
 fn default_program_semantics_version() -> u32 {

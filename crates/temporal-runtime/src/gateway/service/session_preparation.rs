@@ -404,7 +404,11 @@ impl SessionPreparationService {
     /// The system bindings behind a program's `input.request` and
     /// `input.open`: starts of the input-request workflow, which records the
     /// request in the universe's inbox and replies with the answer. A
-    /// request joins the reply; an open request returns its promise.
+    /// request joins the reply; an open request returns its promise. The
+    /// approval binding starts the same workflow for a call the program's
+    /// scope parked for approval, and replies with the approved call's
+    /// result, so its reply has no fixed schema and its ceiling covers the
+    /// call too.
     pub(crate) async fn core_input_workflow_tool_declarations(
         &self,
     ) -> Result<Vec<WorkflowToolDeclaration>, AgentApiError> {
@@ -450,6 +454,21 @@ impl SessionPreparationService {
                     Some(reply_schema_ref.clone()),
                     deadline_after_ms,
                 ),
+            ),
+            (
+                tools::human_input::APPROVAL_WORKFLOW_TOOL_ID,
+                tools::human_input::APPROVAL_WORKFLOW_SEMANTIC_TYPE,
+                tools::human_input::approval_tool_spec(),
+                WorkflowToolCompletion::Joined {
+                    reply_schema_ref: None,
+                    deadline_after_ms: deadline_after_ms.saturating_add(
+                        temporal_workflow::tool_call_operation_timeout(
+                            harness::ToolExecutionClass::RemoteInteractive,
+                        )
+                        .as_millis() as u64
+                            * 5,
+                    ),
+                },
             ),
         ];
         Ok(definitions

@@ -128,6 +128,33 @@ it("rejects without a value", async () => {
   expect(posted).toEqual([{ approved: false }]);
 });
 
+it("shows an approval's tool call and approves it without a value", async () => {
+  const approval: InputRequestView = {
+    ...pending,
+    kind: "approval",
+    ask: "Allow the program to call createIssue on github?",
+    payload: { server: "github", serverLabel: "github", tool: "createIssue", arguments: { title: "x" } },
+    responseSchema: undefined,
+  };
+  mocks.api.mockImplementation(async (method: string, path: string, body?: unknown) => {
+    if (method === "GET" && path.endsWith("/inbox/requests?status=pending")) return { requests: [approval] };
+    if (method === "GET" && path.endsWith("/inbox/requests/inp_1")) return { request: approval };
+    if (method === "POST" && path.endsWith("/inbox/requests/inp_1/answer")) {
+      posted.push(body);
+      return { request: { ...approval, status: "answered" } };
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+  await show("/u/test/inbox/inp_1");
+  const text = document.body.textContent ?? "";
+  expect(text).toContain("Approval");
+  expect(text).toContain("Tool call");
+  expect(text).toContain('"tool": "createIssue"');
+  expect(text).toContain("Approving runs this call");
+  await click("Approve");
+  expect(posted).toEqual([{ approved: true }]);
+});
+
 it("lets a viewer read but not answer", async () => {
   mocks.role = "viewer";
   await show("/u/test/inbox/inp_1");

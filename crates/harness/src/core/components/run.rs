@@ -362,6 +362,10 @@ pub struct ProgramInputDefaults {
     /// Who takes over a request whose deadline passes unanswered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<String>,
+    /// Who decides the run's approval requests, in place of the program's
+    /// assignees.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<String>,
 }
 
 impl RunRequestSource {

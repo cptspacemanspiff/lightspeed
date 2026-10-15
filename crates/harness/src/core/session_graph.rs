@@ -226,6 +226,7 @@ mod tests {
                 output_schema: None,
                 limits: Default::default(),
                 requires: Vec::new(),
+                approvals: None,
             },
         };
 

@@ -1414,6 +1414,7 @@ pub fn remote_mcp_call_runtime(
             target: remote_mcp_target(spec),
             remote_tool_name,
             approval_decision,
+            park: None,
         });
     }
     if !matches!(tool_id.as_str(), "mcp.find_tools" | "mcp.call") {

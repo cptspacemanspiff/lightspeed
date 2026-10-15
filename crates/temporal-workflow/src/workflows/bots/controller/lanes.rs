@@ -11,10 +11,11 @@ use harness::{BlobRef, EmissionEnvelope, PromiseResolution, REPLY_COMPLETION_KEY
 
 use super::super::{
     BOT_BUSY_RETRY_DELAY, BOT_EVENT_TERMINAL_TIMEOUT, BOT_EXTRA_SESSION_CAP, BotActivities,
-    BotAppendContextRequest, BotCancelRunRequest, BotEnsureSessionResult, BotExecuteToolRequest, BotExecuteToolResult,
-    BotPublishDirectoryRequest, BotReadRunUsageRequest, BotRecordOutcomesRequest,
-    BotSendBotReceiptsRequest, BotSendDeliveryReceiptsRequest, BotSessionRequest, BotSessionStatus,
-    BotStartRunRequest, BotStartRunResult, BotSteerRunRequest, BotSteerRunResult,
+    BotAppendContextRequest, BotCancelRunRequest, BotEnsureSessionResult, BotExecuteToolRequest,
+    BotExecuteToolResult, BotPublishDirectoryRequest, BotReadRunUsageRequest,
+    BotRecordOutcomesRequest, BotSendBotReceiptsRequest, BotSendDeliveryReceiptsRequest,
+    BotSessionRequest, BotSessionStatus, BotStartRunRequest, BotStartRunResult, BotSteerRunRequest,
+    BotSteerRunResult,
 };
 use super::state::{
     BotDelivery, DeliveryOutcome, LaneResolution, LaneTerminal, ManagedSession, PendingInvocation,
@@ -288,7 +289,9 @@ pub(super) async fn supersede_waiting_run(ctx: Ctx, target: String, run_id: Stri
     .await
     {
         ctx.state_mut(|state| {
-            state.record_error(format!("cancel superseded run {run_id} of {target}: {message}"))
+            state.record_error(format!(
+                "cancel superseded run {run_id} of {target}: {message}"
+            ))
         });
     }
 }

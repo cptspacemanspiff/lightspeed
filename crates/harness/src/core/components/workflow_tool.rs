@@ -2075,11 +2075,15 @@ fn validate_code_tool_invocation(
         .bindings
         .get(&invocation.tool_id)
         .expect("binding was validated above");
+    // A parked call emits the approval binding in place of its own tool,
+    // with its own arguments.
+    let parked = crate::core::components::code_tool::approval_binding_for_call(state, scope, call)
+        .is_some_and(|approval| approval.definition.tool_id == binding.definition.tool_id);
     if invocation.run_id != facts.run_id
         || invocation.context != facts.dispatch.call_context(&call.call_id)
         || &invocation.session_id != facts.session_id
         || invocation.session_universe_id != facts.session_universe_id
-        || call.spec.tool_id != binding.definition.tool.name
+        || (call.spec.tool_id != binding.definition.tool.name && !parked)
         || call.spec.arguments_ref != invocation.arguments_ref
     {
         return Err(DomainError::InvariantViolation(

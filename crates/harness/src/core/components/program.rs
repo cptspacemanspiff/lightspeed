@@ -20,6 +20,15 @@ pub const PROGRAM_EXECUTE_WORKFLOW_TOOL_ID: &str = "program-execute";
 pub const PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.program.execute.v1";
 pub const PROGRAM_EXECUTE_TOOL_NAME: &str = "program.execute";
 
+/// The system workflow tool a program's approval-required call waits
+/// through: an inbox request for the decision that, once approved, runs the
+/// call itself and replies with its result. It is admitted into every
+/// program session and is never callable from the program; a call its scope
+/// parks emits it in place of the call's own tool.
+pub const APPROVAL_WORKFLOW_TOOL_ID: &str = "input-approval";
+pub const APPROVAL_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.input.approval.v1";
+pub const APPROVAL_TOOL_NAME: &str = "input.approval";
+
 /// What drives a session's runs. `Agent` is today's model loop; `Program`
 /// runs a pinned program whose only effects are admitted tool calls.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +89,24 @@ pub struct PinnedProgram {
     /// the contract it was admitted against. Only these reach the program.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<ContractPin>,
+    /// Who decides the program's approval-required calls, and how long
+    /// they wait. Without it anyone with inbox access decides, within the
+    /// deployment's default deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<Box<ProgramApprovals>>,
+}
+
+/// The program's settings for approval requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramApprovals {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remind_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
 }
 
 impl PinnedProgram {
@@ -93,6 +120,7 @@ impl PinnedProgram {
             && self.output_schema == other.output_schema
             && self.limits == other.limits
             && self.requires == other.requires
+            && self.approvals == other.approvals
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -106,6 +134,13 @@ impl PinnedProgram {
         }
         self.engine.validate()?;
         self.limits.validate()?;
+        if self.approvals.as_ref().is_some_and(|approvals| {
+            approvals.deadline_ms == Some(0) || approvals.remind_after_ms == Some(0)
+        }) {
+            return Err(DomainError::InvariantViolation(
+                "program approval timeouts must be positive".into(),
+            ));
+        }
         let mut names = std::collections::BTreeSet::new();
         for pin in &self.requires {
             pin.validate()?;
@@ -648,6 +683,7 @@ mod tests {
             output_schema: None,
             limits: ProgramLimits::default(),
             requires: vec![pin("vfs.read_file"), pin("time.sleep")],
+            approvals: None,
         };
         program.validate().unwrap();
         let other = PinnedProgram {

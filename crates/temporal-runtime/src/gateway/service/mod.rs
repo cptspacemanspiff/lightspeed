@@ -989,15 +989,21 @@ impl GatewayAgentApi {
                 input_defaults,
             } => {
                 let input_defaults = input_defaults
-                    .filter(|defaults| !defaults.escalate_to.is_empty())
+                    .filter(|defaults| {
+                        !defaults.escalate_to.is_empty() || !defaults.approvers.is_empty()
+                    })
                     .map(|defaults| {
-                        tools::human_input::validate_people(
-                            "inputDefaults.escalateTo",
-                            &defaults.escalate_to,
-                        )
-                        .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
+                        for (field, people) in [
+                            ("inputDefaults.escalateTo", &defaults.escalate_to),
+                            ("inputDefaults.approvers", &defaults.approvers),
+                        ] {
+                            tools::human_input::validate_people(field, people).map_err(
+                                |error| AgentApiError::invalid_request(error.to_string()),
+                            )?;
+                        }
                         Ok::<_, AgentApiError>(harness::ProgramInputDefaults {
                             escalate_to: defaults.escalate_to,
+                            approvers: defaults.approvers,
                         })
                     })
                     .transpose()?;

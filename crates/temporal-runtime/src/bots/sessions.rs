@@ -628,6 +628,7 @@ pub async fn start_run(
                 .find(|event| !event.escalate_to.is_empty())
                 .map(|event| api::ProgramInputDefaults {
                     escalate_to: event.escalate_to.clone(),
+                    approvers: Vec::new(),
                 }),
         },
     };

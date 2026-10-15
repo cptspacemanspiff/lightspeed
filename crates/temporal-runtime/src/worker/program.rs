@@ -613,6 +613,7 @@ mod tests {
                 input_deadline_ms: None,
             },
             requires: Vec::new(),
+            approvals: None,
         };
         let limits = execution_limits(&program).unwrap();
         assert_eq!(

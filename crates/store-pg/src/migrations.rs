@@ -124,9 +124,14 @@ pub const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "input_requests",
         sql: include_str!("../migrations/013_input_requests.sql"),
     },
+    EmbeddedMigration {
+        version: 14,
+        name: "input_request_kind",
+        sql: include_str!("../migrations/014_input_request_kind.sql"),
+    },
 ];
 
-pub const REQUIRED_SCHEMA_REVISION: i64 = 13;
+pub const REQUIRED_SCHEMA_REVISION: i64 = 14;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaStatus {
