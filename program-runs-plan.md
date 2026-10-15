@@ -49,19 +49,19 @@ session-owned effects are stronger, called out in D7 and D8.
 - **A tool API made for programs.** Programs call canonical, versioned tool
   contracts. Model provider presentation never affects them, and session tooling
   refreshes don't break them.
-- **Durable.** Losing a worker or interpreter re-executes the program. Completed
-  calls, including whole child sessions, return their recorded outcomes. Long
-  waits hold no interpreter.
+- **Durable.** A program runs inside its Temporal workflow, so losing a worker
+  replays it from the workflow's history. Completed calls, including whole
+  child sessions, are never made again. Long waits hold no worker.
 - **Observable.** Narration, spans, and every call with its args, result, reason
   and source location appear in the session event stream and web transcript.
 - **Repairable.** A separate agent session with an inspect grant can read a failed
   program session's trace, dry-replay patched source, publish a new program
   revision, and resume the work without repeating completed calls.
-- **Executor-independent.** Executors speak a language-neutral protocol.
-  In-process QuickJS (the `codemode` engine) is the first executor and stays a
-  supported target, because it is the only one that runs on macOS and Windows.
-  workerd in a smolvm microVM follows once the protocol is stable (Phase 8) and
-  gives the higher trust level on Linux. Neither choice changes anything above.
+- **Executor-independent.** An executor is a program instance the workflow
+  steps (D9). In-process QuickJS (`crates/program-engine`) is the first and
+  runs everywhere. A WebAssembly component or workerd behind the same step
+  interface could give stronger isolation later (D9, D12). Neither choice
+  changes anything above.
 
 ## Non-goals (for now)
 
@@ -73,7 +73,9 @@ session-owned effects are stronger, called out in D7 and D8.
 - Building program sessions *on* code mode. Program sessions and code mode become
   two clients of a shared scoped-call core (D3). Code mode's behaviour is
   unchanged.
-- Checkpointing interpreter heaps. Durability comes from re-execution.
+- Checkpointing interpreter heaps. Durability comes from replaying the
+  workflow's history; the only saved program state is an explicit JSON
+  checkpoint (`ctx.continueAsNew`, D7, planned).
 - Direct network egress from program code. All I/O goes through tools.
 - Re-executing recorded reads on replay to keep the log small, as Cloudflare's
   `replay: "reexecute"` does (`connectors/base.ts`). Results live in CAS by
@@ -87,6 +89,15 @@ versions later, with the caveat that tool versioning still needs real
 design before the first incompatible change: see the open question), D8 as
 written, D13 as written, and D14 with the recommended defaults recorded in
 it. Questions for the maintainer stay under "Open questions".
+
+**Revision (2026-10-15, user).** D7 and D9 changed after the first Phase 4
+build. The program no longer re-executes in retryable activities against a
+journal read from the session; it runs **inside its Temporal workflow**, on
+a stepped QuickJS instance in its own crate (`crates/program-engine`,
+separate from code mode's `codemode`). Temporal's history is the journal.
+The activity design (attempts, hold window, suspension and wake) was built
+and then removed. D14's `env.state` became the program context (`ctx.context`
+/ `ctx.setContext`). The sections below are updated to match.
 
 ### D1. A session type at the edges, the shared harness in the middle
 
@@ -265,18 +276,17 @@ What goes where:
 - **Completion `Ack`.** The invoke Update returns as soon as the call is admitted
   or deduped, carrying the recorded outcome only if the call is already
   terminal. Outcomes are then observed only through `scope_recorded_outcomes`
-  (D7), never through an invoke Update's return value, so every attempt sees
+  (D7), never through an invoke Update's return value, so a replay sees
   completions in the same order. `Blocking` keeps today's wait-for-terminal
-  behaviour for code mode. `Ack` is what lets a program attempt drop its
-  interpreter while calls are pending; without it, D7's suspension cannot
-  release the session.
+  behaviour for code mode. `Ack` is what lets the program's workflow wait for
+  calls without an Update held open on the session.
 - **Approvals.** The approval policy must reach the per-call activity
   (`activities/tools.rs:556-599`), which is where approval-required calls are
   rejected today; clearing `approval_decision` in the core is not the gate.
   `Park` follows Cloudflare's durable runtime (`runtime.ts` `decide`,
   `proxy-tool.ts` `resumeCodemode`): an approval-required call is admitted as
-  a recorded `Pending` entry awaiting a decision, the attempt returns
-  `Suspended` on it (D7), an approval completes the call through the ordinary
+  a recorded `Pending` entry awaiting a decision, the program simply waits on
+  it (D7), an approval completes the call through the ordinary
   per-call activity and wakes the run, a rejection completes it as a typed
   failed outcome the program can catch, and an unanswered pause expires after
   a configurable TTL (Cloudflare's default is 24 hours) as a rejection. The
@@ -329,11 +339,11 @@ presentation was active. Add a program-facing contract layer in `crates/tools`:
   that binding with a typed `ContractChanged` error, not silent drift.
 - **Admission up front.** `PinnedProgram.requires` lists the contracts the program
   uses. Session creation fails if any required contract is ungranted or
-  unsupported, instead of a program failing at call 400. Every attempt
-  re-checks `requires` before it starts, as Cloudflare's resume refuses a run
-  whose connectors are no longer configured (`proxy-tool.ts`
-  `resumeCodemode`), so a revoked binding fails the run with a typed error at
-  the next attempt rather than at the next call. Each call is still checked
+  unsupported, instead of a program failing at call 400. The workflow
+  re-checks `requires` when it loads the program, as Cloudflare's resume
+  refuses a run whose connectors are no longer configured (`proxy-tool.ts`
+  `resumeCodemode`), so a revoked binding fails the run with a typed error
+  before it starts rather than at the next call. Each call is still checked
   against current grants (`PerBindingGrant`). Unrelated tooling changes don't
   invalidate bindings.
 - **Waiting is a tool.** `time.sleep` is a durable wait that completes through
@@ -404,8 +414,8 @@ context is `CallContext::Run` (D3).
 - **Start.** When a run on a program session is Accepted/Started, the harness
   emits a start request for a `ProgramRunWorkflow` invocation on the existing
   `code` task queue (`Role::Code`, `DEFAULT_CODE_TASK_QUEUE` at
-  `temporal-runtime/src/config.rs:188`) with the deterministic execution id
-  `program:{session}:{run}`. `start_execution`
+  `temporal-runtime/src/config.rs:188`) with a deterministic execution id
+  (`wtx:…`, derived from the invocation and the binding's recipe). `start_execution`
   (`worker/activities/workflow_tools.rs:28-105`, policy in
   `execution_start_options` at `:107-112`) uses `RejectDuplicate` because a
   code execution must never run twice. A program run must be restartable if
@@ -433,7 +443,7 @@ context is `CallContext::Run` (D3).
   bounded deadline after which remaining calls are force-completed as
   interrupted, as `interrupt_code_tools_for_run` already does at run end
   (`code_tool.rs:30-75`, called from `run.rs:1041`).
-- **Failure with work in flight.** When an attempt returns `Threw` while calls
+- **Failure with work in flight.** When the program throws while calls
   are still pending (for example a child session still running), the workflow
   closes the scope with cancel and drains exactly as for cancel before it
   replies `Failed`. A program that throws must not leave orphaned children.
@@ -441,73 +451,81 @@ context is `CallContext::Run` (D3).
 - **Retention.** Record contains edges session → `source_ref`/schemas and
   run → `input_ref`, following the pattern in `session_tools.rs:780-822`.
 
-### D7. Durability by re-execution
+### D7. Durability: the program runs in its workflow
 
-Session-side dedup (D3) already returns recorded outcomes for re-issued requests.
-This deliberately reverses p191's "Keep JavaScript ephemeral" rule for program
-sessions only; code mode keeps `maximum_attempts = 1`. The reversal is safe only
-under the determinism contract (D8) and the `Ack` completion policy (D3). The
-code-mode host's single-attempt rules don't apply, because programs get their
-own host:
+Revised 2026-10-15. The first design re-executed the program in retryable
+`program_attempt` activities against a journal read from the session, with a
+hold window, suspension and a wake emission. It was built and then removed:
+it re-implemented Temporal's own replay. The program now runs **inside**
+`ProgramRunWorkflow`, and the workflow's history is its journal. Code mode
+keeps its single-attempt activity.
 
-- **`ProgramRunWorkflow`** (new, `code` role) owns the run's scope for the run's
-  lifetime. It never closes the scope on interruption, only on a real terminal or
-  a cancel.
-- The **`program_attempt` activity** opens or reattaches to the run's scope,
-  prefetches recorded outcomes (`scope_recorded_outcomes`), and drives an executor
-  (D9) with them as the replay journal. Retries are allowed.
+- **`ProgramRunWorkflow`** (`code` role) owns the run's scope for the run's
+  lifetime and closes it only on a real terminal or a cancel. It hosts a
+  stepped program instance (D9) on the workflow thread:
 
 ```
-loop {
-  outcome = program_attempt(descriptor, attempt_no)   // activity, retryable
-  match outcome {
-    Returned(output)  => reply Completed(output), break
-    Threw(report)     => reply Failed(report),    break
-    Suspended(waits)  => wait for wake emission or deadline; continue
-    Interrupted       => backoff; continue               // worker/VM loss
-  }
-}
+prepare          (activity)        → descriptor
+program_load     (activity)        → source, input, context, contract bindings (pins re-checked)
+start the instance                 → Waiting { requests } | Finished { requests, report }
+loop:
+  requests  → program_admit (one activity per step): invoke Updates with Ack;
+              refusals come back as failed completions for the next step
+  finished  → program_conclude (activity): keep the context, close the scope,
+              store the report → finalize (activity) replies to the session
+  otherwise wait for a ScopeProgress signal from the session, or cancellation
+  program_collect (local activity) → recorded outcomes after the cursor, as JSON
+  step the instance with the refusals and collected outcomes
 ```
 
-- **Observing completions.** A running activity cannot receive a signal, and
-  with `Ack` completion (D3) an invoke Update returns nothing to wait on. The
-  attempt therefore learns outcomes only by polling
-  `scope_recorded_outcomes(scope_id, after_request, limit)` on the session
-  workflow. While it has calls in flight and no runnable work it polls at a
-  short interval (on the order of 100–250 ms, heartbeating) for a bounded
-  **hold window**, on the order of tens of seconds, sized so that short tool
-  calls complete inside one attempt. The query answers from the session
-  workflow's in-memory state, so the cost is one workflow query per poll, not a
-  history event. Delivery takes completions in the order the query returns
-  them, which is log order (D8).
-- **Suspension.** When the hold window expires, or as soon as the attempt is
-  waiting only on a child session, a joined workflow tool, `await` or
-  `time.sleep`, the attempt returns `Suspended` with the ids it waits on and
-  drops the interpreter. The session sends a wake emission to
-  `program:{session}:{run}` when a call in that scope reaches a terminal state,
-  and the workflow starts the next attempt. No invoke Update is outstanding
-  during an attempt, let alone while suspended, so the session can
-  continue-as-new. Today `invoke_code_tool` blocks until the call is terminal
-  and keeps `waiters > 0` (`session/code_tools.rs:85-112`,
-  `wait_loop.rs:108-148`).
-- **Workflow history budget.** Each attempt costs the program workflow a few
-  history events, and each wake is a signal. A run that suspends on every one
-  of a thousand sequential child calls therefore needs `ProgramRunWorkflow` to
-  continue-as-new on the same history threshold the session uses. Its state is
-  small (descriptor, attempt counter, last known scope status) and the scope
-  itself lives in the session, so continue-as-new is cheap. Replay cost is
-  bounded too: re-executing a journal of N recorded outcomes is in-memory JS
-  with no effects, so even N attempts over N calls stay well inside the
-  budgets in D13.
-- **Reattach.** On a new attempt, a re-issued `call-N` whose outcome is still
-  pending is deduped to a no-op and the attempt keeps waiting on it. Nothing is
-  re-executed and no effect is re-applied. This is the strongest reason for
-  D3: Cloudflare's durable runtime records a call as `executing` before the
-  effect runs and re-executes it on replay if the result was never recorded
-  (`runtime.ts` `decide`, the `executing` arm), so a crash between effect and
-  record applies the effect twice. Here the effect belongs to the session and
-  the request id is the dedup key, so that window does not exist.
-- A parent waiting on ten child sessions for a day holds no interpreter. Each
+- **Determinism.** Every input to a step is in the workflow's history: the
+  loaded program (an activity result), admission refusals (an activity
+  result), collected outcomes (local-activity markers) and wakes (signals).
+  After a cache eviction or a lost worker, Temporal re-runs the workflow
+  function, which builds a fresh instance and feeds it the same inputs in
+  the same order, so it issues the same requests; Temporal's command check
+  catches a divergence. Re-issued admissions are no-ops at the session,
+  which dedups by request id.
+- **Waking.** When a call in a run-owned scope completes, the session sends
+  the program workflow a `ScopeProgress { execution_id, completed }`
+  emission with the scope's count of recorded outcomes. The workflow
+  collects when that count passes its cursor, so a wake that arrives early
+  is never lost.
+- **Waiting.** A waiting program is a workflow blocked on a signal: no
+  interpreter thread, no activity slot, no Update held open on the session.
+  Its heap stays in the worker's sticky cache until evicted; an evicted
+  program replays its history when it next wakes. A wait is bounded only by
+  the run's deadline (`max_wall_clock_ms`, else the program-execute
+  binding's 30-day joined ceiling).
+- **Refusals in history.** Admission refusals (permissions, limits, a closed
+  scope) reach the program as failed completions recorded in history, so a
+  replay sees the same ones.
+- **CPU.** Steps run on the workflow thread of the worker that holds the
+  workflow (the Rust SDK runs a worker's workflow code on one thread). Each
+  step has a deterministic budget (D9), and heavy work belongs in tool
+  calls. Program workflows should run on their own worker role and task
+  queue (not built).
+- **History budget.** Each call costs roughly 5–7 history events, so a run
+  fits a few thousand calls under Temporal's ~51K-event limit; `max_calls`
+  (default 1024) keeps runs inside it. Collected results are stored inline
+  in history and count toward its 50 MB limit. Longer work will use
+  **`ctx.continueAsNew(state)`** (planned): an explicit JSON checkpoint,
+  taken with no calls in flight, mapped to Temporal continue-as-new; the
+  next execution calls `run` again with `ctx.continued = state`, under the
+  same run. Wide work goes to subprograms (D13), each its own workflow.
+- **Engine upgrades.** A run replays on whichever build picks it up, so a
+  prelude or engine change could alter a replay. Temporal worker
+  versioning (a running workflow stays on the build that started it, and
+  moves at `continueAsNew`) is the intended answer (not built).
+  `semantics_version` still pins the guest API.
+- **Effects are never repeated.** Effects belong to the session and are
+  deduped by request id, so a retried workflow task or a replay never
+  applies one twice. This is the strongest reason for D3: Cloudflare's
+  durable runtime records a call as `executing` before the effect runs and
+  re-executes it on replay if the result was never recorded (`runtime.ts`
+  `decide`, the `executing` arm), so a crash between effect and record
+  applies the effect twice.
+- A parent waiting on ten child sessions for a day holds no worker. Each
   child is a separate session workflow.
 
 ### D8. Determinism contract
@@ -515,21 +533,20 @@ loop {
 This is part of the executor protocol (D9) and binds every executor:
 
 1. **Quiescent delivery.** Completions are delivered only when the guest has no
-   runnable work, one completion per quiescent point. This is a behaviour
-   change for the QuickJS engine: today its loop deliberately calls `try_recv`
-   before every job so that a self-scheduling microtask chain cannot starve the
-   bridge (`engine.rs:522-556`), which delivers completions while jobs are
-   still runnable. Durable mode must deliver only when `execute_pending_job`
-   finds nothing to run, and rely on the elapsed-time check for starvation. In
-   V8/workerd it means one completion per macrotask over a single ordered
-   channel.
-2. **Log-order delivery.** Completions are delivered in the order their
-   `CallCompleted` events were appended to the session log, which is what
-   `scope_recorded_outcomes` returns (D7). Execution is then a pure function of
-   the source, the input and the journal, with no extra log events, and
-   `Promise.race`, process-as-completed loops and `Promise.allSettled` all
-   work. The live attempt must deliver only from that ordered feed, never from
-   an individual Update's return value. Replay is well defined because a
+   runnable work, one completion per quiescent point. Code mode's engine
+   delivers between jobs so a self-scheduling microtask chain cannot starve
+   its bridge; the program engine (`crates/program-engine`) delivers only
+   when `execute_pending_job` finds nothing to run, and its step budget stops
+   a chain that never quiesces. In V8/workerd it would mean one completion
+   per macrotask over a single ordered channel.
+2. **History-order delivery.** Completions are delivered in the order the
+   program's workflow recorded them: refusals as the admission activity
+   returned them, outcomes in the session's log order as `program_collect`
+   read them from `scope_recorded_outcomes` (D7). Execution is then a pure
+   function of the source, the input and that history, and `Promise.race`,
+   process-as-completed loops and `Promise.allSettled` all work. Outcomes
+   are never taken from an individual Update's return value. Delivery is
+   well defined because a
    completion is logged only after its request was admitted: by the time a
    replaying guest reaches a quiescent point it has issued every request the
    live run had issued before that point, so the next completion in log order
@@ -591,42 +608,47 @@ This is part of the executor protocol (D9) and binds every executor:
 6. **Semantics version.** `ProgramEngine.semantics_version` pins the prelude and
    guest API. An executor refuses to resume an unsupported version.
 
-Executor conformance tests: run a script live with randomised completion timing,
-then replay it against the recorded outcomes. Both runs must make identical calls
-and produce identical output. Every executor (QuickJS and workerd) must pass the
-same suite, since they implement quiescent delivery differently.
+Executor conformance tests: run a program delivering its completions in
+random orders and groupings, then replay the recorded order in different
+groupings. Every run must make identical calls and produce identical output.
+Every executor must pass the same suite.
 
-### D9. Language-neutral executor protocol
+### D9. Executor: a stepped program instance
 
-Executors are interchangeable behind a `ProgramExecutor` trait used by
-`program_attempt`. The wire contract is JSON messages, independent of codemode's
-Rust types:
+Revised 2026-10-15. The executor is a value the workflow steps, not a
+process that streams messages:
 
-| Direction | Message | Contents |
+| Call | Takes | Returns |
 |---|---|---|
-| host → executor | `Start` | execution id, attempt, module bundle ref (a modules map plus a main module, the shape the Worker Loader takes), semantics version, input, recorded `started_at`, contract manifest (canonical names and schemas: the shape of `env`), limits, replay journal (recorded outcomes with their timestamps, in log order) |
-| host → executor | `Complete` | request id, outcome (result or error ref and inline JSON), recorded completion timestamp (feeds the clock, D8) |
-| host → executor | `Cancel` | reason |
-| executor → host | `Request` | request id, binding, args, annotation `{why, span_path, source_location}` |
-| executor → host | `Notes` | narration and span records with their sequence numbers |
-| executor → host | `Suspend` | the request ids it is waiting on |
-| executor → host | `Finish` | `Returned { output }` or `Threw { error, stack, span_path }` |
+| `start` | module source, contract bindings (the shape of `env`), input, recorded `started_at`, random seed, program context, limits, step budget | `Waiting { requests }` or `Finished { requests, report }` |
+| `step` | completions in delivery order: request id, outcome (a value, or `{ kind, message, value }`), recorded timestamp (feeds the clock, D8) | the same |
 
-- **Direction of authority.** The `program_attempt` activity holds the stream and
-  forwards requests to the session through the scoped-call Updates. Executors
-  never get Temporal clients, keys or tenant identity.
+- **No thread, channel or clock.** Each call runs the program to quiescence,
+  delivering one completion per quiescent point (D8). Requests issued in a
+  step that also finishes the program are still returned to the host.
+- **Budget.** QuickJS interrupt checks per step (default 2,000), counted at
+  deterministic points. Exhausting it fails the program; it is terminal and
+  never a replayed branch. Memory and stack limits apply as before. There
+  is no wall-clock budget inside the executor.
+- **Divergence.** A completion for a request the program never issued is a
+  typed `Nondeterminism` failure; a duplicate is an internal error. An
+  oversized result reaches the program as a `payload_too_large` failure.
+- **Direction of authority.** The workflow and its activities hold Temporal
+  clients and keys; the executor holds none and sees only JSON.
 - **Executors:**
-  - **In-process QuickJS.** Reuse the `codemode` engine with a durable mode
-    implementing D8. It is the first executor (Phases 2–7) and stays supported
-    as the only executor on macOS and Windows, with an explicit lower trust level
-    than workerd in smolvm. Code mode keeps using the same engine in its
-    ephemeral mode.
-  - **workerd in smolvm.** The higher-trust Linux target, Phase 8. Details in
-    D12.
-  - **Remote SDK (optional, later).** The same protocol over the public API, so a
-    non-JS program (for example a Python pipeline) can drive a program session
-    with the same dedup and replay guarantees. Whether this is first-class is an
-    open question.
+  - **In-process QuickJS** (`crates/program-engine`). The only executor
+    today; it runs on every platform. Code mode keeps its own engine in
+    `crates/codemode`, which programs no longer touch.
+  - **WebAssembly component** (later option). The Temporal Rust SDK has an
+    experimental `wasm-workflows` feature: workflow code as a wasmtime
+    component behind the unstable WIT package
+    `temporal:workflow-runtime@0.1.0`. QuickJS compiled to a component
+    could add memory isolation and fuel budgets without leaving the worker.
+  - **workerd** (D12, later). The same step calls over IPC to a sidecar,
+    one isolate per cached run; losing the sidecar fails the workflow task,
+    which retries and replays. Linux only, and a less common pattern.
+  - **Remote SDK** (optional, later): whether non-JS programs get a
+    first-class path is an open question.
 
 ### D10. Repair through a separate agent session
 
@@ -634,7 +656,7 @@ Rust types:
   - the error and stack
   - the span path
   - the last N calls
-  - the attempts
+  - the program's steps and admissions
   - nondeterminism, limit, schema or contract details
 
   Add `RunFailureKind::Program`. A failed child is a failed call outcome in the
@@ -688,7 +710,6 @@ no nondeterministic local work to capture, and a recorded step would shift
 - Add a new `CoreAgentEvent::Program(ProgramEvent)` family with these variants:
   - `Narration { execution_id, seq, span_path, text_ref }`
   - `SpanOpened` / `SpanClosed { execution_id, seq, name, parent }`
-  - `AttemptStarted { execution_id, attempt, replayed_calls }`
 - Narration and spans use their own sequence (`note-N`), flushed as `Notes`
   batches. Admission dedups by `(execution_id, seq)`.
 - The scoped-call spec gains an optional `annotation`, **excluded from the dedup
@@ -705,12 +726,18 @@ no nondeterministic local work to capture, and a recorded step would shift
   for those scopes. Code mode's projection is unchanged.
 - Child-session calls link to the child session id, so the UI can drill down
   through the tree.
-- Add `RunView.program: Option<ProgramRunView { spans, calls, narration, attempts }>`.
+- Add `RunView.program: Option<ProgramRunView { spans, calls, narration }>`.
 - Web: add the new kinds in `transcript.ts` (the `codeToolProgress` no-op is at :285)
   and in `tool-trace.tsx`, with spans as collapsible groups and narration as
   assistant text.
 
 ### D12. workerd runner in smolvm
+
+Revised 2026-10-15: with the program running in its workflow (D7), workerd
+would be a sidecar the workflow steps synchronously over IPC (D9), one
+isolate per cached run, rather than a runner that streams the old D9
+messages. A WebAssembly component is the in-process alternative. The
+notes below still apply to the sidecar.
 
 - **Reuse** the provider controller plane:
   - target lifecycle and power (`environment-protocol/src/control/*`)
@@ -808,11 +835,11 @@ return { outcome: "handled", summary: review.approved ? "queued for merge" : "re
 
 **A wait is a suspended run, not a new run.** A run is one invocation: one
 input, one terminal, one output. While the program waits, its run stays
-`Active`, the attempt suspends and drops the interpreter (D7), and only the
-call journal and a pending promise remain. When the answer arrives the program
-is replayed against the journal: recorded calls, including the sub-agent,
-return their recorded outcomes without running again, and the new outcome is
-delivered at the `await`. This needs D8's determinism contract and pins the
+`Active`, its workflow waits on a signal and holds no worker (D7), and only the
+history and a pending promise remain. When the answer arrives the outcome is
+delivered at the `await`; if the worker was lost meanwhile, the program is
+first replayed from the workflow's history, and recorded calls, including the
+sub-agent, are never made again. This needs D8's determinism contract and pins the
 run to the program revision it started with. A finished run is never resumed:
 a follow-up months later (a new comment on the issue) is a new run (below).
 
@@ -834,7 +861,7 @@ requests are later backends behind the same contract.
 
 - **`env.input.open(spec)`** creates the request and returns a **handle**
   `{ id }` at once. The handle's operations are calls like any other:
-  - `answer()`: the pending answer, a promise that may outlive many attempts;
+  - `answer()`: the pending answer, a promise that may outlive many workers;
   - `remind()`: notify the assignees again through the backend;
   - `reassign({ to })`: replace the assignees without touching the run;
   - `cancel()`: withdraw the request; `answer()` then fails as cancelled.
@@ -871,7 +898,7 @@ for (let nudges = 0; ; nudges++) {
 ```
 
 The race replays identically because outcomes are delivered in log order
-(D8), and each wake is one attempt replaying the journal in memory (D7). The
+(D8), and each wake is one step of the program in its workflow (D7). The
 common patterns ship as a small JavaScript helper library with the program
 runtime, for example `withReminders(ask, { every: "3d", max: 2, then:
 "reassign" })`, built only on the primitives above. No separate service is
@@ -1007,19 +1034,20 @@ regenerated contracts).
      the program context (`ctx.context` / `ctx.setContext`, one context
      entry per run written at completion, the last `context_retained`
      (default 10) kept active, carried across a routed key's generations).
-   - Until Phase 4 a wait holds a live attempt, so it is bounded by the
-     attempt's wall clock (`max_wall_clock_ms`, 10 minutes by default) and a
-     worker loss fails the run. Phase 3 tests use short waits; multi-day waits
-     need Phase 4's suspension.
-4. **Durable execution** (D7, D8, D9).
-   - Changes: indexed retention; canonical argument digests; retryable
-     attempts; the hold window, suspension and wake; `ProgramRunWorkflow`
-     continue-as-new; the executor protocol; QuickJS durable mode with
-     quiescent, log-order delivery.
-   - Tests: conformance tests, a live kill-and-resume test, and a live
-     multi-attempt human-input test: suspend on `input.request`, kill every
-     worker, answer, and check the run resumes without re-running the
-     sub-agent.
+   - Until Phase 4 a wait held a live attempt, bounded by its wall clock;
+     Phase 4 removed that limit.
+4. **Durable execution** (D7, D8, D9). Done, redirected on 2026-10-15.
+   - Built: quiescent delivery; the program engine in its own crate
+     (`crates/program-engine`) with a stepped instance and deterministic step
+     budget; the program running inside `ProgramRunWorkflow` with load,
+     admit, collect and conclude activities and the `ScopeProgress` wake.
+   - Tests: conformance (shuffled delivery, then replay in several
+     groupings); a live test that kills the code worker while a program
+     waits on a person, answers, and finishes on a replacement from
+     history; a live timer test that replays the workflow history.
+   - Remaining: `ctx.continueAsNew`; a separate `program` worker role and
+     task queue; Temporal worker versioning; a budget for results stored
+     in history.
 5. **Composition** (D13).
    - Changes: the child-session workflow; `program.run`/`program.spawn`; schemas;
      program-owned fan-out budgets; `env` capability passing; the grant subset
@@ -1030,9 +1058,10 @@ regenerated contracts).
 7. **Repair** (D10). First failure reports, inspect grants, program revision
    history in the profile store, trace tools and dry replay; then publish, and
    resume with journal matching (research).
-8. **workerd runner** (D12). It can start after Phase 4, once the protocol is
-   stable, and must pass the Phase 4 conformance suite. QuickJS remains the
-   executor on non-Linux hosts.
+8. **Stronger isolation** (D9, D12). A WebAssembly component on the SDK's
+   `wasm-workflows` path, or workerd as a sidecar behind the step
+   interface. Either must pass the Phase 4 conformance suite. QuickJS stays
+   the in-process executor everywhere.
 
 Phases 1–6 cover the issue-pipeline bots. Phase 7 delivers "hand it to an AI to
 fix".
@@ -1091,8 +1120,12 @@ with both tests.
   program move to a new version (republish, or an adapter)? MCP tools change
   upstream without notice, so their side of this is a policy (fail, or adapt)
   rather than a support window.
-- **Hold window** (D7): what poll interval and hold window keep short tool calls
-  inside one attempt without loading the session worker? Needs measurement.
+- **Long runs** (D7): what per-run call cap, and what budget for results
+  stored in workflow history, before `ctx.continueAsNew` or subprograms are
+  required?
+- **Isolation** (D9, D12): untrusted program code now runs in a workflow
+  worker. Is a separate `program` worker role enough for now, and which
+  stronger option comes first: a WebAssembly component or workerd?
 - **Profiles** (D2): should a program profile extend `ProfileDocument` or be a
   sibling document type in the same store? The need for revision history leans
   toward a sibling, pending the maintainer's view.
