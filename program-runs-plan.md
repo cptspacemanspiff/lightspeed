@@ -919,7 +919,7 @@ regenerated contracts).
      Phase 4 adds replay.
    - Tests: harness replay tests for a program run with calls, including a joined
      child and an `await`, plus fork rejection. Live Temporal suite, serialised.
-   - **Follow-up before Phase 3: routed program sessions keep a stale pin.**
+   - **Follow-up: routed program sessions kept a stale pin** (fixed in `d14c1e7d`).
      See "Known issue: routed program sessions keep a stale pin" below.
 3. **Canonical contracts and human input** (D4, D14).
    - Changes: digest-pinned contracts for built-ins, including `time.sleep`;
@@ -961,7 +961,8 @@ fix".
 
 ### Known issue: routed program sessions keep a stale pin
 
-Found 2026-10-14, after `d235d146`. To fix before Phase 3.
+Found 2026-10-14, after `d235d146`. Fixed in `d14c1e7d` as described below,
+with both tests.
 
 - **Symptom.** A bot on a program profile with `perKey` (or `perEvent`)
   routing keeps running the program revision each routed session was created
