@@ -32,5 +32,14 @@ export function botInputOf(bot: BotView): BotInput {
     selfConfig: bot.selfConfig ?? false,
     emit: bot.emit ?? false,
     enabled: bot.enabled ?? true,
+    escalateTo: bot.escalateTo ?? [],
   };
+}
+
+/// People named in a comma-separated field, blanks dropped.
+export function peopleFromText(text: string): string[] {
+  return text
+    .split(",")
+    .map((person) => person.trim())
+    .filter((person) => person !== "");
 }

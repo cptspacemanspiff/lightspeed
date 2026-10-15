@@ -101,6 +101,10 @@ pub struct BotEvent {
     /// that waits on people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub while_waiting: Option<api::BotWhileWaiting>,
+    /// Who a program's unanswered question about this event escalates to:
+    /// its trigger's list, else the bot's, resolved at admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
     /// Federation hop count carried into the delivery so emits from it can
     /// be bounded.
     #[serde(default)]

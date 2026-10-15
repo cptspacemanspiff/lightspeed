@@ -40,8 +40,14 @@ pub(super) async fn open(
             });
         }
     };
-    let deadline_after_ms =
-        args.deadline_after_ms(program_input_deadline(store, &start).await?, timeouts);
+    let settings = program_input_settings(store, &start).await?;
+    let deadline_after_ms = args.deadline_after_ms(settings.deadline_ms, timeouts);
+    // The call's own escalation list wins, else the run's default.
+    let escalate_to = if args.escalate_to.is_empty() {
+        settings.escalate_to
+    } else {
+        args.escalate_to
+    };
     let now = now_ms()?;
     let record = store
         .open_input_request(NewInputRequest {
@@ -53,7 +59,7 @@ pub(super) async fn open(
             payload: args.payload,
             response_schema: args.response_schema,
             assignees: args.assignees,
-            escalate_to: args.escalate_to.clone(),
+            escalate_to: escalate_to.clone(),
             created_at_ms: now,
             deadline_at_ms: now.saturating_add(deadline_after_ms),
             remind_after_ms: args.remind_after_ms,
@@ -65,7 +71,7 @@ pub(super) async fn open(
         deadline_at_ms: record.view.deadline_at_ms,
         deadline_after_ms,
         remind_after_ms: record.view.remind_after_ms,
-        escalates: !args.escalate_to.is_empty(),
+        escalates: !escalate_to.is_empty(),
     })
 }
 
@@ -223,11 +229,17 @@ async fn read_args(
         }))
 }
 
-/// The program's default deadline for input requests, from its pin.
-async fn program_input_deadline(
+/// What a request leaves out falls back on: the program's deadline from
+/// its pin, and the escalation list its run was started with.
+struct ProgramInputSettings {
+    deadline_ms: Option<u64>,
+    escalate_to: Vec<String>,
+}
+
+async fn program_input_settings(
     store: &PgStore,
     start: &WorkflowToolStartArgs,
-) -> Result<Option<u64>, ActivityError> {
+) -> Result<ProgramInputSettings, ActivityError> {
     let record = store
         .load_session(&start.invocation.session_id)
         .await
@@ -236,13 +248,26 @@ async fn program_input_deadline(
     let loaded = crate::checkpoint::load_reduction(store, store, &record)
         .await
         .map_err(|error| activity_error(anyhow::anyhow!(error.to_string())))?;
-    Ok(loaded
-        .reduced
-        .core_state
-        .lifecycle
-        .driver
-        .program()
-        .and_then(|program| program.limits.input_deadline_ms))
+    let state = &loaded.reduced.core_state;
+    let escalate_to = state
+        .runs
+        .active
+        .as_ref()
+        .filter(|run| run.run_id == start.invocation.run_id)
+        .and_then(|run| match &run.source {
+            harness::RunSource::Program { input_defaults, .. } => input_defaults.as_ref(),
+            harness::RunSource::Input { .. } => None,
+        })
+        .map(|defaults| defaults.escalate_to.clone())
+        .unwrap_or_default();
+    Ok(ProgramInputSettings {
+        deadline_ms: state
+            .lifecycle
+            .driver
+            .program()
+            .and_then(|program| program.limits.input_deadline_ms),
+        escalate_to,
+    })
 }
 
 async fn put_failure(store: &PgStore, code: &str, message: &str) -> Result<BlobRef, ActivityError> {

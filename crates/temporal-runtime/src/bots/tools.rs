@@ -761,6 +761,7 @@ mod tests {
                 self_config,
                 emit,
                 enabled: true,
+                escalate_to: Vec::new(),
             },
             event_seq: 0,
             closed_at_ms: None,

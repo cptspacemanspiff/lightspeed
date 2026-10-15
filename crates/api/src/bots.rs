@@ -200,6 +200,10 @@ pub struct BotDocument {
     /// delivered.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Who takes over a program's question that nobody answered in time,
+    /// when neither the question nor the event's trigger names anyone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -634,6 +638,11 @@ pub struct BotTriggerDocument {
     pub session_close_after_ms: Option<u64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Who takes over a program's question about this trigger's events that
+    /// nobody answered in time, when the question names no one: absent
+    /// inherits the bot's `escalateTo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_to: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

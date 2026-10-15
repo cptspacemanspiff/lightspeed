@@ -47,6 +47,8 @@ pub struct StoreBotEventInput {
     pub coalesce: Option<BotCoalesceParams>,
     pub when_busy: Option<BotWhenBusy>,
     pub while_waiting: Option<api::BotWhileWaiting>,
+    /// The trigger's escalation list; `None` takes the bot's.
+    pub escalate_to: Option<Vec<String>>,
     pub sender_bot_id: Option<BotId>,
     pub hops: u32,
     pub in_reply_to: Option<BotEventReplyRef>,
@@ -72,6 +74,7 @@ impl StoreBotEventInput {
             coalesce: None,
             when_busy: None,
             while_waiting: None,
+            escalate_to: None,
             sender_bot_id: None,
             hops: 0,
             in_reply_to: None,
@@ -183,6 +186,9 @@ impl GatewayAgentApi {
             coalesce: input.coalesce,
             when_busy: input.when_busy,
             while_waiting: input.while_waiting,
+            escalate_to: input
+                .escalate_to
+                .unwrap_or_else(|| bot.document.escalate_to.clone()),
             hops: input.hops,
             reply: matches!(input.receiver, Some(EventReceiver::Bot { .. })),
             media: input.media,
@@ -352,6 +358,7 @@ impl GatewayAgentApi {
             .document
             .deliver
             .map(|deliver| deliver.while_waiting);
+        input.escalate_to = trigger.document.escalate_to.clone();
         let stored = self.store_bot_event(bot, input).await?;
         Ok(AdmitTriggerOutcome::Admitted(Box::new(stored)))
     }

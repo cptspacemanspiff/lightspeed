@@ -969,7 +969,23 @@ impl GatewayAgentApi {
             RunStartSource::Input { items } => harness::RunRequestSource::Input {
                 input: run_input_from_api(self.store.as_ref(), &items).await?,
             },
-            RunStartSource::Program { input } => {
+            RunStartSource::Program {
+                input,
+                input_defaults,
+            } => {
+                let input_defaults = input_defaults
+                    .filter(|defaults| !defaults.escalate_to.is_empty())
+                    .map(|defaults| {
+                        tools::human_input::validate_people(
+                            "inputDefaults.escalateTo",
+                            &defaults.escalate_to,
+                        )
+                        .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
+                        Ok::<_, AgentApiError>(harness::ProgramInputDefaults {
+                            escalate_to: defaults.escalate_to,
+                        })
+                    })
+                    .transpose()?;
                 // The pinned program's input schema is the run's contract;
                 // a violation is a request error, not a failed run.
                 if let Some(schema_ref) = loaded
@@ -1006,6 +1022,7 @@ impl GatewayAgentApi {
                         .put_bytes(bytes)
                         .await
                         .map_err(map_input_blob_store_error)?,
+                    input_defaults,
                 }
             }
         };

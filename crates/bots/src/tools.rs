@@ -667,6 +667,7 @@ impl TriggerPutRequest {
                     (close_after, _) => close_after,
                 },
                 enabled: self.enabled.unwrap_or(true),
+                escalate_to: None,
             });
         };
         let existing_kind = existing.spec.kind();
@@ -1901,6 +1902,7 @@ mod tests {
             deliver: None,
             session_close_after_ms: Some(0),
             enabled: false,
+            escalate_to: None,
         };
         let request = parse_trigger_put_args(
             &json!({ "name": "tg", "kind": "chat", "channelAccount": "tg-main", "pairing": false }),

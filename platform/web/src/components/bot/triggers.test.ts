@@ -114,6 +114,16 @@ describe("shared trigger draft summaries", () => {
   });
 });
 
+describe("escalation lists", () => {
+  it("sends a trigger's own list, or none to inherit the bot's", () => {
+    expect(deliveryPayload(defaultDeliveryForm).escalateTo).toBeNull();
+    expect(deliveryPayload({ ...defaultDeliveryForm, escalateTo: " lead, , oncall " }).escalateTo).toEqual([
+      "lead",
+      "oncall",
+    ]);
+  });
+});
+
 describe("delivery policy", () => {
   it("sends a policy only when it differs from queueing", () => {
     expect(deliveryPayload(defaultDeliveryForm).deliver).toBeNull();

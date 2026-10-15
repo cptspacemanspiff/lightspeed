@@ -143,7 +143,10 @@ async fn start_program_run(
             notify_on_terminal: None,
             submission_id: None,
             session_id: session_id.to_string(),
-            source: api::RunStartSource::Program { input },
+            source: api::RunStartSource::Program {
+                input,
+                input_defaults: None,
+            },
             config: None,
         })
         .await?

@@ -331,15 +331,37 @@ pub struct RunTerminalNotifyIntent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RunRequestSource {
-    Input { input: Vec<ContextEntryInput> },
-    Program { input_ref: BlobRef },
+    Input {
+        input: Vec<ContextEntryInput>,
+    },
+    Program {
+        input_ref: BlobRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_defaults: Option<ProgramInputDefaults>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RunSource {
-    Input { input: Vec<ContextEntryInput> },
-    Program { input_ref: BlobRef },
+    Input {
+        input: Vec<ContextEntryInput>,
+    },
+    Program {
+        input_ref: BlobRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_defaults: Option<ProgramInputDefaults>,
+    },
+}
+
+/// What a program run's input requests use when a request leaves a
+/// setting out, chosen by whoever started the run (a bot, from its
+/// trigger or its own settings).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramInputDefaults {
+    /// Who takes over a request whose deadline passes unanswered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<String>,
 }
 
 impl RunRequestSource {
@@ -372,11 +394,15 @@ impl RunSource {
                 input == requested
             }
             (
-                Self::Program { input_ref },
+                Self::Program {
+                    input_ref,
+                    input_defaults,
+                },
                 RunRequestSource::Program {
                     input_ref: requested,
+                    input_defaults: requested_defaults,
                 },
-            ) => input_ref == requested,
+            ) => input_ref == requested && input_defaults == requested_defaults,
             (Self::Input { .. }, RunRequestSource::Program { .. })
             | (Self::Program { .. }, RunRequestSource::Input { .. }) => false,
         }
@@ -1016,8 +1042,12 @@ pub(crate) fn source_request_equivalent(source: &RunSource) -> RunRequestSource 
         RunSource::Input { input } => RunRequestSource::Input {
             input: input.clone(),
         },
-        RunSource::Program { input_ref } => RunRequestSource::Program {
+        RunSource::Program {
+            input_ref,
+            input_defaults,
+        } => RunRequestSource::Program {
             input_ref: input_ref.clone(),
+            input_defaults: input_defaults.clone(),
         },
     }
 }

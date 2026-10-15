@@ -318,6 +318,7 @@ async fn create_bot_with_chat(
                     self_config: false,
                     emit: false,
                     enabled: true,
+                    escalate_to: Vec::new(),
                 },
             },
             triggers: vec![BotTriggerInput {
@@ -337,6 +338,7 @@ async fn create_bot_with_chat(
                     deliver: None,
                     session_close_after_ms: None,
                     enabled: true,
+                    escalate_to: None,
                 },
                 pairing_code: None,
             }],

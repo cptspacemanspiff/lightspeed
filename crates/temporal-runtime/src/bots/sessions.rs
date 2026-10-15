@@ -620,6 +620,15 @@ pub async fn start_run(
         },
         api::SessionDriverView::Program { .. } => RunStartSource::Program {
             input: program_input(api, &request.events).await?,
+            // A delivery's events share a trigger; the first one's list
+            // is the delivery's.
+            input_defaults: request
+                .events
+                .iter()
+                .find(|event| !event.escalate_to.is_empty())
+                .map(|event| api::ProgramInputDefaults {
+                    escalate_to: event.escalate_to.clone(),
+                }),
         },
     };
     match api
