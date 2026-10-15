@@ -567,6 +567,7 @@ pub struct GatewayAgentApiBuilder {
     model_discovery_anthropic: Option<Arc<anthropic::Client>>,
     provider_controller_connector: Arc<dyn ProviderControllerConnector>,
     environment_gateway: crate::environments::gateway::EnvironmentGatewayClientConfig,
+    input_timeouts: tools::human_input::InputTimeouts,
 }
 
 impl GatewayAgentApiBuilder {
@@ -647,6 +648,12 @@ impl GatewayAgentApiBuilder {
         gateway: crate::environments::gateway::EnvironmentGatewayClientConfig,
     ) -> Self {
         self.environment_gateway = gateway;
+        self
+    }
+
+    /// Bounds on how long human-input requests wait and how often they remind.
+    pub fn with_input_timeouts(mut self, timeouts: tools::human_input::InputTimeouts) -> Self {
+        self.input_timeouts = timeouts;
         self
     }
 
@@ -773,6 +780,7 @@ impl GatewayAgentApiBuilder {
             model_discovery,
             provider_controller_connector: self.provider_controller_connector,
             environment_gateway: self.environment_gateway,
+            input_timeouts: self.input_timeouts,
         }
     }
 }
@@ -800,6 +808,7 @@ pub struct GatewayAgentApi {
     model_discovery: ModelDiscoveryService,
     provider_controller_connector: Arc<dyn ProviderControllerConnector>,
     pub(crate) environment_gateway: crate::environments::gateway::EnvironmentGatewayClientConfig,
+    pub(crate) input_timeouts: tools::human_input::InputTimeouts,
 }
 
 impl GatewayAgentApi {
@@ -833,6 +842,7 @@ impl GatewayAgentApi {
             model_discovery_anthropic: None,
             provider_controller_connector: Arc::new(WebSocketProviderControllerConnector::default()),
             environment_gateway,
+            input_timeouts: tools::human_input::InputTimeouts::default(),
         }
     }
 

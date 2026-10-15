@@ -13616,10 +13616,9 @@
         "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
         "properties": {
           "inputDeadlineMs": {
-            "description": "How long a human-input request waits when the call sets no deadline:\n1 second to 30 days, 7 days when omitted.",
+            "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
             "format": "uint64",
-            "maximum": 2592000000,
-            "minimum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"

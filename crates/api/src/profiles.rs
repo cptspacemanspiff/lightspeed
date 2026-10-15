@@ -273,10 +273,11 @@ pub struct ProgramLimitsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_wall_clock_ms: Option<u64>,
-    /// How long a human-input request waits when the call sets no deadline:
-    /// 1 second to 30 days, 7 days when omitted.
+    /// How long a human-input request waits when the call sets no deadline,
+    /// within the deployment's bounds (by default 1 second to 30 days); the
+    /// deployment's default (7 days unless overridden) when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1000, max = 2592000000_u64))]
+    #[schemars(range(min = 1))]
     pub input_deadline_ms: Option<u64>,
 }
 

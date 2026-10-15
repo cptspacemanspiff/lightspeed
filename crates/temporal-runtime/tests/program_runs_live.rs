@@ -26,6 +26,9 @@ use temporal_runtime::{
         worker_runtime,
     },
 };
+use tools::human_input::{
+    INPUT_DEFAULT_DEADLINE_ENV, INPUT_MIN_DEADLINE_ENV, INPUT_MIN_REMIND_AFTER_ENV, InputTimeouts,
+};
 
 /// A program session never plans a model turn, so any generation is a bug.
 struct NoModel;
@@ -218,8 +221,9 @@ async fn read_json(store: &store_pg::PgStore, reference: &str) -> anyhow::Result
 type ProgramTestBody = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>;
 
 /// Run `body` against a gateway with a session worker and a code worker on
-/// fresh queues, with no model.
+/// fresh queues, with no model and the given human-input timeouts.
 async fn with_program_workers(
+    input_timeouts: InputTimeouts,
     body: impl FnOnce(Arc<GatewayAgentApi>, Arc<store_pg::PgStore>, SessionId) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
     let _lock = LIVE_TEST_LOCK.lock().await;
@@ -237,7 +241,8 @@ async fn with_program_workers(
                 ActivityState::from_pg_store(activity_store, Arc::new(NoModel), tools.clone())
                     .with_hosted_tools(tools)
                     .with_workflow_tool_executions(client)
-                    .with_code_task_queue(activity_queue),
+                    .with_code_task_queue(activity_queue)
+                    .with_input_timeouts(input_timeouts),
             ))
         },
         move |client, queue, session_id| async move {
@@ -245,6 +250,7 @@ async fn with_program_workers(
                 GatewayAgentApi::builder(client.clone(), store.clone())
                     .with_task_queue(queue)
                     .with_code_task_queue(code_queue.clone())
+                    .with_input_timeouts(input_timeouts)
                     .build(),
             );
             let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?;
@@ -270,7 +276,7 @@ async fn with_program_workers(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
 async fn program_session_runs_its_pinned_program_and_returns_its_output() -> anyhow::Result<()> {
-    with_program_workers(|api, store, session_id| {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
         Box::pin(async move {
                 let profile_id =
                     api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
@@ -464,7 +470,7 @@ async fn wait_for_requests(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
 async fn a_program_waits_for_a_human_answer_and_catches_an_expired_request() -> anyhow::Result<()> {
-    with_program_workers(|api, store, session_id| {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
         Box::pin(async move {
             let profile_id =
                 api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
@@ -569,6 +575,99 @@ async fn a_program_waits_for_a_human_answer_and_catches_an_expired_request() -> 
             assert!(expired.escalated, "{expired:?}");
             assert_eq!(expired.assignees, vec!["lead".to_owned()]);
             assert!(expired.answer.is_none());
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+const REMINDED_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            try {
+                await env.input.request({ ask: "Anyone?", remind_after_ms: 1000 });
+                return { claim: input.claim, slept: 0, kind: "answered" };
+            } catch (error) {
+                return { claim: input.claim, slept: 0, kind: error.kind };
+            }
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn environment_overrides_shorten_input_deadlines_and_reminders() -> anyhow::Result<()> {
+    // The overrides as a deployment would read them from its environment.
+    let overrides = [
+        (INPUT_DEFAULT_DEADLINE_ENV, "5000"),
+        (INPUT_MIN_DEADLINE_ENV, "100"),
+        (INPUT_MIN_REMIND_AFTER_ENV, "500"),
+    ];
+    let timeouts = InputTimeouts::from_lookup(|name| {
+        overrides
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    })
+    .map_err(anyhow::Error::msg)?;
+    with_program_workers(timeouts, |api, store, session_id| {
+        Box::pin(async move {
+            // A program default below the stock one-second floor is
+            // admitted under the lowered floor.
+            let short_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            let mut short =
+                program_profile(&short_id, REMINDED_PROGRAM, &[("input.request", None)]);
+            if let Some(program) = short.document.program.as_mut() {
+                program.limits = Some(api::ProgramLimitsInput {
+                    input_deadline_ms: Some(500),
+                    ..Default::default()
+                });
+            }
+            api.create_profile(api::ProfileCreateParams { profile: short })
+                .await?;
+            api.delete_profile(api::ProfileDeleteParams {
+                profile_id: short_id,
+            })
+            .await?;
+
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, REMINDED_PROGRAM, &[("input.request", None)]),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // A reminder interval under the stock hour is accepted, and the
+            // overridden default deadline expires the request in seconds.
+            let run = start_program_run(&api, &session_id, json!({"claim": "reminded"})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                json!({"claim": "reminded", "slept": 0, "kind": "deadline_exceeded"})
+            );
+            let [expired] = <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?)
+                .map_err(|requests| anyhow::anyhow!("one request expected: {requests:?}"))?;
+            assert_eq!(expired.status, api::InputRequestStatus::Expired);
+            assert_eq!(
+                expired.deadline_at_ms - expired.created_at_ms,
+                5_000,
+                "{expired:?}"
+            );
+            assert_eq!(expired.remind_after_ms, Some(1_000));
+            // Local Temporal timers fire up to a second late, so not all four.
+            assert!(expired.reminder_count >= 2, "{expired:?}");
 
             let _ = api
                 .close_session(api::SessionCloseParams {

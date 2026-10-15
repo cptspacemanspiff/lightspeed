@@ -288,13 +288,13 @@ impl GatewayAgentApi {
         program
             .validate()
             .map_err(|error| AgentApiError::invalid_request(error.to_string()))?;
-        if limits.input_deadline_ms.is_some_and(|deadline| {
-            !(tools::human_input::MIN_INPUT_DEADLINE_MS..=tools::human_input::MAX_INPUT_DEADLINE_MS)
-                .contains(&deadline)
-        }) {
-            return Err(AgentApiError::invalid_request(
-                "inputDeadlineMs must be between 1 second and 30 days",
-            ));
+        if let Some(deadline) = limits.input_deadline_ms
+            && !self.input_timeouts.allows_deadline(deadline)
+        {
+            return Err(AgentApiError::invalid_request(format!(
+                "inputDeadlineMs must be between {} and {}",
+                self.input_timeouts.min_deadline_ms, self.input_timeouts.max_deadline_ms
+            )));
         }
         Ok(program)
     }

@@ -156,6 +156,7 @@ pub struct UniverseRuntime {
     stores: DeploymentStores,
     clients: DeploymentClients,
     environment_gateway: EnvironmentGatewayClientConfig,
+    input_timeouts: tools::human_input::InputTimeouts,
     states: tokio::sync::Mutex<BTreeMap<Uuid, UniverseEntry>>,
 }
 
@@ -192,6 +193,8 @@ impl UniverseRuntime {
             stores,
             clients: DeploymentClients::from_env()?,
             environment_gateway,
+            input_timeouts: tools::human_input::InputTimeouts::from_env()
+                .map_err(anyhow::Error::msg)?,
             states: tokio::sync::Mutex::new(BTreeMap::new()),
         })
     }
@@ -393,7 +396,8 @@ impl UniverseRuntime {
                 self.clients.openai.clone(),
                 self.clients.anthropic.clone(),
             )
-            .with_environment_gateway(self.environment_gateway.clone());
+            .with_environment_gateway(self.environment_gateway.clone())
+            .with_input_timeouts(self.input_timeouts);
         if let Some(public_base_url) = &self.public_base_url {
             api = api.with_public_base_url(public_base_url.clone());
         }
@@ -407,7 +411,8 @@ impl UniverseRuntime {
                 self.client.clone(),
                 self.environment_gateway.clone(),
             )?
-            .with_code_task_queue(self.task_queues.code.clone()),
+            .with_code_task_queue(self.task_queues.code.clone())
+            .with_input_timeouts(self.input_timeouts),
         );
         Ok(UniverseState {
             universe_id,
