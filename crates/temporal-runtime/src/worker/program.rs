@@ -20,7 +20,6 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use super::code::{
     CodeWorkerActivities, heartbeat, non_retryable, require_activity_owner, retryable,
-    validate_attempt,
 };
 use crate::{
     code::{Cancellation, CodeRunError, CodeRunReport, read_bounded},
@@ -289,8 +288,9 @@ pub(super) async fn attempt_activity(
     ctx: ActivityContext,
     request: ProgramAttemptActivityRequest,
 ) -> Result<ProgramAttemptActivityResult, ActivityError> {
-    // One attempt per run until re-execution against the journal lands.
-    validate_attempt(ctx.info().attempt)?;
+    // A retried attempt replays the run's recorded calls (see
+    // `ProgramRunner`), so a lost worker is not a lost run.
+    let attempt = ctx.info().attempt;
     let descriptor = request.descriptor;
     descriptor.validate().map_err(non_retryable)?;
     require_activity_owner(&ctx, &descriptor.execution_id)?;
@@ -313,7 +313,7 @@ pub(super) async fn attempt_activity(
                     &ProgramRunReport {
                         version: 1,
                         execution_id: descriptor.execution_id.clone(),
-                        attempt: request.attempt,
+                        attempt,
                         descriptor: Some(descriptor.clone()),
                         execution: None,
                         scope: None,
@@ -339,7 +339,7 @@ pub(super) async fn attempt_activity(
             &ProgramRunReport {
                 version: 1,
                 execution_id: descriptor.execution_id.clone(),
-                attempt: request.attempt,
+                attempt,
                 descriptor: Some(descriptor.clone()),
                 execution: Some(report.execution.clone()),
                 scope: report.scope.clone(),

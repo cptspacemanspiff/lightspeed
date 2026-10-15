@@ -681,6 +681,8 @@ mod tests {
         CodeToolCallOutcome {
             request_id: "call-1".into(),
             call_id: ToolCallId::new("code-tool-1"),
+            binding_id: None,
+            arguments_ref: None,
             status,
             output_ref,
             error_ref,
