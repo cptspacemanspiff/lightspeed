@@ -421,9 +421,8 @@ impl ProgramRunner {
 }
 
 /// A program's catalog: the scope's bindings for the contracts the program
-/// was pinned to, named by contract, with `#<part>` for each tool of a
-/// composite contract. Fails when the scope no longer binds a pinned
-/// contract at its digest.
+/// was pinned to, named by contract. Fails when the scope no longer binds a
+/// pinned contract at its digest.
 pub(crate) fn program_catalog(
     scope: &CodeToolScopeReport,
     requires: &[harness::ContractPin],
@@ -445,10 +444,7 @@ pub(crate) fn program_catalog(
             .iter()
             .filter(|(_, binding)| required.contains(binding.contract.as_str()))
             .map(|(handle, binding)| codemode::ToolBinding {
-                name: match &binding.part {
-                    Some(part) => format!("{}#{part}", binding.contract),
-                    None => binding.contract.clone(),
-                },
+                name: binding.contract.clone(),
                 binding_id: handle.clone(),
             })
             .collect(),
@@ -488,11 +484,10 @@ mod tests {
         }
     }
 
-    fn binding(contract: &str, part: Option<&str>, digest: &str) -> harness::ContractBinding {
+    fn binding(contract: &str, digest: &str) -> harness::ContractBinding {
         harness::ContractBinding {
             contract: contract.into(),
             digest: digest.into(),
-            part: part.map(str::to_owned),
         }
     }
 
@@ -507,18 +502,16 @@ mod tests {
             cancel_requested: false,
             bindings: [
                 ("h-read", "vfs_read_file"),
-                ("h-timer", "sleep"),
-                ("h-await", "await"),
+                ("h-sleep", "time_sleep"),
                 ("h-fetch", "web_fetch"),
             ]
             .into_iter()
             .map(|(handle, name)| (handle.into(), harness::ToolName::new(name)))
             .collect(),
             contracts: [
-                ("h-read", binding("vfs.read_file", None, &read)),
-                ("h-timer", binding("time.sleep", Some("timer"), &sleep)),
-                ("h-await", binding("time.sleep", Some("await"), &sleep)),
-                ("h-fetch", binding("web.fetch", None, &fetch)),
+                ("h-read", binding("vfs.read_file", &read)),
+                ("h-sleep", binding("time.sleep", &sleep)),
+                ("h-fetch", binding("web.fetch", &fetch)),
             ]
             .into_iter()
             .map(|(handle, binding)| (handle.into(), binding))
@@ -533,11 +526,7 @@ mod tests {
                 .iter()
                 .map(|binding| (binding.name.as_str(), binding.binding_id.as_str()))
                 .collect::<Vec<_>>(),
-            [
-                ("time.sleep#await", "h-await"),
-                ("vfs.read_file", "h-read"),
-                ("time.sleep#timer", "h-timer"),
-            ]
+            [("vfs.read_file", "h-read"), ("time.sleep", "h-sleep")]
         );
         assert!(matches!(
             program_catalog(&scope, &[pin("vfs.read_file", &fetch)]),

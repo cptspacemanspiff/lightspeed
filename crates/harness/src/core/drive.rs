@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const AWAIT_TOOL_ID: &str = "concurrency.await";
+/// A durable sleep: a scoped call that waits in the session until its
+/// deadline, with no promise of its own.
+pub const TIME_SLEEP_TOOL_ID: &str = "time.sleep";
 
 use crate::{
     ApprovalEvent, ApprovalId, ApprovalRequested, AwaitMode, AwaitSpec, BlobRef, CodecError,
@@ -12135,7 +12138,6 @@ mod tests {
         crate::ContractBinding {
             contract: format!("test.{name}"),
             digest: crate::contract_digest(name.as_bytes()),
-            part: None,
         }
     }
 
@@ -12446,6 +12448,147 @@ mod tests {
             drive.state().code_tools.scopes[&execution_id].completed,
             vec!["1", "2", "3"]
         );
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn a_program_sleep_waits_for_its_deadline_alone_and_replays() {
+        let session_id = SessionId::new("program-sleep");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, crate::TIME_SLEEP_TOOL_ID]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = [(
+            crate::TIME_SLEEP_TOOL_ID.to_owned(),
+            crate::CodeToolBinding {
+                tool_id: ToolName::new(crate::TIME_SLEEP_TOOL_ID),
+                tool_name: ToolName::new(crate::TIME_SLEEP_TOOL_ID),
+                contract: Some(test_contract("sleep")),
+            },
+        )]
+        .into();
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let sleep = scoped_call_spec(&execution_id, "1", crate::TIME_SLEEP_TOOL_ID);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: sleep.clone(),
+            },
+        ));
+
+        // A sleep defers on a deadline and nothing else.
+        for spec in [
+            AwaitSpec {
+                promise_ids: Vec::new(),
+                mode: crate::AwaitMode::All,
+                deadline_at_ms: None,
+            },
+            AwaitSpec {
+                promise_ids: vec![PromiseId::from_number(1)],
+                mode: crate::AwaitMode::All,
+                deadline_at_ms: Some(500),
+            },
+        ] {
+            assert!(
+                drive
+                    .admit_command(
+                        CoreAgentCommand::DeferCodeToolCall {
+                            origin: sleep.origin.clone(),
+                            spec,
+                        },
+                        40,
+                    )
+                    .is_err()
+            );
+        }
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::DeferCodeToolCall {
+                origin: sleep.origin.clone(),
+                spec: AwaitSpec {
+                    promise_ids: Vec::new(),
+                    mode: crate::AwaitMode::All,
+                    deadline_at_ms: Some(500),
+                },
+            },
+        ));
+        // With no promises to settle it does not wake before its deadline.
+        assert_eq!(
+            crate::code_tool_wake(drive.state(), &sleep.origin, 499),
+            None
+        );
+        assert_eq!(
+            crate::code_tool_wake(drive.state(), &sleep.origin, 500),
+            Some(crate::WakeReason::Timeout)
+        );
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResumeCodeToolCall {
+                    origin: sleep.origin.clone(),
+                    result: ToolInvocationResult {
+                        call_id: crate::code_tool_call_id(&sleep.origin),
+                        status: ToolCallStatus::Succeeded,
+                        output_ref: Some(BlobRef::from_bytes(br#"{"fire_at_ms":500}"#)),
+                        error_ref: None,
+                        model_visible_context_entries: Vec::new(),
+                        effects: Vec::new(),
+                        attachments: Vec::new(),
+                        duration_ms: None,
+                        output_bytes: None,
+                        truncated: false,
+                    },
+                    claim_observed_at_ms: 500,
+                },
+                501,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let call = crate::code_tool_call(drive.state(), &sleep.origin).unwrap();
+        assert!(call.status.is_terminal());
+        assert_eq!(call.completed_at_ms, Some(501));
         assert_replays_identically(&drive, &log);
     }
 }

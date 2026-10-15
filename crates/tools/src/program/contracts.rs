@@ -7,45 +7,31 @@
 //! and result schemas, so a program pinned to a digest notices when the
 //! contract it was written against has changed instead of calling a tool of
 //! a different shape.
-//!
-//! Most contracts are one tool. A composite contract binds several tools
-//! under named parts that the guest prelude combines: `time.sleep` is a
-//! timer plus an await on it, so a program waits with one call.
 
 use std::collections::BTreeMap;
 
 use harness::{ContractBinding, ContractPin, ToolName};
-use serde_json::{Value, json};
+use serde_json::json;
 use thiserror::Error;
 
 use crate::callable::CallableTool;
 
-/// One tool a contract binds, and its part name in a composite contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ContractPart {
-    pub part: Option<&'static str>,
-    pub tool_id: &'static str,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContractDefinition {
     pub name: &'static str,
-    pub parts: &'static [ContractPart],
+    pub tool_id: &'static str,
 }
 
 macro_rules! contracts {
-    ($($name:literal => $tool_id:literal),* $(,)?) => {
-        &[$(ContractDefinition {
-            name: $name,
-            parts: &[ContractPart { part: None, tool_id: $tool_id }],
-        }),*]
+    ($($name:literal => $tool_id:expr),* $(,)?) => {
+        &[$(ContractDefinition { name: $name, tool_id: $tool_id }),*]
     };
 }
 
-/// Single-tool contracts. Built-in tools keep their logical ids; the
+/// Every contract, one tool each. Built-in tools keep their logical ids; the
 /// promise controls take the `promise` family. Workflow-backed tools (jobs,
 /// sub-agents) have no contracts yet.
-const SINGLE_TOOL_CONTRACTS: &[ContractDefinition] = contracts! {
+const CONTRACTS: &[ContractDefinition] = contracts! {
     "blob.info" => "blob.info",
     "blob.read" => "blob.read",
     "blob.put" => "blob.put",
@@ -78,56 +64,26 @@ const SINGLE_TOOL_CONTRACTS: &[ContractDefinition] = contracts! {
     "promise.await" => "concurrency.await",
     "promise.cancel" => "concurrency.cancel",
     "promise.detach" => "concurrency.detach",
+    "time.sleep" => crate::concurrency::TIME_SLEEP_TOOL_ID,
 };
-
-/// The `time.sleep` composite: a timer promise and an await on it.
-pub const TIME_SLEEP_CONTRACT: &str = "time.sleep";
-pub const TIME_SLEEP_TIMER_PART: &str = "timer";
-pub const TIME_SLEEP_AWAIT_PART: &str = "await";
-
-const COMPOSITE_CONTRACTS: &[ContractDefinition] = &[ContractDefinition {
-    name: TIME_SLEEP_CONTRACT,
-    parts: &[
-        ContractPart {
-            part: Some(TIME_SLEEP_TIMER_PART),
-            tool_id: "concurrency.sleep",
-        },
-        ContractPart {
-            part: Some(TIME_SLEEP_AWAIT_PART),
-            tool_id: "concurrency.await",
-        },
-    ],
-}];
 
 /// Every contract a program can require, in name order.
 pub fn definitions() -> impl Iterator<Item = &'static ContractDefinition> {
-    let mut all = SINGLE_TOOL_CONTRACTS
-        .iter()
-        .chain(COMPOSITE_CONTRACTS)
-        .collect::<Vec<_>>();
+    let mut all = CONTRACTS.iter().collect::<Vec<_>>();
     all.sort_by_key(|definition| definition.name);
     all.into_iter()
 }
 
 pub fn definition(name: &str) -> Option<&'static ContractDefinition> {
-    SINGLE_TOOL_CONTRACTS
-        .iter()
-        .chain(COMPOSITE_CONTRACTS)
-        .find(|definition| definition.name == name)
+    CONTRACTS.iter().find(|definition| definition.name == name)
 }
 
 /// A contract available in a session: its digest and the session tool
-/// serving each part.
+/// serving it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundContract {
     pub name: &'static str,
     pub digest: String,
-    pub parts: Vec<BoundPart>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundPart {
-    pub part: Option<&'static str>,
     pub tool_id: ToolName,
     pub tool_name: ToolName,
 }
@@ -140,19 +96,18 @@ impl BoundContract {
         }
     }
 
-    /// The scope binding of one part.
-    pub fn binding(&self, part: &BoundPart) -> ContractBinding {
+    /// The contract's scope binding.
+    pub fn binding(&self) -> ContractBinding {
         ContractBinding {
             contract: self.name.to_owned(),
             digest: self.digest.clone(),
-            part: part.part.map(str::to_owned),
         }
     }
 }
 
 /// The contracts a session's callable tools serve. A contract is bound only
-/// when every part has exactly one callable tool; callables are expected on
-/// the canonical presentation, where each built-in renders one tool.
+/// when its tool has exactly one callable; callables are expected on the
+/// canonical presentation, where each built-in renders one tool.
 pub fn bind(callables: &[CallableTool]) -> Vec<BoundContract> {
     let mut by_id = BTreeMap::<&str, Vec<&CallableTool>>::new();
     for callable in callables {
@@ -163,45 +118,36 @@ pub fn bind(callables: &[CallableTool]) -> Vec<BoundContract> {
     }
     definitions()
         .filter_map(|definition| {
-            let mut parts = Vec::with_capacity(definition.parts.len());
-            let mut shapes = Vec::with_capacity(definition.parts.len());
-            for part in definition.parts {
-                let [callable] = by_id.get(part.tool_id)?.as_slice() else {
-                    return None;
-                };
-                parts.push(BoundPart {
-                    part: part.part,
-                    tool_id: callable.tool_id.clone(),
-                    tool_name: callable.definition.name.clone(),
-                });
-                shapes.push(json!({
-                    "part": part.part,
-                    "arguments": callable.definition.input_schema,
-                    "result": callable.definition.output_schema,
-                }));
-            }
+            let [callable] = by_id.get(definition.tool_id)?.as_slice() else {
+                return None;
+            };
             Some(BoundContract {
                 name: definition.name,
-                digest: digest(definition.name, shapes),
-                parts,
+                digest: digest(
+                    definition.name,
+                    &callable.definition.input_schema,
+                    callable.definition.output_schema.as_ref(),
+                ),
+                tool_id: callable.tool_id.clone(),
+                tool_name: callable.definition.name.clone(),
             })
         })
         .collect()
 }
 
-/// The digest of a contract's name and its parts' argument and result
-/// schemas, over a canonical JSON form (sorted keys, no whitespace) so it
-/// does not depend on how a schema was built or serialized.
-fn digest(name: &str, parts: Vec<Value>) -> String {
-    let shape = json!({ "contract": name, "parts": parts });
+/// The digest of a contract's name and its argument and result schemas,
+/// over a canonical JSON form (sorted keys, no whitespace) so it does not
+/// depend on how a schema was built or serialized.
+fn digest(name: &str, arguments: &serde_json::Value, result: Option<&serde_json::Value>) -> String {
+    let shape = json!({ "contract": name, "arguments": arguments, "result": result });
     let mut canonical = String::new();
     write_canonical(&shape, &mut canonical);
     harness::contract_digest(canonical.as_bytes())
 }
 
-fn write_canonical(value: &Value, out: &mut String) {
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
     match value {
-        Value::Object(map) => {
+        serde_json::Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
             entries.sort_by_key(|(key, _)| *key);
             out.push('{');
@@ -209,13 +155,13 @@ fn write_canonical(value: &Value, out: &mut String) {
                 if index > 0 {
                     out.push(',');
                 }
-                out.push_str(&Value::String(key.clone()).to_string());
+                out.push_str(&serde_json::Value::String(key.clone()).to_string());
                 out.push(':');
                 write_canonical(value, out);
             }
             out.push('}');
         }
-        Value::Array(items) => {
+        serde_json::Value::Array(items) => {
             out.push('[');
             for (index, item) in items.iter().enumerate() {
                 if index > 0 {
@@ -337,14 +283,7 @@ pub async fn bind_toolset(
     // binding (a provider-hosted one, say) cannot fail the rest.
     let tools = tools
         .iter()
-        .filter(|tool| {
-            definitions().any(|definition| {
-                definition
-                    .parts
-                    .iter()
-                    .any(|part| part.tool_id == tool.name.as_str())
-            })
-        })
+        .filter(|tool| definitions().any(|definition| definition.tool_id == tool.name.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let callables = crate::callable::resolve(blobs, &crate::runtime::ToolTarget::program(), &tools)
@@ -377,6 +316,7 @@ mod tests {
         ));
         if timers {
             config.concurrency = crate::concurrency::ConcurrencyToolsetConfig::timer();
+            config.concurrency.durable_sleep = true;
         }
         config
     }
@@ -402,7 +342,6 @@ mod tests {
         for definition in definitions() {
             harness::validate_contract_name(definition.name).unwrap();
             assert!(seen.insert(definition.name), "{}", definition.name);
-            assert!(!definition.parts.is_empty());
         }
     }
 
@@ -428,29 +367,22 @@ mod tests {
             .iter()
             .find(|contract| contract.name == "vfs.read_file")
             .unwrap();
-        assert_eq!(read.parts[0].tool_id.as_str(), "vfs.read_file");
+        assert_eq!(read.tool_id.as_str(), "vfs.read_file");
         assert!(read.digest.starts_with("contract-sha256:"));
         let sleep = bound
             .iter()
-            .find(|contract| contract.name == TIME_SLEEP_CONTRACT)
+            .find(|contract| contract.name == "time.sleep")
             .unwrap();
         assert_eq!(
-            sleep
-                .parts
-                .iter()
-                .map(|part| (part.part, part.tool_id.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                (Some(TIME_SLEEP_TIMER_PART), "concurrency.sleep"),
-                (Some(TIME_SLEEP_AWAIT_PART), "concurrency.await"),
-            ]
+            (sleep.tool_id.as_str(), sleep.tool_name.as_str()),
+            ("time.sleep", "time_sleep")
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_composite_needs_every_part_and_a_changed_shape_changes_the_digest() {
+    async fn contracts_follow_the_granted_tools_and_a_changed_shape_changes_the_digest() {
         let without_timer = bound(&config(false)).await;
-        assert!(!names(&without_timer).contains(&TIME_SLEEP_CONTRACT));
+        assert!(!names(&without_timer).contains(&"time.sleep"));
 
         // Without the handle path, run_process takes its one-shot shape.
         let full = bound(&config(true)).await;
@@ -518,7 +450,8 @@ mod tests {
     fn canonical_json_sorts_keys_at_every_depth() {
         let mut out = String::new();
         write_canonical(
-            &serde_json::from_str::<Value>(r#"{"b":[{"z":1,"a":" "}],"a":null}"#).unwrap(),
+            &serde_json::from_str::<serde_json::Value>(r#"{"b":[{"z":1,"a":" "}],"a":null}"#)
+                .unwrap(),
             &mut out,
         );
         assert_eq!(out, "{\"a\":null,\"b\":[{\"a\":\"\u{2028}\",\"z\":1}]}");

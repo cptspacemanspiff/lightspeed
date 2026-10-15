@@ -77,6 +77,7 @@ impl SessionPreparationService {
     pub(crate) fn program_toolset_config(config: &mut ToolsetConfig) {
         config.builtin.presentation = tools::toolset::BuiltinToolPresentation::Canonical;
         config.web.search = None;
+        config.concurrency.durable_sleep = config.concurrency.timer;
     }
 
     /// The tool contracts a program session with this configuration offers.

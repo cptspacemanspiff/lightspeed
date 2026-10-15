@@ -1030,21 +1030,31 @@ pub fn defer_code_tool_call_proposals(
 ) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
     let call =
         code_tool_call(state, &origin).ok_or_else(|| invalid("unknown code tool request"))?;
-    if call.spec.tool_id.as_str() != crate::AWAIT_TOOL_ID {
-        return Err(invalid(
-            "code tool await suspension requires concurrency.await",
-        ));
+    match call.spec.tool_id.as_str() {
+        crate::AWAIT_TOOL_ID => {
+            if spec.promise_ids.is_empty()
+                || spec.promise_ids.len() > 32
+                || spec.promise_ids.iter().collect::<BTreeSet<_>>().len() != spec.promise_ids.len()
+            {
+                return Err(invalid(
+                    "code tool await requires 1..=32 distinct promise ids",
+                ));
+            }
+            let owner = scope_owner(state, &state.code_tools.scopes[&origin.execution_id].spec)?;
+            crate::core::drive::validate_await_spec_for_active_run(state, owner.run_id, &spec)?;
+        }
+        // A sleep waits for its deadline alone.
+        crate::TIME_SLEEP_TOOL_ID => {
+            if !spec.promise_ids.is_empty() || spec.deadline_at_ms.is_none() {
+                return Err(invalid("a sleep waits on a deadline and no promises"));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "code tool suspension requires concurrency.await or time.sleep",
+            ));
+        }
     }
-    if spec.promise_ids.is_empty()
-        || spec.promise_ids.len() > 32
-        || spec.promise_ids.iter().collect::<BTreeSet<_>>().len() != spec.promise_ids.len()
-    {
-        return Err(invalid(
-            "code tool await requires 1..=32 distinct promise ids",
-        ));
-    }
-    let owner = scope_owner(state, &state.code_tools.scopes[&origin.execution_id].spec)?;
-    crate::core::drive::validate_await_spec_for_active_run(state, owner.run_id, &spec)?;
     let suspension = ToolBatchSuspension::AwaitTool {
         call_id: call.call_id.clone(),
         spec,
@@ -1100,6 +1110,8 @@ pub fn code_tool_wake(
         })
         .count();
     match spec.mode {
+        // A wait with no promises (a sleep) wakes only at its deadline.
+        _ if spec.promise_ids.is_empty() => None,
         AwaitMode::All if terminal == spec.promise_ids.len() => Some(WakeReason::Terminal),
         AwaitMode::Any if terminal > 0 => Some(WakeReason::Terminal),
         _ => None,

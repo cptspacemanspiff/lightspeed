@@ -142,6 +142,18 @@ pub(super) async fn materialize_await_result(
     deps: &StorageActivityDeps,
     request: temporal_workflow::AwaitMaterializationRequest,
 ) -> Result<temporal_workflow::AwaitMaterializationResult, ActivityError> {
+    if let Some(fire_at_ms) = request.sleep_until_ms {
+        let output = tools::concurrency::TimeSleepOutput { fire_at_ms };
+        return Ok(temporal_workflow::AwaitMaterializationResult {
+            result_ref: deps
+                .blobs
+                .put_bytes(serde_json::to_vec(&output).map_err(activity_error)?)
+                .await
+                .map_err(activity_error)?,
+            additional_context: Vec::new(),
+            attachments: Vec::new(),
+        });
+    }
     if request.results.len() > 32 {
         return Err(activity_error(anyhow::anyhow!(
             "await materialization exceeds the 32-Promise limit"
@@ -1125,6 +1137,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_sleep_wake_materializes_its_deadline_not_an_await_snapshot() {
+        let deps = storage_deps(Arc::new(InMemorySessionStore::new()));
+        let woke = materialize_await_result(
+            &deps,
+            temporal_workflow::AwaitMaterializationRequest {
+                outcome: temporal_workflow::AwaitOutcome::Timeout,
+                results: Vec::new(),
+                sleep_until_ms: Some(1_234),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &deps.blobs.read_bytes(&woke.result_ref).await.unwrap()
+            )
+            .unwrap(),
+            json!({"fire_at_ms": 1_234})
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn attachment_store_failures_retry_instead_of_silently_losing_selected_media() {
         struct FailingStatStore(harness::storage::InMemoryBlobStore);
         #[async_trait::async_trait]
@@ -1226,6 +1260,7 @@ mod tests {
             temporal_workflow::AwaitMaterializationRequest {
                 outcome: temporal_workflow::AwaitOutcome::Terminal,
                 results: vec![resolved],
+                sleep_until_ms: None,
             },
         )
         .await
@@ -1422,6 +1457,7 @@ mod tests {
                         error_ref: None,
                     })
                     .collect(),
+                sleep_until_ms: None,
             },
         )
         .await
@@ -1494,6 +1530,7 @@ mod tests {
                         error_ref: None,
                     },
                 ],
+                sleep_until_ms: None,
             },
         )
         .await

@@ -512,6 +512,14 @@ pub fn register_toolset(config: &ToolsetConfig) -> ToolResult<RegisteredToolset>
                 ToolParallelism::Exclusive,
                 ToolExecutionSpec::default(),
             ))?;
+            if config.concurrency.durable_sleep {
+                add(register(
+                    crate::concurrency::TIME_SLEEP_TOOL_ID,
+                    BuiltinSettings::default(),
+                    ToolParallelism::ParallelSafe,
+                    ToolExecutionSpec::default(),
+                ))?;
+            }
         }
     }
     Ok(RegisteredToolset { tools })

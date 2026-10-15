@@ -15,6 +15,11 @@ pub const AWAIT_TOOL_NAME: &str = "await";
 pub const CANCEL_TOOL_NAME: &str = "cancel";
 pub const DETACH_TOOL_NAME: &str = "detach";
 pub const SLEEP_TOOL_NAME: &str = "sleep";
+/// A program's durable sleep: one call that completes once its delay has
+/// elapsed. Only scoped calls can execute it, so it is never presented to a
+/// model.
+pub const TIME_SLEEP_TOOL_ID: &str = harness::TIME_SLEEP_TOOL_ID;
+pub const TIME_SLEEP_TOOL_NAME: &str = "time_sleep";
 
 pub const MAX_AWAIT_PROMISES: usize = 32;
 pub const MAX_CANCEL_PROMISES: usize = 32;
@@ -26,6 +31,10 @@ pub struct ConcurrencyToolsetConfig {
     pub enabled: bool,
     #[serde(default)]
     pub timer: bool,
+    /// Register `time.sleep`, the single-call durable sleep. Program
+    /// sessions only: a model batch cannot execute it.
+    #[serde(default)]
+    pub durable_sleep: bool,
 }
 
 impl ConcurrencyToolsetConfig {
@@ -33,6 +42,7 @@ impl ConcurrencyToolsetConfig {
         Self {
             enabled: false,
             timer: false,
+            durable_sleep: false,
         }
     }
 
@@ -40,6 +50,7 @@ impl ConcurrencyToolsetConfig {
         Self {
             enabled: true,
             timer: false,
+            durable_sleep: false,
         }
     }
 
@@ -47,6 +58,7 @@ impl ConcurrencyToolsetConfig {
         Self {
             enabled: true,
             timer: true,
+            durable_sleep: false,
         }
     }
 
@@ -332,6 +344,23 @@ pub fn promise_status_name(status: PromiseStatus) -> &'static str {
 pub struct SleepOutput {
     pub promise: String,
     pub fire_at_ms: u64,
+}
+
+/// What a durable sleep returns once its delay has elapsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TimeSleepOutput {
+    /// The deadline the sleep waited for, in Unix milliseconds.
+    pub fire_at_ms: u64,
+}
+
+/// The `time.sleep` definition: the timer's arguments, its own result.
+pub fn time_sleep_definition() -> crate::runtime::FunctionDefinition {
+    crate::runtime::FunctionDefinition::new(
+        TIME_SLEEP_TOOL_NAME,
+        "Wait durably for the requested delay. The call completes once the delay has elapsed.",
+        sleep_input_schema(),
+    )
+    .with_output_schema(crate::definitions::output_schema_for::<TimeSleepOutput>())
 }
 
 pub fn cancel_promises_model_visible_text(output: &CancelOutput) -> String {
