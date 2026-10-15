@@ -423,8 +423,13 @@ async fn bots_live_manual_event_runs_and_records_outcome() -> anyhow::Result<()>
 }
 
 /// A program profile whose program reports which version ran and what it
-/// was given.
+/// was given. From version 2 it also decides its delivery: ignored.
 fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileInput {
+    let verdict = if version >= 2 {
+        "outcome: \"ignored\", summary: \"nothing to do\", "
+    } else {
+        ""
+    };
     AgentProfileInput {
         profile_id: profile_id.clone(),
         display_name: Some("bots live program".to_owned()),
@@ -434,7 +439,7 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
                 source: api::ProgramSource::Text {
                     text: format!(
                         "export default {{ async run(input) {{ \
-                         return {{ version: {version}, seqs: input.events.map(e => e.seq), \
+                         return {{ {verdict}version: {version}, seqs: input.events.map(e => e.seq), \
                          kinds: input.events.map(e => e.event.kind), \
                          notes: input.events.map(e => e.event.data.note) }}; }} }};"
                     ),
@@ -499,9 +504,10 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
         })
         .await?;
         let events = wait_for_outcomes(&api, &bot_id, 1).await?;
-        // The program never resolves the delivery, so it ends unresolved
-        // with its run recorded, as for a model that does not resolve.
-        assert_eq!(events[0].outcome, Some(BotEventOutcome::Unresolved));
+        // The program's output names no outcome, so its completed run
+        // handled the delivery.
+        assert_eq!(events[0].outcome, Some(BotEventOutcome::Handled));
+        assert_eq!(events[0].outcome_detail, None);
         let main = bot_main_session_id(&bot_id, 1);
         let session = api
             .read_session(SessionReadParams {
@@ -550,9 +556,13 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
         assert_eq!(
             event_program_output(&api, &store, &bot_main_session_id(&bot_id, 2), second).await?,
             serde_json::json!({
+                "outcome": "ignored", "summary": "nothing to do",
                 "version": 2, "seqs": [2], "kinds": ["test.ping"], "notes": ["second ping"],
             })
         );
+        // Its output's verdict decides the delivery.
+        assert_eq!(second.outcome, Some(BotEventOutcome::Ignored));
+        assert_eq!(second.outcome_detail.as_deref(), Some("nothing to do"));
         Ok(())
     })
     .await
@@ -657,6 +667,7 @@ async fn bots_live_routed_program_session_moves_to_a_new_program_revision() -> a
         assert_eq!(
             event_program_output(&api, &store, &successor, second).await?,
             serde_json::json!({
+                "outcome": "ignored", "summary": "nothing to do",
                 "version": 2, "seqs": [2], "kinds": ["pr"], "notes": ["two"],
             })
         );

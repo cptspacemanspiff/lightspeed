@@ -607,6 +607,19 @@ pub fn parse_event_resolve_args(value: &Value) -> Result<EventResolveArgs, Strin
     Ok(EventResolveArgs { outcome, summary })
 }
 
+/// A program run's verdict on its delivery, from the run's output: an
+/// object with a model-decision `outcome` (and optionally a string
+/// `summary`) decides it, as `bot_event_resolve` would; any other output
+/// of a completed run is `handled`.
+pub fn program_verdict(output: Option<&Value>) -> EventResolveArgs {
+    output
+        .and_then(|output| parse_event_resolve_args(output).ok())
+        .unwrap_or(EventResolveArgs {
+            outcome: BotEventOutcome::Handled,
+            summary: None,
+        })
+}
+
 // ── bot_trigger_put ─────────────────────────────────────────────────────────
 
 /// The flat `bot_trigger_put` arguments as a create-or-update request. The
@@ -1416,6 +1429,30 @@ mod tests {
         assert!(parse_event_resolve_args(&json!({ "summary": null })).is_err());
         assert!(parse_event_resolve_args(&json!({ "outcome": "handled", "summary": 7 })).is_err());
         assert!(parse_event_resolve_args(&json!("handled")).is_err());
+    }
+
+    #[test]
+    fn a_program_output_decides_its_delivery_else_handles_it() {
+        assert_eq!(
+            program_verdict(Some(&json!({"outcome": "deferred", "summary": "waiting on CI", "extra": 1}))),
+            EventResolveArgs {
+                outcome: BotEventOutcome::Deferred,
+                summary: Some("waiting on CI".to_owned()),
+            }
+        );
+        let handled = EventResolveArgs {
+            outcome: BotEventOutcome::Handled,
+            summary: None,
+        };
+        for output in [
+            None,
+            Some(json!({"claim": "x"})),
+            Some(json!({"outcome": "run_failed"})),
+            Some(json!({"outcome": "ignored", "summary": 7})),
+            Some(json!("ignored")),
+        ] {
+            assert_eq!(program_verdict(output.as_ref()), handled, "{output:?}");
+        }
     }
 
     #[test]

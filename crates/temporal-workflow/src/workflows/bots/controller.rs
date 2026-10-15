@@ -24,6 +24,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use api::{BotControllerSnapshot, BotEventOutcome, BotRecentDeliverySnapshot, ProfileId};
 use bots::tools::parse_event_resolve_args;
+use harness::{BlobRef, RunStatus};
 use bots::{
     BOT_CONFIG_SIGNAL, BOT_EVENT_SIGNAL, BOT_SESSION_ROTATE_SIGNAL, BOT_STATE_QUERY,
     BotControllerConfig, BotEvent, BotSessionRotate,
@@ -440,8 +441,9 @@ pub(super) async fn process_emissions(ctx: &Ctx) {
                 token,
                 status,
                 failure_message_ref,
+                output_ref,
             } => {
-                reconcile_run(ctx, &run_id, &session_id).await;
+                reconcile_run(ctx, &run_id, &session_id, status, output_ref).await;
                 ctx.state_mut(|state| {
                     state.attach_terminal(
                         &token,
@@ -461,9 +463,16 @@ pub(super) async fn process_emissions(ctx: &Ctx) {
 /// Read the session log past its cursor and fold the run's resolve calls
 /// into the lane on that session (run-scoped correlation: one delivery
 /// per run, the last call wins). A run that used a carried tool without
-/// resolving counts as handled. Read failures are recorded, never fatal:
+/// resolving counts as handled, and a completed program run without one
+/// is decided by its output. Read failures are recorded, never fatal:
 /// the terminal still lands and the delivery ends `unresolved`.
-async fn reconcile_run(ctx: &Ctx, run_id: &str, target: &str) {
+async fn reconcile_run(
+    ctx: &Ctx,
+    run_id: &str,
+    target: &str,
+    status: RunStatus,
+    output_ref: Option<BlobRef>,
+) {
     let (universe_id, after_seq) =
         ctx.state(|state| (state.config.universe_id, state.cursor_for(target)));
     let pulled = match activity(
@@ -546,6 +555,47 @@ async fn reconcile_run(ctx: &Ctx, run_id: &str, target: &str) {
                     },
                 )
             });
+        } else if status == RunStatus::Completed && ctx.state(|state| state.program_sessions) {
+            let verdict = bots::tools::program_verdict(
+                program_output(ctx, universe_id, output_ref).await.as_ref(),
+            );
+            ctx.state_mut(|state| {
+                state.set_lane_resolution(
+                    target,
+                    LaneResolution {
+                        outcome: verdict.outcome,
+                        summary: verdict.summary,
+                    },
+                )
+            });
+        }
+    }
+}
+
+/// A program run's JSON output. An unreadable output is recorded and
+/// counts as none, so the run is handled.
+async fn program_output(
+    ctx: &Ctx,
+    universe_id: uuid::Uuid,
+    output_ref: Option<BlobRef>,
+) -> Option<serde_json::Value> {
+    let output_ref = output_ref?;
+    match activity(
+        ctx,
+        BotActivities::read_json_blob,
+        BotReadJsonBlobRequest {
+            universe_id,
+            blob_ref: output_ref.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(output) => Some(output),
+        Err(message) => {
+            ctx.state_mut(|state| {
+                state.record_error(format!("read program output {output_ref}: {message}"))
+            });
+            None
         }
     }
 }
