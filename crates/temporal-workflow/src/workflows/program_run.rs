@@ -178,7 +178,7 @@ impl ProgramRunWorkflow {
         if self
             .start
             .as_ref()
-            .is_some_and(|start| crate::workflows::is_joined_holder_cancellation(start, &envelope))
+            .is_some_and(|start| crate::workflows::is_holder_reply_cancellation(start, &envelope))
         {
             self.holder_cancelled = true;
         }

@@ -43,7 +43,9 @@ pub struct InputRequestStepActivityRequest {
 pub enum InputRequestStep {
     /// Read the request: has it been answered?
     Check,
-    /// Record the `count`th reminder.
+    /// Record a scheduled reminder at `at_ms`; `count` is how many the
+    /// workflow has scheduled. The row counts every reminder, the program's
+    /// own included.
     Remind { count: u32, at_ms: u64 },
     /// The deadline passed: escalate once with a fresh deadline when
     /// `escalate_deadline_at_ms` is set, else expire.

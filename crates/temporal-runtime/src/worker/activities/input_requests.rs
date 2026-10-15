@@ -85,17 +85,10 @@ pub(super) async fn step(
             .await
             .map_err(activity_error)?
             .ok_or_else(|| activity_error(anyhow::anyhow!("input request is not open")))?,
-        InputRequestStep::Remind { count, at_ms } => {
-            store
-                .remind_input_request(execution_id, count, at_ms)
-                .await
-                .map_err(activity_error)?;
-            store
-                .read_input_request_by_execution(execution_id)
-                .await
-                .map_err(activity_error)?
-                .ok_or_else(|| activity_error(anyhow::anyhow!("input request is not open")))?
-        }
+        InputRequestStep::Remind { at_ms, .. } => store
+            .remind_input_request(execution_id, at_ms)
+            .await
+            .map_err(activity_error)?,
         InputRequestStep::Deadline {
             at_ms,
             escalate_deadline_at_ms,

@@ -20,6 +20,9 @@ pub struct ToolsetConfig {
     pub concurrency: ConcurrencyToolsetConfig,
     pub environment_read: bool,
     pub environment_selection: bool,
+    /// Register `input.remind` and `input.reassign`, which act on a
+    /// program's open input requests. Program sessions only.
+    pub input_controls: bool,
 }
 
 impl ToolsetConfig {
@@ -30,6 +33,7 @@ impl ToolsetConfig {
             concurrency: ConcurrencyToolsetConfig::default(),
             environment_read: false,
             environment_selection: false,
+            input_controls: false,
         }
     }
 
@@ -520,6 +524,19 @@ pub fn register_toolset(config: &ToolsetConfig) -> ToolResult<RegisteredToolset>
                     ToolExecutionSpec::default(),
                 ))?;
             }
+        }
+    }
+    if config.input_controls {
+        for id in [
+            crate::human_input::INPUT_REMIND_TOOL_ID,
+            crate::human_input::INPUT_REASSIGN_TOOL_ID,
+        ] {
+            add(register(
+                id,
+                BuiltinSettings::default(),
+                ToolParallelism::ParallelSafe,
+                ToolExecutionSpec::default(),
+            ))?;
         }
     }
     Ok(RegisteredToolset { tools })

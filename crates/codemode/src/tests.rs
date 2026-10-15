@@ -1307,3 +1307,183 @@ async fn module_code_cannot_tamper_with_env_construction() {
     assert_eq!(report.error, None);
     assert_eq!(report.return_value, Some(json!(["web", "time"])));
 }
+
+const INPUT_CONTRACTS: &[&str] = &[
+    "input.open",
+    "input.remind",
+    "input.reassign",
+    "promise.await",
+    "promise.cancel",
+    "time.sleep",
+];
+
+fn opened() -> Value {
+    json!({
+        "accepted": true,
+        "invocationId": "wti:1",
+        "executionId": "wtx:sha256:abc",
+        "promise": "promise_3",
+    })
+}
+
+fn control(status: &str) -> Value {
+    json!({"request_id": "inp_abc", "status": status, "assignees": ["bob"], "reminder_count": 1})
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_open_input_request_is_a_handle_over_ordinary_calls() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const ask = await env.input.open({ ask: "Merge?", assignees: ["alice"] });
+                const reminded = await ask.remind();
+                const moved = await ask.reassign({ to: ["bob"] });
+                const answer = await ask.answer();
+                const again = await ask.answer();
+                await ask.cancel();
+                const late = await env.input.open({ ask: "Again?" });
+                let failure = null;
+                try { await late.answer(); } catch (error) { failure = [error.kind, error.message]; }
+                return { id: ask.id, frozen: Object.isFrozen(ask), reminded, moved, answer, same: answer === again, failure };
+            }
+        };
+    "#;
+    let mut awaits = 0;
+    let (requests, report) = run_program(
+        program_input(source, INPUT_CONTRACTS, SEED),
+        |request| {
+            let outcome = match request.binding_id.as_str() {
+                "opaque-input.open" => opened(),
+                "opaque-input.remind" | "opaque-input.reassign" => control("pending"),
+                "opaque-promise.await" => {
+                    awaits += 1;
+                    if awaits == 1 {
+                        json!({"outcome": "completed", "results": [
+                            {"promise_id": "promise_3", "status": "resolved", "output": {"approved": true}}
+                        ]})
+                    } else {
+                        json!({"outcome": "completed", "results": [
+                            {"promise_id": "promise_3", "status": "failed",
+                             "error": {"code": "deadline_exceeded", "message": "too late"}}
+                        ]})
+                    }
+                }
+                "opaque-promise.cancel" => json!({"promises": []}),
+                other => panic!("unexpected call {other}"),
+            };
+            (Ok(outcome), None)
+        },
+    )
+    .await;
+    assert_eq!(report.error, None);
+    let calls = requests
+        .iter()
+        .map(|request| (request.binding_id.as_str(), request.arguments.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            (
+                "opaque-input.open",
+                json!({"ask": "Merge?", "assignees": ["alice"]})
+            ),
+            ("opaque-input.remind", json!({"id": "wtx:sha256:abc"})),
+            (
+                "opaque-input.reassign",
+                json!({"id": "wtx:sha256:abc", "to": ["bob"]})
+            ),
+            // A handle awaits its promise once, however often it is asked.
+            ("opaque-promise.await", json!({"promises": ["promise_3"]})),
+            ("opaque-promise.cancel", json!({"promises": ["promise_3"]})),
+            ("opaque-input.open", json!({"ask": "Again?"})),
+            ("opaque-promise.await", json!({"promises": ["promise_3"]})),
+        ]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "id": "wtx:sha256:abc",
+            "frozen": true,
+            "reminded": control("pending"),
+            "moved": control("pending"),
+            "answer": {"approved": true},
+            "same": true,
+            "failure": ["deadline_exceeded", "too late"],
+        }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn with_reminders_nudges_on_an_interval_then_reassigns() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const ask = await env.input.open({ ask: "Merge?" });
+                return await ask.withReminders({ every_ms: 60000, max: 2, then: "reassign", to: ["lead"] });
+            }
+        };
+    "#;
+    let mut execution = start(
+        program_input(source, INPUT_CONTRACTS, SEED),
+        Cancellation::default(),
+    )
+    .unwrap();
+    let sender = execution.completion_sender();
+    let mut held_await = None;
+    let mut calls = Vec::new();
+    let report = loop {
+        match execution.next_event().await.expect("execution event") {
+            ExecutionEvent::Request(request) => {
+                calls.push(request.binding_id.clone());
+                let outcome = match request.binding_id.as_str() {
+                    "opaque-input.open" => Some(opened()),
+                    // The answer arrives only once the request is reassigned.
+                    "opaque-promise.await" => {
+                        held_await = Some(request.request_id.clone());
+                        None
+                    }
+                    "opaque-time.sleep" => Some(json!({"fire_at_ms": 61_000})),
+                    "opaque-input.remind" => Some(control("pending")),
+                    "opaque-input.reassign" => {
+                        sender
+                            .complete(HostCompletion {
+                                request_id: held_await.take().expect("awaiting"),
+                                outcome: Ok(json!({"outcome": "completed", "results": [
+                                    {"promise_id": "promise_3", "status": "resolved", "output": {"approved": false}}
+                                ]})),
+                                completed_at_ms: None,
+                            })
+                            .unwrap();
+                        Some(control("pending"))
+                    }
+                    other => panic!("unexpected call {other}"),
+                };
+                if let Some(outcome) = outcome {
+                    sender
+                        .complete(HostCompletion {
+                            request_id: request.request_id,
+                            outcome: Ok(outcome),
+                            completed_at_ms: None,
+                        })
+                        .unwrap();
+                }
+            }
+            ExecutionEvent::Finished(report) => break report,
+        }
+    };
+    assert_eq!(report.error, None);
+    assert_eq!(report.return_value, Some(json!({"approved": false})));
+    assert_eq!(
+        calls,
+        [
+            "opaque-input.open",
+            "opaque-promise.await",
+            "opaque-time.sleep",
+            "opaque-input.remind",
+            "opaque-time.sleep",
+            "opaque-input.remind",
+            "opaque-time.sleep",
+            "opaque-input.reassign",
+        ]
+    );
+}

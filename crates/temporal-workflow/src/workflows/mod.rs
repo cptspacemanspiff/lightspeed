@@ -9,7 +9,7 @@ mod session;
 mod subagent_execution;
 mod transcriptions;
 
-pub(crate) use cancellation::{WorkflowContextExt, is_joined_holder_cancellation, signal_options};
+pub(crate) use cancellation::{WorkflowContextExt, is_holder_reply_cancellation, signal_options};
 
 pub use bots::{BotControllerWorkflow, BotTriggerFireWorkflow};
 pub use channels::ChannelConversationWorkflow;

@@ -30,7 +30,8 @@ macro_rules! contracts {
 
 /// Every contract, one tool each. Built-in tools keep their logical ids; the
 /// promise controls take the `promise` family. Of the workflow-backed tools
-/// only `input.request` has a contract yet (jobs and sub-agents do not).
+/// only `input.request` and `input.open` have contracts yet (jobs and
+/// sub-agents do not).
 const CONTRACTS: &[ContractDefinition] = contracts! {
     "blob.info" => "blob.info",
     "blob.read" => "blob.read",
@@ -66,6 +67,9 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "promise.detach" => "concurrency.detach",
     "time.sleep" => crate::concurrency::TIME_SLEEP_TOOL_ID,
     "input.request" => crate::human_input::INPUT_REQUEST_TOOL_ID,
+    "input.open" => crate::human_input::INPUT_OPEN_TOOL_ID,
+    "input.remind" => crate::human_input::INPUT_REMIND_TOOL_ID,
+    "input.reassign" => crate::human_input::INPUT_REASSIGN_TOOL_ID,
 };
 
 /// Every contract a program can require, in name order.
@@ -189,6 +193,11 @@ pub enum ContractError {
         pinned: String,
         current: String,
     },
+    #[error("tool contract {contract} needs {needs}: require it too")]
+    Incomplete {
+        contract: String,
+        needs: &'static str,
+    },
 }
 
 impl ContractError {
@@ -198,9 +207,14 @@ impl ContractError {
             Self::Unknown { .. } => "contract_unknown",
             Self::Unavailable { .. } => "contract_unavailable",
             Self::Changed { .. } => "contract_changed",
+            Self::Incomplete { .. } => "contract_incomplete",
         }
     }
 }
+
+/// Contracts that are no use without another: an open input request is
+/// answered by awaiting its promise.
+const COMPANIONS: &[(&str, &str)] = &[("input.open", "promise.await")];
 
 /// Pin a program's required contracts against what a session offers. A
 /// requirement that names a digest must match it; one without is pinned to
@@ -209,6 +223,16 @@ pub fn pin_requirements<'a>(
     available: &[BoundContract],
     requirements: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
 ) -> Result<Vec<ContractPin>, ContractError> {
+    let requirements = requirements.into_iter().collect::<Vec<_>>();
+    for (contract, needs) in COMPANIONS {
+        let requires = |name: &str| requirements.iter().any(|(required, _)| *required == name);
+        if requires(contract) && !requires(needs) {
+            return Err(ContractError::Incomplete {
+                contract: (*contract).to_owned(),
+                needs,
+            });
+        }
+    }
     requirements
         .into_iter()
         .map(|(contract, digest)| {
@@ -445,6 +469,32 @@ mod tests {
             check_pins(&pins, &current).unwrap_err().kind(),
             "contract_unavailable"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_handles_bind_and_opening_requires_awaiting() {
+        let mut config = config(true);
+        config.input_controls = true;
+        let mut tools = register_toolset(&config)
+            .unwrap()
+            .tools
+            .into_values()
+            .collect::<Vec<_>>();
+        tools.push(crate::human_input::input_open_tool_spec());
+        let available = bind_toolset(&InMemoryBlobStore::new(), &tools)
+            .await
+            .unwrap();
+        let names = names(&available);
+        for expected in ["input.open", "input.remind", "input.reassign"] {
+            assert!(names.contains(&expected), "{expected} missing");
+        }
+        assert_eq!(
+            pin_requirements(&available, [("input.open", None)])
+                .unwrap_err()
+                .kind(),
+            "contract_incomplete"
+        );
+        pin_requirements(&available, [("input.open", None), ("promise.await", None)]).unwrap();
     }
 
     #[test]

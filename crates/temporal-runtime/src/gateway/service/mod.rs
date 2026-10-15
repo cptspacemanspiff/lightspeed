@@ -1579,6 +1579,13 @@ fn is_core_subagent_binding(binding: &harness::WorkflowToolBinding) -> bool {
     tools::subagents::is_subagent_workflow_tool_id(binding.definition.tool_id.as_str())
 }
 
+fn is_core_input_binding(binding: &harness::WorkflowToolBinding) -> bool {
+    tools::human_input::is_input_request_binding(
+        binding.definition.tool_id.as_str(),
+        &binding.definition.semantic_type,
+    )
+}
+
 fn validate_code_deadline_for_existing_bindings(
     state: &harness::CoreAgentState,
     features: &harness::FeaturesConfig,

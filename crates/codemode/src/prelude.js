@@ -192,6 +192,13 @@
                 }));
                 continue;
             }
+            if (binding.name === "input.open") {
+                place(env, binding.name, freeze(async function (spec) {
+                    const opened = await invoke(id, spec, "").promise;
+                    return inputHandle(opened.executionId, opened.promise);
+                }));
+                continue;
+            }
             place(env, binding.name, freeze(async function (args) {
                 return await invoke(id, args, "").promise;
             }));
@@ -228,6 +235,103 @@
         const slept = await invoke(sleepId, args, "").promise;
         advance(slept.fire_at_ms);
         return slept;
+    }
+
+    // An open input request. Its operations are ordinary calls: `answer`
+    // awaits the request's promise, `cancel` cancels it, and `remind` and
+    // `reassign` act on the request's inbox row. Each needs its contract.
+    function contractCall(name, args) {
+        if (!hasOwn(bindingIds, name)) {
+            const error = new NativeError("This operation requires the " + name + " contract");
+            define(error, "kind", { value: "unsupported_capability", enumerable: true });
+            throw error;
+        }
+        return invoke(bindingIds[name], args, "").promise;
+    }
+    function inputFailure(result) {
+        const failure = result.error;
+        let kind = "input_failed";
+        let message = "input request " + result.status;
+        if (result.status === "cancelled") {
+            kind = "input_cancelled";
+            message = "input request was cancelled";
+        } else if (failure !== null && typeof failure === "object" && typeof failure.code === "string") {
+            kind = failure.code;
+            if (typeof failure.message === "string") message = failure.message;
+        } else if (result.status === "failed" && failure === undefined) {
+            // The session failed the promise at its hard deadline.
+            kind = "deadline_exceeded";
+            message = "input request was not answered in time";
+        }
+        const error = new NativeError(message);
+        define(error, "kind", { value: kind, enumerable: true });
+        return error;
+    }
+    function inputHandle(id, promise) {
+        let answered = null;
+        const answer = function () {
+            // One await per handle: every caller shares its outcome.
+            if (answered === null) {
+                answered = contractCall("promise.await", { promises: [promise] }).then(function (awaited) {
+                    const result = awaited.results[0];
+                    if (result.status === "resolved") return result.output;
+                    throw inputFailure(result);
+                });
+            }
+            return answered;
+        };
+        const handle = {
+            id,
+            answer: async function () { return await answer(); },
+            remind: async function () { return await contractCall("input.remind", { id }); },
+            reassign: async function (args) {
+                const to = args === null || typeof args !== "object" ? undefined : args.to;
+                return await contractCall("input.reassign", { id, to });
+            },
+            cancel: async function () {
+                await contractCall("promise.cancel", { promises: [promise] });
+            },
+            // Remind every `every_ms` until answered; after `max` reminders
+            // (default: no limit) wait, reassign to `to`, or cancel.
+            withReminders: async function (options) {
+                const settings = options === undefined ? create(null) : options;
+                const every = settings.every_ms;
+                const max = settings.max === undefined ? Infinity : settings.max;
+                const then = settings.then === undefined ? "wait" : settings.then;
+                if (typeof every !== "number" || !isFinite(every) || every <= 0) {
+                    throw new NativeTypeError("withReminders requires a positive every_ms");
+                }
+                if (typeof max !== "number" || !(max >= 0)) {
+                    throw new NativeTypeError("withReminders max must be a non-negative number");
+                }
+                if (then !== "wait" && then !== "reassign" && then !== "cancel") {
+                    throw new NativeTypeError("withReminders then must be wait, reassign or cancel");
+                }
+                if (then === "reassign" && !isArray(settings.to)) {
+                    throw new NativeTypeError("withReminders then: reassign requires to");
+                }
+                const outcome = answer().then(function (value) { return { value }; });
+                for (let nudges = 0; ; nudges++) {
+                    const next = await NativePromise.race([
+                        outcome,
+                        sleep({ ms: every }).then(function () { return null; }),
+                    ]);
+                    if (next !== null) return next.value;
+                    if (nudges < max) {
+                        await handle.remind();
+                        continue;
+                    }
+                    if (then === "reassign") await handle.reassign({ to: settings.to });
+                    else if (then === "cancel") await handle.cancel();
+                    return (await outcome).value;
+                }
+            },
+        };
+        const methods = keys(handle);
+        for (let i = 0; i < methods.length; i++) {
+            if (typeof handle[methods[i]] === "function") freeze(handle[methods[i]]);
+        }
+        return freeze(handle);
     }
 
     // A seeded small fast counter generator (sfc32): every attempt of the
