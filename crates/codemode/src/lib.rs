@@ -1,4 +1,9 @@
-//! Ephemeral JavaScript execution with an explicit JSON tool boundary.
+//! JavaScript execution with an explicit JSON tool boundary.
+//!
+//! A code-mode script is ephemeral. A program is replayable: it takes a
+//! completion only when it has no runnable job, one per such quiescent
+//! point, so fed the same completions in the same order it issues the same
+//! requests and returns the same value, however the completions were timed.
 
 mod engine;
 
@@ -112,6 +117,9 @@ pub enum ExecutionErrorKind {
     TimedOut,
     Cancelled,
     HostDisconnected,
+    /// A program diverged from its recorded execution: a replayed
+    /// completion named a request the program did not issue.
+    Nondeterminism,
     Internal,
 }
 
@@ -226,7 +234,9 @@ impl Drop for Execution {
     }
 }
 
-/// Start one fresh, non-replayable JavaScript attempt on its own native thread.
+/// Start one fresh JavaScript attempt on its own native thread. A program
+/// attempt can replay a recorded one by being sent its completions in
+/// recorded order, ahead of the requests they answer.
 /// No interpreter value or handle crosses this API.
 pub fn start(input: ExecutionInput, cancellation: Cancellation) -> Result<Execution, StartError> {
     engine::start(input, cancellation)

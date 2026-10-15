@@ -526,7 +526,8 @@ fn run_context<'js>(
             .call(())
             .map_err(|failure| js_error(&ctx, failure))?
     };
-    if input.program.is_some() {
+    let durable = input.program.is_some();
+    if durable {
         state.borrow_mut().startup_micros = elapsed_micros(started);
     }
     loop {
@@ -561,21 +562,41 @@ fn run_context<'js>(
                 .map(Some)
                 .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()));
         }
-        // Service completions between jobs so a self-scheduling microtask chain
-        // cannot starve the bridge. Both jobs and waits check the same deadline.
-        match completions.try_recv() {
-            Ok(completion) => apply_completion(&ctx, &deliver, &state, completion)?,
-            Err(sync_mpsc::TryRecvError::Disconnected) => {
-                return Err(error(
-                    ExecutionErrorKind::HostDisconnected,
-                    "host completion sender disconnected",
-                ));
+        // A script services completions between jobs so a self-scheduling
+        // microtask chain cannot starve the bridge. A program takes one
+        // completion only when it has no runnable job (quiescent delivery),
+        // so its execution is a function of the completion order alone, and
+        // relies on the deadline check against starvation.
+        if !durable {
+            match completions.try_recv() {
+                Ok(completion) => apply_completion(&ctx, &deliver, &state, completion, false)?,
+                Err(sync_mpsc::TryRecvError::Disconnected) => {
+                    return Err(error(
+                        ExecutionErrorKind::HostDisconnected,
+                        "host completion sender disconnected",
+                    ));
+                }
+                Err(sync_mpsc::TryRecvError::Empty) => {}
             }
-            Err(sync_mpsc::TryRecvError::Empty) => {}
         }
         if ctx.execute_pending_job() {
             state.borrow_mut().jobs += 1;
             continue;
+        }
+        if durable {
+            match completions.try_recv() {
+                Ok(completion) => {
+                    apply_completion(&ctx, &deliver, &state, completion, true)?;
+                    continue;
+                }
+                Err(sync_mpsc::TryRecvError::Disconnected) => {
+                    return Err(error(
+                        ExecutionErrorKind::HostDisconnected,
+                        "host completion sender disconnected",
+                    ));
+                }
+                Err(sync_mpsc::TryRecvError::Empty) => {}
+            }
         }
         if state.borrow().pending.is_empty() {
             return Err(error(
@@ -587,7 +608,7 @@ fn run_context<'js>(
             .saturating_duration_since(Instant::now())
             .min(IDLE_POLL);
         match completions.recv_timeout(wait) {
-            Ok(completion) => apply_completion(&ctx, &deliver, &state, completion)?,
+            Ok(completion) => apply_completion(&ctx, &deliver, &state, completion, durable)?,
             Err(sync_mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(error(
                     ExecutionErrorKind::HostDisconnected,
@@ -633,10 +654,23 @@ fn apply_completion<'js>(
     deliver: &Function<'js>,
     state: &Rc<RefCell<State>>,
     completion: HostCompletion,
+    durable: bool,
 ) -> Result<(), ExecutionError> {
     // A duplicate host completion cannot settle a later request or inject a new
     // result. Treat a faulty host bridge as a terminal integration error.
     if !state.borrow().pending.contains(&completion.request_id) {
+        // Under quiescent delivery a recorded completion always names a
+        // request the program has already issued. One it has not issued
+        // means this execution diverged from the one that was recorded.
+        if durable && !issued(&state.borrow(), &completion.request_id) {
+            return Err(error(
+                ExecutionErrorKind::Nondeterminism,
+                format!(
+                    "recorded completion for {} reached a program that has not issued it",
+                    completion.request_id
+                ),
+            ));
+        }
         return Err(error(
             ExecutionErrorKind::Internal,
             "host completed an unknown or already completed request",
@@ -664,6 +698,14 @@ fn apply_completion<'js>(
         .map_err(|failure| js_error(ctx, failure))?;
     state.borrow_mut().pending.remove(&completion.request_id);
     Ok(())
+}
+
+/// Whether `request_id` names a request this execution has issued.
+fn issued(state: &State, request_id: &str) -> bool {
+    request_id
+        .strip_prefix("call-")
+        .and_then(|sequence| sequence.parse::<u32>().ok())
+        .is_some_and(|sequence| sequence >= 1 && sequence <= state.calls)
 }
 
 fn fail_callback(
