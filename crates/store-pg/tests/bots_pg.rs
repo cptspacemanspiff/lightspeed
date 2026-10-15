@@ -846,6 +846,7 @@ async fn pg_live_bot_events_log_rates_outcomes_and_roster() {
         detail: Some("done".to_owned()),
         run_id: Some("run-1".to_owned()),
         resolved_at_ms: 500,
+        after_waiting: false,
     };
     assert_eq!(
         store
@@ -872,10 +873,26 @@ async fn pg_live_bot_events_log_rates_outcomes_and_roster() {
                     detail: None,
                     run_id: None,
                     resolved_at_ms: 600,
+                    after_waiting: false,
                 },
             )
             .await
             .expect("record outcomes again"),
+        0
+    );
+    // Only a deferred outcome gives way to its waiting run's final one.
+    assert_eq!(
+        store
+            .record_bot_event_outcomes(
+                &bot_id,
+                &["evt-1".to_owned()],
+                BotEventOutcomeWrite {
+                    after_waiting: true,
+                    ..write.clone()
+                },
+            )
+            .await
+            .expect("record a waiting run's outcome"),
         0
     );
     let resolved = store

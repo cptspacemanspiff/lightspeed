@@ -1281,3 +1281,155 @@ async fn bots_live_real_model_resolves_delivery() -> anyhow::Result<()> {
     })
     .await
 }
+
+/// A program that asks people about each delivery and lets their answer
+/// decide it.
+fn asking_program_input(profile_id: &ProfileId) -> AgentProfileInput {
+    let mut profile = program_profile_input(profile_id, 1);
+    let program = profile.document.program.as_mut().expect("program");
+    program.source = api::ProgramSource::Text {
+        text: "export default { async run(input, env) { \
+               const note = input.events[0].event.data.note; \
+               const answer = await env.input.request({ ask: 'Act on ' + note + '?' }); \
+               return { outcome: answer.approved ? 'handled' : 'ignored', \
+               summary: answer.comment ?? note, version: 1, seqs: input.events.map(e => e.seq) }; } };"
+            .to_owned(),
+    };
+    program.requires = vec![api::ProgramContractRequirement {
+        contract: "input.request".to_owned(),
+        digest: None,
+    }];
+    profile
+}
+
+/// Poll the bot's events until `done` holds for them.
+async fn wait_for_events(
+    api: &GatewayAgentApi,
+    bot_id: &BotId,
+    what: &str,
+    done: impl Fn(&[BotEventView]) -> bool,
+) -> anyhow::Result<Vec<BotEventView>> {
+    let started = Instant::now();
+    loop {
+        let events = list_events(api, bot_id).await?;
+        if done(&events) {
+            return Ok(events);
+        }
+        anyhow::ensure!(
+            started.elapsed() < WAIT,
+            "timed out waiting for {what} on bot {bot_id}: {events:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The one pending inbox request of a session, once it appears.
+async fn pending_request(
+    api: &GatewayAgentApi,
+    session_id: &str,
+) -> anyhow::Result<api::InputRequestView> {
+    let started = Instant::now();
+    loop {
+        let requests = api
+            .list_inbox_requests(api::InboxRequestListParams {
+                status: Some(api::InputRequestStatus::Pending),
+                session: Some(session_id.to_owned()),
+                limit: None,
+            })
+            .await?
+            .result
+            .requests;
+        if let [request] = requests.as_slice() {
+            return Ok(request.clone());
+        }
+        anyhow::ensure!(
+            started.elapsed() < WAIT,
+            "no single pending request on {session_id}: {requests:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn event_seq(events: &[BotEventView], seq: u64) -> &BotEventView {
+    events.iter().find(|event| event.seq == seq).expect("event")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_program_waiting_on_people_defers_its_delivery() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, _client| async move {
+        let profile_id = ProfileId::new(unique("bots-live-asking"));
+        api.create_profile(ProfileCreateParams {
+            profile: asking_program_input(&profile_id),
+        })
+        .await?;
+        let bot_id = create_bot(&api, &profile_id, |_| {}, Vec::new()).await?;
+        let main = bot_main_session_id(&bot_id, 1);
+
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("first"),
+        })
+        .await?;
+        // While the program waits for its answer, the delivery is deferred.
+        let events = wait_for_events(&api, &bot_id, "a deferred delivery", |events| {
+            events.iter().any(|event| event.outcome == Some(BotEventOutcome::Deferred))
+        })
+        .await?;
+        let first = event_seq(&events, 1);
+        assert_eq!(
+            first.outcome_detail.as_deref(),
+            Some("waiting for people to answer")
+        );
+        assert!(first.run_id.is_some(), "{first:?}");
+        let request = pending_request(&api, &main).await?;
+        assert_eq!(request.ask, "Act on first?");
+
+        // A later event waits for the session instead of failing.
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("second"),
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let events = list_events(&api, &bot_id).await?;
+        assert_eq!(event_seq(&events, 2).outcome, None, "{events:#?}");
+
+        // The answer completes the run; its verdict replaces the deferral.
+        api.answer_inbox_request(api::InboxRequestAnswerParams {
+            request_id: request.request_id,
+            approved: false,
+            value: None,
+            comment: Some("not now".to_owned()),
+        })
+        .await?;
+        let events = wait_for_events(&api, &bot_id, "the first verdict", |events| {
+            events.iter().any(|event| {
+                event.seq == 1 && event.outcome == Some(BotEventOutcome::Ignored)
+            })
+        })
+        .await?;
+        let first = event_seq(&events, 1);
+        assert_eq!(first.outcome_detail.as_deref(), Some("not now"));
+
+        // Then the second delivery runs and asks in turn.
+        let request = pending_request(&api, &main).await?;
+        assert_eq!(request.ask, "Act on second?");
+        api.answer_inbox_request(api::InboxRequestAnswerParams {
+            request_id: request.request_id,
+            approved: true,
+            value: None,
+            comment: None,
+        })
+        .await?;
+        let events = wait_for_events(&api, &bot_id, "the second verdict", |events| {
+            events.iter().any(|event| {
+                event.seq == 2 && event.outcome == Some(BotEventOutcome::Handled)
+            })
+        })
+        .await?;
+        assert_eq!(event_seq(&events, 2).outcome_detail.as_deref(), Some("second"));
+        Ok(())
+    })
+    .await
+}

@@ -494,6 +494,23 @@ pub struct BotEventOutcomeWrite {
     pub detail: Option<String>,
     pub run_id: Option<String>,
     pub resolved_at_ms: i64,
+    /// Outcomes are written once, except that the outcome of a run that
+    /// waited on people replaces the `deferred` recorded for the same run
+    /// while it waited.
+    pub after_waiting: bool,
+}
+
+impl BotEventOutcomeWrite {
+    /// Whether this write may replace an event's recorded outcome.
+    pub fn replaces(&self, outcome: Option<BotEventOutcome>, run_id: Option<&str>) -> bool {
+        match outcome {
+            None => true,
+            Some(BotEventOutcome::Deferred) => {
+                self.after_waiting && run_id.is_some() && run_id == self.run_id.as_deref()
+            }
+            Some(_) => false,
+        }
+    }
 }
 
 #[async_trait]
@@ -554,3 +571,25 @@ pub trait BotEventStore: Send + Sync {
 pub trait BotRegistryStore: BotStore + BotTriggerStore + BotEventStore {}
 
 impl<T: BotStore + BotTriggerStore + BotEventStore> BotRegistryStore for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_waiting_runs_outcome_replaces_its_deferred() {
+        let write = |after_waiting: bool| BotEventOutcomeWrite {
+            outcome: BotEventOutcome::Handled,
+            detail: None,
+            run_id: Some("run_3".to_owned()),
+            resolved_at_ms: 1,
+            after_waiting,
+        };
+        assert!(write(false).replaces(None, None));
+        assert!(write(true).replaces(Some(BotEventOutcome::Deferred), Some("run_3")));
+        assert!(!write(false).replaces(Some(BotEventOutcome::Deferred), Some("run_3")));
+        assert!(!write(true).replaces(Some(BotEventOutcome::Deferred), Some("run_4")));
+        assert!(!write(true).replaces(Some(BotEventOutcome::Deferred), None));
+        assert!(!write(true).replaces(Some(BotEventOutcome::Handled), Some("run_3")));
+    }
+}

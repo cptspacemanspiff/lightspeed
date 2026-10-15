@@ -19,7 +19,7 @@ impl AgentSessionWorkflow {
             return;
         }
         match envelope.body {
-            harness::EmissionBody::RunTerminal { .. } => {
+            harness::EmissionBody::RunTerminal { .. } | harness::EmissionBody::RunWaiting { .. } => {
                 // A receiving workflow interprets the typed run output and then
                 // sends an authorized SourceResolution. Dropping its encoding
                 // here would expose provider JSON as an ordinary tool result.
@@ -64,6 +64,7 @@ impl AgentSessionWorkflow {
         &mut self,
         entries: &[CoreAgentEntry],
     ) -> anyhow::Result<()> {
+        self.queue_run_waiting(entries)?;
         let universe_id = self
             .universe_id
             .ok_or_else(|| anyhow::anyhow!("initialized session is missing universe id"))?;
@@ -151,6 +152,46 @@ impl AgentSessionWorkflow {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Tell the active run's holders, once, that it waits on people: a
+    /// program run with an open input request. Bots then stop expecting its
+    /// terminal soon.
+    fn queue_run_waiting(&mut self, entries: &[CoreAgentEntry]) -> anyhow::Result<()> {
+        let Some(last) = entries.last() else {
+            return Ok(());
+        };
+        let Some(run) = self.core_state.runs.active.as_ref() else {
+            return Ok(());
+        };
+        if self.waiting_notified_run == Some(run.run_id)
+            || run.notify_on_terminal.is_empty()
+            || !crate::workflows::input_request::run_waits_on_people(&self.core_state, run)
+        {
+            return Ok(());
+        }
+        let universe_id = self
+            .universe_id
+            .ok_or_else(|| anyhow::anyhow!("initialized session is missing universe id"))?;
+        let session_id = self
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("initialized session is missing session id"))?;
+        let run_id = run.run_id;
+        for intent in &run.notify_on_terminal {
+            self.pending_emissions.push(PendingEmission::immediate(
+                intent.holder_workflow_id.clone(),
+                EmissionEnvelope::run_waiting(
+                    universe_id,
+                    session_id.clone(),
+                    last.position.seq,
+                    intent.token.clone(),
+                    run_id,
+                ),
+            ));
+        }
+        self.waiting_notified_run = Some(run_id);
         Ok(())
     }
 

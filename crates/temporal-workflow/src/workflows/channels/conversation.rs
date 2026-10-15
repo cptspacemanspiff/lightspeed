@@ -1488,7 +1488,11 @@ fn project_emission(
                 holder_workflow_id,
             }),
         ),
-        EmissionBody::RunTerminal { .. } => (ConversationEmissionBody::RunTerminal, None),
+        // A conversation never holds a run's notifications; both kinds are
+        // the same protocol error to it.
+        EmissionBody::RunTerminal { .. } | EmissionBody::RunWaiting { .. } => {
+            (ConversationEmissionBody::RunTerminal, None)
+        }
         EmissionBody::InvocationCancellation {
             invocation_id,
             completion_key,

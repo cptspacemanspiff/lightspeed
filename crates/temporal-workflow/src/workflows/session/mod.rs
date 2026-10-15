@@ -80,6 +80,10 @@ pub struct AgentSessionWorkflow {
     run_preparation: Option<preparation::PendingRunPreparation>,
     pending_tool_batch_resumes: Vec<PendingToolBatchResume>,
     pending_emissions: Vec<PendingEmission>,
+    /// The run whose holders were told it waits on people. A rerun of a
+    /// new execution may tell them again; their receivers deduplicate by
+    /// emission id.
+    waiting_notified_run: Option<harness::RunId>,
     pending_source_resolutions: Vec<PendingSourceResolution>,
     confirmed_workflow_starts: BTreeSet<String>,
     workflow_start_backoffs: BTreeMap<String, (u32, u64)>,
@@ -113,6 +117,7 @@ impl Default for AgentSessionWorkflow {
             run_preparation: None,
             pending_tool_batch_resumes: Vec::new(),
             pending_emissions: Vec::new(),
+            waiting_notified_run: None,
             pending_source_resolutions: Vec::new(),
             confirmed_workflow_starts: BTreeSet::new(),
             workflow_start_backoffs: BTreeMap::new(),

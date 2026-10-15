@@ -105,7 +105,7 @@ fn vectors_cover_all_derivations_and_round_trips() {
     let vectors = &exported.manifest["vectors"];
     assert_eq!(
         vectors["emissionIds"].as_object().map(|ids| ids.len()),
-        Some(4)
+        Some(5)
     );
     assert!(
         vectors["recipeFingerprint"]

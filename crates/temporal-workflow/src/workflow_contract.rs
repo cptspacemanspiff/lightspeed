@@ -163,6 +163,7 @@ fn manifest() -> Value {
             "framing": "sha256 over the hash domain, then the kind, then each part in order; every piece is prefixed by its byte length as an unsigned 64-bit big-endian integer. Universe ids are hashed as hyphenated lowercase UUID strings; run ids as 8-byte big-endian unsigned integers.",
             "kinds": {
                 "runTerminal": { "kind": "run_terminal", "parts": ["universeId:utf8", "sessionId:utf8", "runId:u64be", "token:utf8"] },
+                "runWaiting": { "kind": "run_waiting", "parts": ["universeId:utf8", "sessionId:utf8", "runId:u64be", "token:utf8"] },
                 "sourceResolution": { "kind": "source_resolution", "parts": ["universeId:utf8", "producerWorkflowId:utf8", "holderWorkflowId:utf8", "promiseId:utf8"] },
                 "invocationCancellation": { "kind": "invocation_cancellation", "parts": ["invocationId:utf8", "completionKey:utf8"] },
                 "toolInvocation": { "verbatim": "invocationId" },
@@ -297,6 +298,13 @@ fn vectors() -> Value {
             REPLY_COMPLETION_KEY.to_owned(),
             promise_id.clone(),
         ),
+        EmissionEnvelope::run_waiting(
+            universe,
+            session.clone(),
+            EventSeq::new(45),
+            VECTOR_TOKEN.to_owned(),
+            run_id,
+        ),
     ];
     json!({
         "inputs": {
@@ -315,6 +323,7 @@ fn vectors() -> Value {
         },
         "emissionIds": {
             "runTerminal": EmissionId::for_run_terminal(universe, &session, run_id, VECTOR_TOKEN).as_str(),
+            "runWaiting": EmissionId::for_run_waiting(universe, &session, run_id, VECTOR_TOKEN).as_str(),
             "sourceResolution": EmissionId::for_source_resolution(universe, VECTOR_PRODUCER, &session_workflow_id, &promise_id).as_str(),
             "toolInvocation": EmissionId::for_tool_invocation(&invocation_id).as_str(),
             "invocationCancellation": EmissionId::for_invocation_cancellation(&invocation_id, REPLY_COMPLETION_KEY).as_str(),

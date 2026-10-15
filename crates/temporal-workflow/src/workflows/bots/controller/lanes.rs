@@ -17,7 +17,8 @@ use super::super::{
     BotStartRunRequest, BotStartRunResult, BotSteerRunRequest, BotSteerRunResult,
 };
 use super::state::{
-    BotDelivery, DeliveryOutcome, ManagedSession, PendingInvocation, delivery_outcome,
+    BotDelivery, DeliveryOutcome, LaneResolution, LaneTerminal, ManagedSession, PendingInvocation,
+    WaitingRun, delivery_outcome,
 };
 use super::{Ctx, activity, close_session, ensure_request, now_ms, wait_until_session_idle};
 use crate::AgentSessionWorkflow;
@@ -207,7 +208,9 @@ async fn run_delivery_inner(
 
     {
         let session_id = target.clone();
-        let wait = ctx.wait_for_state(move |state| state.lane_has_terminal(&session_id));
+        let wait = ctx.wait_for_state(move |state| {
+            state.lane_has_terminal(&session_id) || state.lane_is_waiting(&session_id)
+        });
         let timeout = ctx
             .timer_with_manual_cancellation(BOT_EVENT_TERMINAL_TIMEOUT)
             .fuse();
@@ -216,6 +219,11 @@ async fn run_delivery_inner(
             _ = wait => {}
             _ = timeout => {}
         }
+    }
+
+    if ctx.state(|state| state.lane_is_waiting(target)) {
+        park_waiting_delivery(ctx, delivery, target, &run_id).await;
+        return Ok(());
     }
 
     let (terminal, resolution) = ctx.state(|state| {
@@ -234,6 +242,62 @@ async fn run_delivery_inner(
     };
     finish_delivery(ctx, target, delivery, outcome, usage).await;
     Ok(())
+}
+
+/// The run waits on people, which can take days: record the delivery
+/// `deferred` and end the lane, leaving the session occupied. No terminal
+/// timeout applies; the run's terminal settles the delivery
+/// (`settle_waiting_run`) and sends its receipts.
+async fn park_waiting_delivery(ctx: &Ctx, delivery: &BotDelivery, target: &str, run_id: &str) {
+    let (universe_id, bot_id) =
+        ctx.state(|state| (state.config.universe_id, state.config.bot_id.clone()));
+    if let Err(message) = activity(
+        ctx,
+        BotActivities::record_outcomes,
+        BotRecordOutcomesRequest {
+            universe_id,
+            bot_id,
+            event_ids: delivery.event_ids(),
+            outcome: BotEventOutcome::Deferred,
+            detail: Some(WAITING_DETAIL.to_owned()),
+            run_id: Some(run_id.to_owned()),
+            after_waiting: false,
+        },
+    )
+    .await
+    {
+        ctx.state_mut(|state| state.record_error(message));
+    }
+    let now = now_ms(ctx);
+    ctx.state_mut(|state| state.park_waiting_lane(target, run_id, now));
+}
+
+/// What a waiting delivery's event shows until its run ends.
+pub(super) const WAITING_DETAIL: &str = "waiting for people to answer";
+
+/// The terminal of a run that waited on people: its outcome replaces the
+/// `deferred` recorded while it waited, and its receipts go out.
+pub(super) async fn settle_waiting_run(
+    ctx: &Ctx,
+    session_id: &str,
+    waiting: WaitingRun,
+    terminal: LaneTerminal,
+    resolution: Option<LaneResolution>,
+) {
+    let outcome = delivery_outcome(Some(&terminal), resolution.as_ref(), Some(&waiting.run_id));
+    let usage = match (&outcome.run_id, outcome.outcome) {
+        (Some(run_id), outcome) if outcome != BotEventOutcome::RunFailed => {
+            read_run_usage(ctx, session_id, run_id).await
+        }
+        _ => None,
+    };
+    let now = now_ms(ctx);
+    let recent = recent_snapshot(&waiting.delivery, session_id, &outcome, usage, now);
+    ctx.state_mut(|state| {
+        state.remember_delivery(recent);
+        state.touch_session(session_id, now);
+    });
+    settle_delivery(ctx, &waiting.delivery, session_id, &outcome, true).await;
 }
 
 /// Best effort: the cached share is observability, never a reason to fail
@@ -421,7 +485,7 @@ pub(super) async fn run_busy_sidecar(ctx: Ctx, delivery: BotDelivery, target: St
             state.remember_delivery(recent);
             state.release_sidecar(&target, now);
         });
-        settle_delivery(&ctx, &delivery, &target, &outcome).await;
+        settle_delivery(&ctx, &delivery, &target, &outcome, false).await;
     } else {
         ctx.state_mut(|state| state.release_sidecar(&target, now));
     }
@@ -507,18 +571,20 @@ async fn finish_delivery(
         state.remember_delivery(recent);
         state.release_lane(session_id, now);
     });
-    settle_delivery(ctx, delivery, session_id, &outcome).await;
+    settle_delivery(ctx, delivery, session_id, &outcome, false).await;
 }
 
 /// The write-once outcome on every event row, `bot.reply` receipts for
 /// events that asked, and the `finished` delivery receipt for events whose
 /// source asked. Each is best effort — a failed write costs a pending
-/// badge or a receipt, never a delivery.
+/// badge or a receipt, never a delivery. `after_waiting` lets the outcome
+/// replace the `deferred` recorded while the run waited.
 async fn settle_delivery(
     ctx: &Ctx,
     delivery: &BotDelivery,
     session_id: &str,
     outcome: &DeliveryOutcome,
+    after_waiting: bool,
 ) {
     let (universe_id, bot_id) =
         ctx.state(|state| (state.config.universe_id, state.config.bot_id.clone()));
@@ -532,6 +598,7 @@ async fn settle_delivery(
             outcome: outcome.outcome,
             detail: outcome.summary.clone(),
             run_id: outcome.run_id.clone(),
+            after_waiting,
         },
     )
     .await
