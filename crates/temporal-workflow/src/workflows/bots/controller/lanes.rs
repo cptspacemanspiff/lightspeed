@@ -300,6 +300,19 @@ async fn ensure_routed_session(
     tools_ref: Option<String>,
 ) -> Option<String> {
     let mut session_id = resolved_id.to_owned();
+    // A program session pinned its program at creation. Once the bot's
+    // profile has moved on, retire the session while it is idle and let the
+    // key continue in its next generation with the current program. A busy
+    // session refuses the non-forced close and keeps its pin until a later
+    // delivery finds it idle.
+    if ctx.state(|state| state.routed_pin_is_stale(&session_id))
+        && close_session(ctx, &session_id, false).await
+    {
+        session_id = ctx.state_mut(|state| {
+            state.forget_routed_session(&session_id);
+            state.resolve_routed_session_id(ids::routed_session_base(&session_id))
+        });
+    }
     for attempt in 0..2 {
         let observed_at_ms = now_ms(ctx);
         let known = ctx
@@ -322,9 +335,9 @@ async fn ensure_routed_session(
         });
         match activity(ctx, BotActivities::ensure_session, request).await {
             Ok(BotEnsureSessionResult::Ready {
+                profile_revision,
                 carried_tool_ids,
                 program,
-                ..
             }) => {
                 let now = now_ms(ctx);
                 let kind = ids::bot_session_kind(&session_id);
@@ -338,6 +351,7 @@ async fn ensure_routed_session(
                         last_active_at_ms: Some(now),
                         close_policy: session.close_policy,
                         carried_tool_ids,
+                        profile_revision: Some(profile_revision),
                     });
                 });
                 enforce_extra_session_cap(ctx, &session_id).await;

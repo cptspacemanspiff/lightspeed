@@ -558,6 +558,122 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_routed_program_session_moves_to_a_new_program_revision() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, client| async move {
+        let store = pg_store_from_env().await?;
+        let profile_id = ProfileId::new(unique("bots-live-program"));
+        api.create_profile(ProfileCreateParams {
+            profile: program_profile_input(&profile_id, 1),
+        })
+        .await?;
+        let trigger_id = BotTriggerId::new("hook");
+        let bot_id = create_bot(
+            &api,
+            &profile_id,
+            |_| {},
+            vec![BotTriggerInput {
+                trigger_id: trigger_id.clone(),
+                document: BotTriggerDocument {
+                    spec: BotTriggerSpec::Webhook {
+                        verification: WebhookVerification::Token,
+                        preset: None,
+                    },
+                    filter: None,
+                    route: Some(api::BotTriggerRoute::PerKey {
+                        key: Some("data.key".to_owned()),
+                    }),
+                    coalesce: None,
+                    deliver: None,
+                    session_close_after_ms: None,
+                    enabled: true,
+                },
+                pairing_code: None,
+            }],
+        )
+        .await?;
+        let ingest_path = api
+            .read_bot_trigger(api::BotTriggerReadParams {
+                bot_id: bot_id.clone(),
+                trigger_id: trigger_id.clone(),
+            })
+            .await?
+            .result
+            .trigger
+            .ingest_path
+            .expect("webhook ingest path");
+        let token = ingest_path.rsplit('/').next().expect("token").to_owned();
+        let ingest = |note: &'static str| {
+            let api = api.clone();
+            let bot_id = bot_id.clone();
+            let trigger_id = trigger_id.clone();
+            let token = token.clone();
+            async move {
+                let body = serde_json::json!({ "kind": "pr", "key": "a", "note": note });
+                let outcome = api
+                    .ingest_bot_webhook(
+                        bot_id.as_str(),
+                        trigger_id.as_str(),
+                        &token,
+                        Default::default(),
+                        body.to_string().as_bytes(),
+                    )
+                    .await;
+                assert!(
+                    matches!(
+                        outcome,
+                        temporal_runtime::bots::hooks::WebhookIngestOutcome::Admitted { .. }
+                    ),
+                    "{outcome:?}"
+                );
+            }
+        };
+        let keyed = bots::ids::bot_keyed_session_id(&bot_id, "a");
+
+        ingest("one").await;
+        let events = wait_for_outcomes(&api, &bot_id, 1).await?;
+        assert_eq!(
+            event_program_output(&api, &store, &keyed, &events[0]).await?["version"],
+            1
+        );
+
+        // The key's session pinned revision 1. After the profile moves on,
+        // the next event for the key retires it and runs the new program in
+        // the key's next generation.
+        api.put_profile(api::ProfilePutParams {
+            profile: program_profile_input(&profile_id, 2),
+            expected_revision: Some(1),
+        })
+        .await?;
+        wait_for_controller_settled(&api, &client, &bot_id, |snapshot| {
+            snapshot.applied_profile_revision == Some(2)
+        })
+        .await?;
+        ingest("two").await;
+        let events = wait_for_outcomes(&api, &bot_id, 2).await?;
+        let second = events.iter().find(|event| event.seq == 2).expect("second");
+        let successor = bots::ids::routed_session_generation_id(&keyed, 2);
+        assert_eq!(
+            event_program_output(&api, &store, &successor, second).await?,
+            serde_json::json!({
+                "version": 2, "seqs": [2], "kinds": ["pr"], "notes": ["two"],
+            })
+        );
+        let retired = api
+            .read_session(SessionReadParams {
+                session_id: keyed,
+                run_limit: None,
+            })
+            .await?
+            .result
+            .session;
+        assert_eq!(retired.status, SessionStatus::Closed, "{retired:#?}");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
 async fn bots_live_reset_main_recovers_a_missing_session_row() -> anyhow::Result<()> {
     run_bots_live(Llm::Fake, |api, client| async move {
         let profile_id = create_profile(&api, "You are a live-test bot.").await?;
