@@ -7,11 +7,11 @@ use crate::workflows::WorkflowContextExt as _;
 use api::{BotEventOutcome, BotRecentDeliverySnapshot, LlmUsageView};
 use bots::{BotDeliveryPhase, RoutedSession, ids};
 use futures::{FutureExt, pin_mut, select};
-use harness::{BlobRef, EmissionEnvelope, PromiseResolution, REPLY_COMPLETION_KEY};
+use harness::{BlobRef, EmissionEnvelope, PromiseResolution, REPLY_COMPLETION_KEY, RunStatus};
 
 use super::super::{
     BOT_BUSY_RETRY_DELAY, BOT_EVENT_TERMINAL_TIMEOUT, BOT_EXTRA_SESSION_CAP, BotActivities,
-    BotAppendContextRequest, BotEnsureSessionResult, BotExecuteToolRequest, BotExecuteToolResult,
+    BotAppendContextRequest, BotCancelRunRequest, BotEnsureSessionResult, BotExecuteToolRequest, BotExecuteToolResult,
     BotPublishDirectoryRequest, BotReadRunUsageRequest, BotRecordOutcomesRequest,
     BotSendBotReceiptsRequest, BotSendDeliveryReceiptsRequest, BotSessionRequest, BotSessionStatus,
     BotStartRunRequest, BotStartRunResult, BotSteerRunRequest, BotSteerRunResult,
@@ -272,6 +272,30 @@ async fn park_waiting_delivery(ctx: &Ctx, delivery: &BotDelivery, target: &str, 
     ctx.state_mut(|state| state.park_waiting_lane(target, run_id, now));
 }
 
+/// Cancel a waiting run for the delivery that supersedes it. The run's
+/// terminal archives the waiting delivery and frees the session.
+pub(super) async fn supersede_waiting_run(ctx: Ctx, target: String, run_id: String) {
+    let universe_id = ctx.state(|state| state.config.universe_id);
+    if let Err(message) = activity(
+        &ctx,
+        BotActivities::cancel_run,
+        BotCancelRunRequest {
+            universe_id,
+            session_id: target.clone(),
+            run_id: run_id.clone(),
+        },
+    )
+    .await
+    {
+        ctx.state_mut(|state| {
+            state.record_error(format!("cancel superseded run {run_id} of {target}: {message}"))
+        });
+    }
+}
+
+/// What a superseded delivery's event shows.
+const SUPERSEDED_DETAIL: &str = "superseded by a later event";
+
 /// What a waiting delivery's event shows until its run ends.
 pub(super) const WAITING_DETAIL: &str = "waiting for people to answer";
 
@@ -284,7 +308,15 @@ pub(super) async fn settle_waiting_run(
     terminal: LaneTerminal,
     resolution: Option<LaneResolution>,
 ) {
-    let outcome = delivery_outcome(Some(&terminal), resolution.as_ref(), Some(&waiting.run_id));
+    let outcome = if waiting.superseded_by.is_some() && terminal.status == RunStatus::Cancelled {
+        DeliveryOutcome {
+            outcome: BotEventOutcome::Archived,
+            summary: Some(SUPERSEDED_DETAIL.to_owned()),
+            run_id: Some(waiting.run_id.clone()),
+        }
+    } else {
+        delivery_outcome(Some(&terminal), resolution.as_ref(), Some(&waiting.run_id))
+    };
     let usage = match (&outcome.run_id, outcome.outcome) {
         (Some(run_id), outcome) if outcome != BotEventOutcome::RunFailed => {
             read_run_usage(ctx, session_id, run_id).await

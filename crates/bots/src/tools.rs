@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use api::{
     BotCoalescePolicy, BotDeliverPolicy, BotEventOutcome, BotId, BotTriggerDocument, BotTriggerId,
-    BotTriggerKind, BotTriggerRoute, BotTriggerSpec, BotWhenBusy, BoundWorkflowToolDispatchInput,
+    BotTriggerKind, BotTriggerRoute, BotTriggerSpec, BotWhenBusy, BotWhileWaiting, BoundWorkflowToolDispatchInput,
     ChatAccess, ChatActivation, ChatGroupActivation, ChatPairing, ChatScope, ChatTurnAccess,
     PollCursorSpec, PollHttpAuth, PollSource, ToolParallelismView, WebhookPreset,
     WebhookVerification, WorkflowEndpointInput, WorkflowToolCompletionInput,
@@ -284,7 +284,12 @@ fn trigger_put_input_schema() -> Value {
                 "description": "Cap on total coalescing delay (default debounceMs)"
             },
             "maxCount": { "type": ["integer", "null"] },
-            "whenBusy": { "type": ["string", "null"], "enum": ["queue", "steer", "append", null] }
+            "whenBusy": { "type": ["string", "null"], "enum": ["queue", "steer", "append", null] },
+            "whileWaiting": {
+                "type": ["string", "null"],
+                "enum": ["queue", "supersede", null],
+                "description": "When the session's program run waits on people: queue behind it (default) or cancel it and run this event"
+            }
         }),
         json!({
             "url": {
@@ -996,20 +1001,30 @@ fn parse_common_fields(args: &serde_json::Map<String, Value>) -> Result<CommonFi
                 .unwrap_or(DEFAULT_COALESCE_MAX_COUNT),
         }),
     };
-    let deliver = match nullable_string(args, "whenBusy") {
-        None | Some("queue") => None,
-        Some("steer") => Some(BotDeliverPolicy {
-            when_busy: BotWhenBusy::Steer,
-        }),
-        Some("append") => Some(BotDeliverPolicy {
-            when_busy: BotWhenBusy::Append,
-        }),
+    let when_busy = match nullable_string(args, "whenBusy") {
+        None | Some("queue") => BotWhenBusy::Queue,
+        Some("steer") => BotWhenBusy::Steer,
+        Some("append") => BotWhenBusy::Append,
         Some(other) => {
             return Err(format!(
                 "whenBusy must be queue, steer, or append, got {other:?}"
             ));
         }
     };
+    let while_waiting = match nullable_string(args, "whileWaiting") {
+        None | Some("queue") => BotWhileWaiting::Queue,
+        Some("supersede") => BotWhileWaiting::Supersede,
+        Some(other) => {
+            return Err(format!(
+                "whileWaiting must be queue or supersede, got {other:?}"
+            ));
+        }
+    };
+    let deliver = Some(BotDeliverPolicy {
+        when_busy,
+        while_waiting,
+    })
+    .filter(|policy| *policy != BotDeliverPolicy::default());
     Ok(CommonFields {
         filter: Some(nullable_string(args, "filter").map(str::to_owned)),
         route: Some(route),
@@ -1506,6 +1521,7 @@ mod tests {
             request.deliver,
             Some(Some(BotDeliverPolicy {
                 when_busy: BotWhenBusy::Steer,
+                while_waiting: BotWhileWaiting::Queue,
             }))
         );
         assert_eq!(request.session_close_after_ms, None);
@@ -1649,6 +1665,7 @@ mod tests {
             request.deliver,
             Some(Some(BotDeliverPolicy {
                 when_busy: BotWhenBusy::Steer,
+                while_waiting: BotWhileWaiting::Queue,
             }))
         );
         assert_eq!(

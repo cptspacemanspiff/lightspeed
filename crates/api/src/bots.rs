@@ -588,11 +588,26 @@ pub enum BotWhenBusy {
     Append,
 }
 
+/// What a delivery does when its session's run waits on people (a program
+/// waiting for an answer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum BotWhileWaiting {
+    /// Wait for the waiting run to finish.
+    #[default]
+    Queue,
+    /// Cancel the waiting run, withdrawing its question, and run this
+    /// delivery instead. The superseded delivery is archived.
+    Supersede,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BotDeliverPolicy {
     #[serde(default)]
     pub when_busy: BotWhenBusy,
+    #[serde(default)]
+    pub while_waiting: BotWhileWaiting,
 }
 
 /// The whole configuration of one trigger, replaced with an expected

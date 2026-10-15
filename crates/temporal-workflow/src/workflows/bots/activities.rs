@@ -13,6 +13,7 @@ pub const ACTIVITY_BOT_READ_SESSION_STATUS: &str = "BotActivities::read_session_
 pub const ACTIVITY_BOT_READ_RUN_USAGE: &str = "BotActivities::read_run_usage";
 pub const ACTIVITY_BOT_START_RUN: &str = "BotActivities::start_run";
 pub const ACTIVITY_BOT_STEER_RUN: &str = "BotActivities::steer_run";
+pub const ACTIVITY_BOT_CANCEL_RUN: &str = "BotActivities::cancel_run";
 pub const ACTIVITY_BOT_APPEND_CONTEXT: &str = "BotActivities::append_context";
 pub const ACTIVITY_BOT_CLOSE_SESSION: &str = "BotActivities::close_session";
 pub const ACTIVITY_BOT_COUNT_DESCENDANTS: &str = "BotActivities::count_descendants";
@@ -72,6 +73,16 @@ impl BotActivities {
         _ctx: ActivityContext,
         _request: BotStartRunRequest,
     ) -> Result<BotStartRunResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    /// Cancel a run of one of the bot's sessions; a run that already ended
+    /// is left alone.
+    #[activity(name = ACTIVITY_BOT_CANCEL_RUN)]
+    pub async fn cancel_run(
+        _ctx: ActivityContext,
+        _request: BotCancelRunRequest,
+    ) -> Result<(), ActivityError> {
         unimplemented!("workflow activity definition only")
     }
 

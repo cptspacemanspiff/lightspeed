@@ -140,6 +140,20 @@ impl BotWorkerActivities {
         .await
     }
 
+    #[activity(name = ACTIVITY_BOT_CANCEL_RUN)]
+    pub async fn cancel_run(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        request: BotCancelRunRequest,
+    ) -> Result<(), ActivityError> {
+        let (api, authority) = self.controller(&_ctx, request.universe_id, None).await?;
+        crate::gateway::service::authorization::with_controller_authority(
+            authority,
+            crate::bots::sessions::cancel_run(&api, request),
+        )
+        .await
+    }
+
     #[activity(name = ACTIVITY_BOT_STEER_RUN)]
     pub async fn steer_run(
         self: Arc<Self>,

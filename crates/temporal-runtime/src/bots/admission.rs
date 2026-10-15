@@ -46,6 +46,7 @@ pub struct StoreBotEventInput {
     pub session: Option<RoutedSession>,
     pub coalesce: Option<BotCoalesceParams>,
     pub when_busy: Option<BotWhenBusy>,
+    pub while_waiting: Option<api::BotWhileWaiting>,
     pub sender_bot_id: Option<BotId>,
     pub hops: u32,
     pub in_reply_to: Option<BotEventReplyRef>,
@@ -70,6 +71,7 @@ impl StoreBotEventInput {
             session: None,
             coalesce: None,
             when_busy: None,
+            while_waiting: None,
             sender_bot_id: None,
             hops: 0,
             in_reply_to: None,
@@ -180,6 +182,7 @@ impl GatewayAgentApi {
             session: input.session,
             coalesce: input.coalesce,
             when_busy: input.when_busy,
+            while_waiting: input.while_waiting,
             hops: input.hops,
             reply: matches!(input.receiver, Some(EventReceiver::Bot { .. })),
             media: input.media,
@@ -345,6 +348,10 @@ impl GatewayAgentApi {
         });
         input.session = session;
         input.when_busy = trigger.document.deliver.map(|deliver| deliver.when_busy);
+        input.while_waiting = trigger
+            .document
+            .deliver
+            .map(|deliver| deliver.while_waiting);
         let stored = self.store_bot_event(bot, input).await?;
         Ok(AdmitTriggerOutcome::Admitted(Box::new(stored)))
     }

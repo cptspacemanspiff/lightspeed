@@ -10341,6 +10341,14 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 }
               ],
               "default": "queue"
+            },
+            "whileWaiting": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/BotWhileWaiting"
+                }
+              ],
+              "default": "queue"
             }
           },
           "type": "object"
@@ -10750,6 +10758,21 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             {
               "const": "append",
               "description": "Append the events as context without starting a run.",
+              "type": "string"
+            }
+          ]
+        },
+        "BotWhileWaiting": {
+          "description": "What a delivery does when its session's run waits on people (a program\nwaiting for an answer).",
+          "oneOf": [
+            {
+              "const": "queue",
+              "description": "Wait for the waiting run to finish.",
+              "type": "string"
+            },
+            {
+              "const": "supersede",
+              "description": "Cancel the waiting run, withdrawing its question, and run this\ndelivery instead. The superseded delivery is archived.",
               "type": "string"
             }
           ]
@@ -11455,6 +11478,14 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 }
               ],
               "default": "queue"
+            },
+            "whileWaiting": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/BotWhileWaiting"
+                }
+              ],
+              "default": "queue"
             }
           },
           "type": "object"
@@ -11784,6 +11815,21 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             {
               "const": "append",
               "description": "Append the events as context without starting a run.",
+              "type": "string"
+            }
+          ]
+        },
+        "BotWhileWaiting": {
+          "description": "What a delivery does when its session's run waits on people (a program\nwaiting for an answer).",
+          "oneOf": [
+            {
+              "const": "queue",
+              "description": "Wait for the waiting run to finish.",
+              "type": "string"
+            },
+            {
+              "const": "supersede",
+              "description": "Cancel the waiting run, withdrawing its question, and run this\ndelivery instead. The superseded delivery is archived.",
               "type": "string"
             }
           ]
