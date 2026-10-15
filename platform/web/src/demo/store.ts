@@ -3,6 +3,7 @@
 import { effectiveFeatures, type FeatureOverrides, type MessageAttachment, type UniverseRole, type UniverseIconName, type UniverseIconColor } from "@lightspeed-ai/platform-shared";
 import type {
   BlobContent,
+  InputRequestView,
   ChannelsStatus,
   EngineUniverse,
   Environment,
@@ -152,6 +153,8 @@ export interface UniverseState {
   modelDefaults: ModelDefaults;
   setups: UniverseSetup[];
   bots: Map<string, BotRecord>;
+  /// The human-input inbox (core wire shape), keyed by `requestId`.
+  inputRequests: Map<string, InputRequestView>;
   /// Universe channel accounts (core wire shape), keyed by `accountId`.
   channelAccounts: Map<string, ChannelAccountView>;
   /// Conversation → bot pairing rows (core wire shape).
@@ -274,6 +277,7 @@ export class DemoStore {
       modelDefaults: { revision: 0, agentRun: null, speechToText: null },
       setups: [],
       bots: new Map(),
+      inputRequests: new Map(),
       channelAccounts: new Map(),
       channelPairings: [],
       responder: init.responder ?? fallbackResponder,

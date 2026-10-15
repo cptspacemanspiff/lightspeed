@@ -7,6 +7,7 @@ import { authRoutes } from "./routes/auth";
 import { botRoutes, hookRoutes } from "./routes/bots";
 import { channelRoutes } from "./routes/channels";
 import { environmentRoutes } from "./routes/environments";
+import { inboxRoutes } from "./routes/inbox";
 import { mcpRoutes } from "./routes/mcp";
 import { platformRoutes } from "./routes/platform";
 import { profileRoutes } from "./routes/profiles";
@@ -67,6 +68,7 @@ export function createDemoRouter(store: DemoStore): Hono {
     mcpRoutes,
     secretRoutes,
     botRoutes,
+    inboxRoutes,
     channelRoutes,
   ]) {
     api.route("/universes", routes(store));

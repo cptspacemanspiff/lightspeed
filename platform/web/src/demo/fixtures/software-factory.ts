@@ -4453,4 +4453,50 @@ export function seedSoftwareFactory(store: DemoStore): void {
   seedIntegrations(universe);
   seedSessions(store, universe);
   seedBots(store, universe);
+  seedInbox(universe);
+}
+
+/// Questions the reviewer asked people: one waiting for a merge decision,
+/// one already answered.
+function seedInbox(universe: UniverseState): void {
+  const now = Date.now();
+  for (const request of [
+    {
+      requestId: "inp_3f9a2c71d04b8e6a5f1c2d3e4b5a6978",
+      sessionId: SESSION.pr493,
+      runId: 2,
+      ask: "Merge PR #493 (retry jitter for the scheduler)?",
+      payload: { pr: 493, checks: "passing", findings: ["backoff cap is untested above 8 retries"] },
+      assignees: ["priya"],
+      escalateTo: ["eng-leads"],
+      escalated: false,
+      status: "pending" as const,
+      createdAtMs: now - 3 * HOUR_MS,
+      deadlineAtMs: now - 3 * HOUR_MS + 7 * DAY_MS,
+      remindAfterMs: DAY_MS,
+      reminderCount: 0,
+    },
+    {
+      requestId: "inp_8c1d0e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+      sessionId: SESSION.pr491,
+      runId: 1,
+      ask: "Label PR #491 for the release notes",
+      responseSchema: { type: "object", required: ["label"], properties: { label: { enum: ["feature", "fix", "chore"] } } },
+      assignees: ["priya"],
+      escalated: false,
+      status: "answered" as const,
+      createdAtMs: now - 2 * DAY_MS,
+      deadlineAtMs: now + 5 * DAY_MS,
+      reminderCount: 0,
+      closedAtMs: now - DAY_MS,
+      answer: {
+        approved: true,
+        value: { label: "fix" },
+        answeredBy: { kind: "actor" as const, id: "user-priya" },
+        answeredAtMs: now - DAY_MS,
+      },
+    },
+  ]) {
+    universe.inputRequests.set(request.requestId, request);
+  }
 }

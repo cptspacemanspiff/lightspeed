@@ -236,10 +236,10 @@ export function AppShell({ user, admin }: { user: SessionUser; admin: boolean })
             <span className="text-sm font-medium">{mobileTitle}</span>
           </header>
         )}
-        {/* Master-detail surfaces (sessions, workspaces, profiles, bots)
+        {/* Master-detail surfaces (sessions, workspaces, profiles, bots, inbox)
             manage their own panes and scrolling — full-bleed. Everything else
             gets the centered scrolling column. */}
-        {/\/u\/[^/]+\/(sessions|workspaces|profiles|bots)/.test(location.pathname) ? (
+        {/\/u\/[^/]+\/(sessions|workspaces|profiles|bots|inbox)/.test(location.pathname) ? (
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Outlet />
           </main>
