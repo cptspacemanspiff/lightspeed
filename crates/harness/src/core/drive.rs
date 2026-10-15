@@ -12091,6 +12091,216 @@ mod tests {
         );
     }
 
+    fn approval_declaration() -> crate::WorkflowToolDeclaration {
+        crate::WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: crate::WorkflowToolId::new(crate::APPROVAL_WORKFLOW_TOOL_ID),
+                revision: 1,
+                semantic_type: crate::APPROVAL_WORKFLOW_SEMANTIC_TYPE.to_owned(),
+                tool: test_tool_spec(crate::APPROVAL_TOOL_NAME),
+            },
+            crate::WorkflowToolTarget::Start {
+                start: crate::WorkflowStartRef {
+                    recipe_format: 1,
+                    revision: 1,
+                    recipe_ref: BlobRef::from_bytes(b"approval-recipe"),
+                    recipe_fingerprint: "test-approval-recipe".into(),
+                },
+            },
+            crate::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: 60_000,
+            },
+        )
+    }
+
+    #[test]
+    fn a_program_scope_parks_an_approval_required_mcp_call_and_code_mode_does_not() {
+        let mut drive = CoreAgentDrive::from_replayed(
+            SessionId::new("program-park"),
+            CoreAgentState::new(),
+            None,
+        );
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), approval_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [
+            test_tool_spec(crate::PROGRAM_EXECUTE_TOOL_NAME),
+            test_tool_spec(crate::APPROVAL_TOOL_NAME),
+            native_inject_mcp_tool("mcp_echo", crate::RemoteMcpApprovalPolicy::Always),
+        ]
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id).unwrap();
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = BTreeMap::from([(
+            "mcp_echo__hello".to_owned(),
+            crate::CodeToolBinding {
+                tool_id: ToolName::new("mcp_echo"),
+                tool_name: ToolName::new("mcp_echo__hello"),
+                contract: Some(test_contract("mcp_echo")),
+            },
+        )]);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let call = scoped_call_spec(&execution_id, "1", "mcp_echo__hello");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+        ));
+
+        // The dispatched call carries itself addressed to the approval tool,
+        // with its own identity and arguments, to become if the server asks
+        // for approval.
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
+                .unwrap();
+        let Some(crate::RemoteMcpCallRuntime::Injected {
+            approval_decision: None,
+            park: Some(park),
+            ..
+        }) = &request.calls[0].remote_mcp
+        else {
+            panic!("a program scope's MCP call must carry its park: {request:?}");
+        };
+        assert_eq!(park.call_id, request.calls[0].call_id);
+        assert_eq!(park.arguments_ref, call.arguments_ref);
+        assert_eq!(
+            park.tool_id.as_ref().map(ToolName::as_str),
+            Some(crate::APPROVAL_TOOL_NAME)
+        );
+        assert_eq!(
+            park.workflow_tool
+                .as_ref()
+                .map(|runtime| runtime.binding.definition.tool_id.as_str()),
+            Some(crate::APPROVAL_WORKFLOW_TOOL_ID)
+        );
+        assert!(park.remote_mcp.is_none());
+
+        // In a scope that rejects approvals (code mode), the same call gets
+        // no approval binding, so it can neither park nor emit one.
+        let state = drive.state();
+        let (scope, admitted) =
+            crate::code_tool_call_for_id(state, &request.calls[0].call_id).unwrap();
+        let mut rejecting = scope.clone();
+        rejecting.spec.policy.approvals = crate::ApprovalPolicy::Reject;
+        assert!(
+            crate::core::components::code_tool::approval_binding_for_call(
+                state, &rejecting, admitted
+            )
+            .is_none()
+        );
+
+        // Nothing is approved before the call waits on its approval.
+        let mut parked_request = request.clone();
+        parked_request.calls[0] = (**park).clone();
+        let (result, invocation_id) = code_tool_workflow_effect(&parked_request);
+        assert!(
+            crate::approved_code_tool_request(
+                drive.session_id(),
+                drive.state(),
+                &request.calls[0].call_id,
+                &invocation_id,
+            )
+            .is_err()
+        );
+
+        // Emitting the approval parks the call on its reply promise.
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: call.origin.clone(),
+                result,
+            },
+        ));
+        assert!(matches!(
+            crate::code_tool_call(drive.state(), &call.origin)
+                .unwrap()
+                .status,
+            crate::CodeToolCallStatus::Waiting { .. }
+        ));
+        let tools = &drive.state().workflow_tools;
+        assert!(
+            tools
+                .start_requests
+                .get(&invocation_id)
+                .or_else(|| tools.emissions.get(&invocation_id))
+                .is_some_and(
+                    |invocation| invocation.tool_id.as_str() == crate::APPROVAL_WORKFLOW_TOOL_ID
+                )
+        );
+
+        // The approval runs the call itself, approved, and only through the
+        // approval it waits on.
+        let approved = crate::approved_code_tool_request(
+            drive.session_id(),
+            drive.state(),
+            &request.calls[0].call_id,
+            &invocation_id,
+        )
+        .unwrap();
+        assert_eq!(approved.call.tool_id, Some(ToolName::new("mcp_echo")));
+        assert!(matches!(
+            &approved.call.remote_mcp,
+            Some(crate::RemoteMcpCallRuntime::Injected {
+                approval_decision: Some(true),
+                park: None,
+                ..
+            })
+        ));
+        let other = crate::WorkflowToolInvocationId::for_context(
+            uuid::Uuid::from_u128(7),
+            drive.session_id(),
+            run_id,
+            &crate::CallContext::Run {},
+            "other",
+        );
+        assert!(
+            crate::approved_code_tool_request(
+                drive.session_id(),
+                drive.state(),
+                &request.calls[0].call_id,
+                &other,
+            )
+            .is_err()
+        );
+        assert_replays_identically(&drive, &log);
+    }
+
     fn agent_run_declaration() -> crate::WorkflowToolDeclaration {
         crate::WorkflowToolDeclaration::new(
             WorkflowToolDefinition {
