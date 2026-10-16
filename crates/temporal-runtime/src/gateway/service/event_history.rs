@@ -132,6 +132,7 @@ mod tests {
                     execution_id: "execution-hidden".to_owned(),
                     cancel: false,
                     program_context: None,
+                    withdrawn: Vec::new(),
                 }),
             })
             .unwrap();

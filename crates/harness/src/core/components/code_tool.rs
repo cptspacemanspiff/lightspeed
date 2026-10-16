@@ -434,6 +434,10 @@ pub struct CodeToolScope {
     /// which may be its result if that came first.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub cancel_requested_calls: BTreeSet<String>,
+    /// The program run's handles this scope's cancelling close withdrew.
+    /// They are not calls; the exit waits until each has settled.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub withdrawn: BTreeSet<crate::PromiseId>,
 }
 
 impl CodeToolScope {
@@ -478,6 +482,11 @@ pub enum CodeToolEvent {
         cancel: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program_context: Option<crate::ProgramContextInput>,
+        /// A program run's open handles (its pending model-owned run
+        /// promises) the cancelling close withdrew. The run's exit waits for
+        /// each to settle, like a call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        withdrawn: Vec<crate::PromiseId>,
     },
     /// The scope's owner asked to cancel one call. The call stops the way
     /// its kind can and still records one outcome.
@@ -1370,6 +1379,23 @@ pub(crate) fn stamp_code_tool_completions(
     }
 }
 
+/// The handles a program scope's close withdrew, and how many of them have
+/// settled (answered, failed or withdrawn). The run's exit waits for all.
+pub fn code_tool_scope_withdrawals(state: &CoreAgentState, scope: &CodeToolScope) -> (u64, u64) {
+    let settled = scope
+        .withdrawn
+        .iter()
+        .filter(|promise_id| {
+            state
+                .promises
+                .promises
+                .get(*promise_id)
+                .is_none_or(|promise| promise.status.is_terminal())
+        })
+        .count();
+    (scope.withdrawn.len() as u64, settled as u64)
+}
+
 /// Whether a call's cancellation was requested, by its own cancel or by its
 /// scope's.
 pub fn code_tool_call_cancel_requested(state: &CoreAgentState, origin: &CodeToolOrigin) -> bool {
@@ -1474,14 +1500,41 @@ pub fn close_code_tool_scope_proposals(
     if scope.closed && (!cancel || scope.cancel_requested) {
         return Ok(Vec::new());
     }
+    // A program run's exit withdraws the handles its program still holds
+    // (opened input requests), as it cancels its calls. Detached handles
+    // belong to the session and stay open; the run's own runtime-owned
+    // promises are not the program's.
+    let withdrawn = match (&scope.spec.owner, cancel) {
+        (crate::ScopeOwner::Run { run_id }, true) => state
+            .promises
+            .pending_for_run(*run_id)
+            .filter(|promise| promise.ownership == PromiseOwnership::Model)
+            .map(|promise| promise.promise_id.clone())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
     let mut proposals = vec![CoreAgentEventProposal::new(
         CoreAgentJoins::default(),
         CoreAgentEvent::CodeTool(CodeToolEvent::ScopeClosed {
             execution_id,
             cancel,
             program_context,
+            withdrawn: withdrawn.clone(),
         }),
     )];
+    if let crate::ScopeOwner::Run { run_id } = scope.spec.owner {
+        for promise_id in &withdrawn {
+            if let Some(event) = crate::promise_cancel_event(state, promise_id) {
+                proposals.push(CoreAgentEventProposal::new(
+                    CoreAgentJoins {
+                        run_id: Some(run_id),
+                        ..CoreAgentJoins::default()
+                    },
+                    CoreAgentEvent::Promise(event),
+                ));
+            }
+        }
+    }
     if cancel {
         for call in scope.calls.values() {
             if let CodeToolCallStatus::Waiting {
@@ -1733,6 +1786,7 @@ pub(crate) fn apply_code_tool_event(
                     completed: Vec::new(),
                     program_context: None,
                     cancel_requested_calls: BTreeSet::new(),
+                    withdrawn: BTreeSet::new(),
                 },
             );
         }
@@ -1896,6 +1950,7 @@ pub(crate) fn apply_code_tool_event(
             execution_id,
             cancel,
             program_context,
+            withdrawn,
         } => {
             let scope = state
                 .code_tools
@@ -1910,6 +1965,22 @@ pub(crate) fn apply_code_tool_event(
                     ));
                 }
             }
+            if !withdrawn.is_empty() {
+                let crate::ScopeOwner::Run { run_id } = scope.spec.owner else {
+                    return Err(invalid("only a program run's scope withdraws handles"));
+                };
+                let owned = |promise_id: &crate::PromiseId| {
+                    state.promises.promises.get(promise_id).is_some_and(|promise| {
+                        promise.scope == crate::PromiseScope::Run { run_id }
+                            && promise.ownership == PromiseOwnership::Model
+                    })
+                };
+                if !*cancel || !withdrawn.iter().all(owned) {
+                    return Err(invalid(
+                        "a scope close withdraws only its run's own handles, when it cancels",
+                    ));
+                }
+            }
             let scope = state
                 .code_tools
                 .scopes
@@ -1920,6 +1991,7 @@ pub(crate) fn apply_code_tool_event(
             if program_context.is_some() {
                 scope.program_context = program_context.clone();
             }
+            scope.withdrawn.extend(withdrawn.iter().cloned());
         }
     }
     Ok(())

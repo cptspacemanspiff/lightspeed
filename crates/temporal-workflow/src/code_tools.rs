@@ -153,11 +153,43 @@ pub struct CodeToolScopeReport {
     pub contracts: BTreeMap<String, harness::ContractBinding>,
     /// Requests are keyed by execution-local request id, never arrival order.
     pub calls: BTreeMap<String, CodeToolCallOutcome>,
+    /// Handles a program run's close withdrew (opened input requests), and
+    /// how many of them have settled. A run's exit waits for all of them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub withdrawals: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub withdrawals_settled: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl CodeToolScopeReport {
+    /// The scope's report, with its withdrawals read from the session.
+    pub fn of(state: &harness::CoreAgentState, scope: &harness::CodeToolScope) -> Self {
+        let (withdrawals, withdrawals_settled) = harness::code_tool_scope_withdrawals(state, scope);
+        Self {
+            withdrawals,
+            withdrawals_settled,
+            ..Self::from(scope)
+        }
+    }
+
+    /// Whether every admitted call has an outcome and every withdrawn handle
+    /// has settled: nothing of the scope is still pending.
+    pub fn settled(&self) -> bool {
+        self.closed
+            && self.withdrawals_settled >= self.withdrawals
+            && self.calls.values().all(|call| call.status.is_terminal())
+    }
 }
 
 impl From<&harness::CodeToolScope> for CodeToolScopeReport {
     fn from(scope: &harness::CodeToolScope) -> Self {
         Self {
+            withdrawals: 0,
+            withdrawals_settled: 0,
             execution_id: scope.spec.execution_id.clone(),
             closed: scope.closed,
             cancel_requested: scope.cancel_requested,

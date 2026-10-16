@@ -151,12 +151,52 @@ pub struct ProgramCollectActivityResult {
     pub completions: Vec<program_engine::HostCompletion>,
 }
 
-/// Conclude a program the workflow ran: keep its output, context and
-/// report, and close the run's scope.
+/// Close a program run's scope as the run exits, whatever the exit: cancel
+/// every call the program still owns, withdraw its undetached handles, and
+/// keep a finished program's context with the close. Returns at once; the
+/// workflow then waits, holding no worker, until every call has an outcome
+/// and every withdrawn handle has settled.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramCloseActivityRequest {
+    pub universe_id: uuid::Uuid,
+    pub session_workflow_id: String,
+    pub execution_id: String,
+    /// The context a program that returned kept, stored with the close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_context: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProgramCloseActivityResult {
+    /// The scope is closed. A closed scope admits nothing, so `calls` is
+    /// final: the exit waits until that many outcomes are recorded and
+    /// `withdrawals` handles have settled. `recorded` and
+    /// `withdrawals_settled` are the counts as the close saw them.
+    Closed {
+        calls: u64,
+        recorded: u64,
+        #[serde(default)]
+        withdrawals: u64,
+        #[serde(default)]
+        withdrawals_settled: u64,
+        /// The program's context could not be stored; the run fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_error: Option<String>,
+    },
+    /// The run never opened its scope: nothing to wait for.
+    NoScope,
+}
+
+/// Conclude a program the workflow ran, once everything it started has
+/// settled: keep its output and report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProgramConcludeActivityRequest {
     pub descriptor: ProgramRunDescriptor,
     pub report: program_engine::ExecutionReport,
+    /// Why the run's close did not go through, if it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<String>,
 }
 
 /// What one attempt of the program did. The detailed report stays in CAS.

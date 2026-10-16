@@ -245,7 +245,7 @@ pub(super) fn report(
         .code_tools
         .scopes
         .get(execution_id)
-        .map(crate::CodeToolScopeReport::from)
+        .map(|scope| crate::CodeToolScopeReport::of(&state.core_state, scope))
         .ok_or_else(|| rejected(Rejection::UnknownScope, "unknown code tool execution scope"))
 }
 
@@ -1352,6 +1352,7 @@ mod tests {
                 completed: Vec::new(),
                 program_context: None,
                 cancel_requested_calls: Default::default(),
+                withdrawn: Default::default(),
             },
         );
         state

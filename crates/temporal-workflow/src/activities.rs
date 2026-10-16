@@ -63,6 +63,7 @@ pub const ACTIVITY_PROGRAM_FINALIZE: &str = "WorkflowActivities::program_finaliz
 pub const ACTIVITY_PROGRAM_LOAD: &str = "WorkflowActivities::program_load";
 pub const ACTIVITY_PROGRAM_ADMIT: &str = "WorkflowActivities::program_admit";
 pub const ACTIVITY_PROGRAM_COLLECT: &str = "WorkflowActivities::program_collect";
+pub const ACTIVITY_PROGRAM_CLOSE: &str = "WorkflowActivities::program_close";
 pub const ACTIVITY_PROGRAM_CONCLUDE: &str = "WorkflowActivities::program_conclude";
 pub const ACTIVITY_INPUT_REQUEST_OPEN: &str = "WorkflowActivities::input_request_open";
 pub const ACTIVITY_INPUT_REQUEST_STEP: &str = "WorkflowActivities::input_request_step";
@@ -125,6 +126,14 @@ impl WorkflowActivities {
         _ctx: ActivityContext,
         _request: crate::ProgramCollectActivityRequest,
     ) -> Result<crate::ProgramCollectActivityResult, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    #[activity(name = ACTIVITY_PROGRAM_CLOSE)]
+    pub async fn program_close(
+        _ctx: ActivityContext,
+        _request: crate::ProgramCloseActivityRequest,
+    ) -> Result<crate::ProgramCloseActivityResult, ActivityError> {
         unimplemented!("workflow activity definition only")
     }
 

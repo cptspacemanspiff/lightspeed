@@ -100,18 +100,22 @@ impl EmissionId {
         session_id: &SessionId,
         execution_id: &str,
         completed: u64,
+        withdrawals_settled: u64,
     ) -> Self {
         let universe = universe_id.to_string();
         let completed = completed.to_be_bytes();
-        Self::from_parts(
-            b"scope_progress",
-            &[
-                universe.as_bytes(),
-                session_id.as_str().as_bytes(),
-                execution_id.as_bytes(),
-                &completed,
-            ],
-        )
+        let settled = withdrawals_settled.to_be_bytes();
+        let mut parts = vec![
+            universe.as_bytes(),
+            session_id.as_str().as_bytes(),
+            execution_id.as_bytes(),
+            &completed[..],
+        ];
+        // Ids of progress without withdrawals keep their earlier form.
+        if withdrawals_settled > 0 {
+            parts.push(&settled[..]);
+        }
+        Self::from_parts(b"scope_progress", &parts)
     }
 
     /// Promise ids are session-scoped counters, so the holder workflow id
@@ -240,12 +244,16 @@ pub enum EmissionBody {
     /// Sent once per run to the holders its terminal will notify; the
     /// terminal follows as usual.
     RunWaiting { token: String, run_id: RunId },
-    /// A call in a program run's scope completed: the scope now holds
-    /// `completed` recorded outcomes. Wakes the run's program workflow when
-    /// its attempt is suspended waiting on calls.
+    /// A call in a program run's scope completed, or a handle its close
+    /// withdrew settled: the scope now holds `completed` recorded outcomes,
+    /// and `withdrawals_settled` of its withdrawn handles have settled.
+    /// Wakes the run's program workflow when it is suspended waiting on
+    /// calls, or on everything settling before its exit.
     ScopeProgress {
         execution_id: String,
         completed: u64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        withdrawals_settled: u64,
     },
     SourceResolution {
         promise_id: PromiseId,
@@ -334,9 +342,15 @@ impl EmissionEnvelope {
         log_seq: EventSeq,
         execution_id: String,
         completed: u64,
+        withdrawals_settled: u64,
     ) -> Self {
-        let emission_id =
-            EmissionId::for_scope_progress(universe_id, &session_id, &execution_id, completed);
+        let emission_id = EmissionId::for_scope_progress(
+            universe_id,
+            &session_id,
+            &execution_id,
+            completed,
+            withdrawals_settled,
+        );
         Self {
             emission_id,
             producer: EmissionProducer::Session {
@@ -347,6 +361,7 @@ impl EmissionEnvelope {
             body: EmissionBody::ScopeProgress {
                 execution_id,
                 completed,
+                withdrawals_settled,
             },
         }
     }
@@ -422,6 +437,10 @@ impl EmissionEnvelope {
             },
         }
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 fn update_digest_part(digest: &mut Sha256, value: &[u8]) {

@@ -1,6 +1,7 @@
 //! Program-role activities for program runs: prepare the run's scope and
 //! descriptor, load the program, admit each step's requests, collect
-//! recorded outcomes, conclude the run, and finalize its reply. The program
+//! recorded outcomes, close the scope as the run exits, conclude the run,
+//! and finalize its reply. The program
 //! itself runs in `ProgramRunWorkflow`; these activities hold no interpreter.
 
 use std::{sync::Arc, time::Duration};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use temporal_workflow::{
     CodeExecutionLimits, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
-    CodeToolScopeReportRequest, DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, OpenCodeToolScopeRequest,
+    DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, OpenCodeToolScopeRequest,
     ProgramAttemptActivityResult, ProgramAttemptOutcome, ProgramFinalizeActivityRequest,
     ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
     ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
@@ -32,7 +33,6 @@ use crate::{
     universe::UniverseRuntime,
 };
 
-const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 const SCHEMA_MAX_BYTES: u64 = 1024 * 1024;
 const REPORT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -61,6 +61,15 @@ impl ProgramWorkerActivities {
         Self {
             universes: WorkerUniverses::Runtime(runtime),
         }
+    }
+
+    /// What `program_close` does, for a worker that wraps the activity.
+    pub async fn close(
+        &self,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramCloseActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCloseActivityResult, ActivityError> {
+        close_activity(self, ctx, request).await
     }
 
     /// What `program_conclude` does, for a worker that wraps the activity.
@@ -144,6 +153,15 @@ impl ProgramWorkerActivities {
         collect_activity(&self, ctx, request).await
     }
 
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CLOSE)]
+    pub async fn program_close(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramCloseActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCloseActivityResult, ActivityError> {
+        close_activity(&self, ctx, request).await
+    }
+
     #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
     pub async fn program_conclude(
         self: Arc<Self>,
@@ -164,11 +182,7 @@ impl ProgramWorkerActivities {
 }
 
 fn runner(api: &GatewayAgentApi) -> ProgramRunner {
-    ProgramRunner::new(
-        api.temporal_client().clone(),
-        api.store().clone(),
-        CLEANUP_TIMEOUT,
-    )
+    ProgramRunner::new(api.temporal_client().clone(), api.store().clone())
 }
 
 fn validate_start(start: &WorkflowToolStartArgs) -> Result<(), PreparationError> {
@@ -548,6 +562,26 @@ async fn collect_activity(
     .await
 }
 
+async fn close_activity(
+    activities: &ProgramWorkerActivities,
+    ctx: ActivityContext,
+    request: temporal_workflow::ProgramCloseActivityRequest,
+) -> Result<temporal_workflow::ProgramCloseActivityResult, ActivityError> {
+    require_activity_owner(&ctx, &request.execution_id)?;
+    heartbeating(&ctx, async {
+        let api = activities.universes.api_for(request.universe_id).await?;
+        runner(&api)
+            .close(
+                &request.session_workflow_id,
+                &request.execution_id,
+                request.program_context,
+            )
+            .await
+            .map_err(retryable)
+    })
+    .await
+}
+
 async fn conclude_activity(
     activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
@@ -558,7 +592,9 @@ async fn conclude_activity(
     let universe_id = universe_of(&descriptor)?;
     heartbeating(&ctx, async {
         let api = activities.universes.api_for(universe_id).await?;
-        let report = runner(&api).conclude(&descriptor, request.report).await;
+        let report = runner(&api)
+            .conclude(&descriptor, request.report, request.cleanup_error)
+            .await;
         let outcome = attempt_outcome(api.store().as_ref(), &report).await?;
         let report_ref = store_report(
             api.store().as_ref(),
@@ -638,34 +674,32 @@ async fn finalize(
         api.temporal_client().clone(),
         start.holder_workflow_id.clone(),
     );
-    // Close the run's scope whatever happened to the attempt. The session
-    // closes it itself once the run is cancelled; here it is closed after a
-    // completed or lost attempt.
+    // The workflow closed the run's scope and waited for everything in it
+    // to settle before finalizing. Only if that close failed is the scope
+    // still open: close it now, without waiting, and say so.
     let queried = tokio::time::timeout(
         Duration::from_secs(5),
-        code_tools.report(
-            CodeToolScopeReportRequest {
-                execution_id: start.execution_id.clone(),
-            },
-            Default::default(),
-        ),
+        ProgramRunner::report(&code_tools, &start.execution_id),
     )
     .await;
     let (mut scope, mut cleanup_error) = match queried {
-        Ok(Ok(Ok(scope))) => (Some(scope), None),
-        Ok(Ok(Err(error))) if error.kind == CodeToolRejectionKind::UnknownScope => (None, None),
-        Ok(Ok(Err(error))) => (None, Some(error.to_string())),
+        Ok(Ok(scope)) => (Some(scope), None),
+        Ok(Err(error)) if error.kind == CodeToolRejectionKind::UnknownScope => (None, None),
         Ok(Err(error)) => (None, Some(error.to_string())),
         Err(_) => (None, Some("scope report timed out".to_owned())),
     };
-    if scope.as_ref().is_some_and(|scope| {
-        !(scope.closed && scope.calls.values().all(|call| call.status.is_terminal()))
-    }) {
-        let (latest, error) = runner
-            .cleanup(&code_tools, &start.execution_id, scope.take())
+    if scope.as_ref().is_some_and(|scope| !scope.closed) {
+        let closed = runner
+            .close(&start.holder_workflow_id, &start.execution_id, None)
             .await;
-        scope = latest;
-        cleanup_error = error;
+        cleanup_error = Some(match closed {
+            Ok(_) => "scope closed without waiting for its outcomes".to_owned(),
+            Err(error) => format!("scope close failed: {error}"),
+        });
+        scope = ProgramRunner::report(&code_tools, &start.execution_id)
+            .await
+            .ok()
+            .or(scope);
     }
     let attempt = match &request.terminal {
         ProgramRunTerminal::Completed { result } => Some(result),
