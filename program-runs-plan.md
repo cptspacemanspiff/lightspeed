@@ -114,6 +114,11 @@ until each has a recorded outcome; `detach()` keeps a promise-backed call
 alive. Every call gets `cancel()`. Limits bound the run: `max_calls` per
 run (default 50,000), a new deterministic `max_compute`;
 `max_wall_clock_ms` is removed. Details in D7 "Long runs".
+After code checks the same day (agreed with the user): withdrawal at an
+exit is the default and `detach()` the only explicit way to keep a
+request; a cancelled input request or approval settles only when its
+workflow confirms it, because the inbox row, not the session, decides an
+answer racing a withdrawal.
 
 ### D1. A session type at the edges, the shared harness in the middle
 
@@ -619,18 +624,52 @@ loop:
        delivered to the engine, and reads the outcomes for the run report.
        It holds no worker and has no deadline (today's 10 s polling inside
        `program_conclude`, and its "outcome unknown", go away). Every way a
-       call can end, including cancelled before dispatch, must emit
-       `ScopeProgress`.
-     - **`h.detach()`** keeps a promise-backed call (an input request; later
-       jobs and sub-agents) alive past an exit, through the existing
-       `promise.detach`. The program puts `h.id` in its state and
-       rebuilds the handle later with `env.input.handle(id)`, so a run can
-       continue as new while it waits days for an approval. Activity-backed
-       calls cannot be detached: their scope's close waits for them.
-     - The close must withdraw the run's own undetached input requests
-       (the promise and the inbox item), not only the call awaiting them.
-       Not yet confirmed that it does today (`code_tool_joined_result`
-       marks the waiting call cancelled while the promise is pending).
+       call can end must emit `ScopeProgress`. Checked 2026-10-16: a call
+       the session admitted but had not yet started when the cancel arrived
+       is recorded through `CompleteCodeToolCall`, whose `CallCompleted`
+       queues the wake like any completion, and cancelled waits resume
+       through `ResumeCodeToolCall` the same way. (A call started and
+       cancelled in the same step never reaches the session and needs no
+       wake.)
+     - **Withdrawal is the default; `h.detach()` is the only way to keep
+       a request.** Keeping a request open past an exit is always explicit
+       in the program; it is the escape hatch for carrying a wait across
+       executions or runs, never an implicit default. `h.detach()` exists
+       on `input.open` handles (model-owned promises; later jobs and
+       sub-agents) through the existing `promise.detach`. The program puts
+       `h.id` in its state and rebuilds the handle later with
+       `env.input.handle(id)`, so a run can continue as new while it waits
+       days for an approval. `input.request`'s promise is runtime-owned and
+       cannot be detached; activity-backed calls cannot be detached either:
+       their scope's close waits for them.
+     - **The close withdraws the run's own undetached requests**, the
+       promise and the inbox item, not only the call awaiting them. Checked
+       2026-10-16: a cancelling close already cancels the pending reply
+       promise of a waiting `input.request` (`close_code_tool_scope_proposals`),
+       but not `input.open` handle promises. Those are run-scoped and are
+       cancelled only when the run ends (`with_run_terminal_side_effects`),
+       which is too late for `continueAsNew`, where the run goes on. The
+       close of a program scope must cancel the run's pending model-owned
+       promises; never the run's own runtime-owned completion promise, and
+       never in code mode scopes, whose run's promises belong to the model.
+     - **A withdrawal settles only when its workflow confirms it.** For
+       input requests the inbox row decides the race between an answer and
+       a withdrawal (`InputRequestWorkflow`), so the session is not the only
+       writer. Today the session marks the promise `Cancelled` at once and
+       then tells the workflow; if the answer was saved in the row first,
+       the workflow replies `Resolved` and the session drops that reply
+       (`admit.rs`, terminal promise). The person sees "answered", the run
+       report says "withdrawn". The same holds for an approval: once
+       approved, the workflow runs the parked call to the end
+       (`execute_approved` does not watch for a cancel), so the call's real
+       result is dropped while the program sees "cancelled". Fix, by the
+       same rule as wait-cancellation-completed for activities: cancelling a
+       promise owned by an input-request workflow records "cancel
+       requested" and leaves it pending; it settles with what the workflow
+       reports (withdrawn → `Cancelled`, answered or the approved call's
+       result → that). The exit's cleanup waits for it like any call.
+       Scope this to workflow-owned promises; the model's own
+       `concurrency.cancel` keeps its behaviour.
   4. **Per-call cancel.** Every call returns a promise that also has
      `h.cancel()` (today only input handles do). A cancel is a request,
      not an outcome: the session records exactly one outcome per call,
@@ -647,17 +686,27 @@ loop:
        call's activity (`future.cancel()`); the activity sees it on its next
        heartbeat and drops its work. A call not yet dispatched is recorded
        cancelled without starting. Waits wake `Cancelled` through
-       `code_tool_wake`, which today only checks the scope.
+       `code_tool_wake`, which today only checks the scope. Tool activities
+       use the SDK's default try-cancel today (`tool_call_activity_options`
+       sets no cancellation type), so the session records `Cancelled`
+       without waiting; program scopes switch to wait-cancellation-completed
+       (item 3).
      - Replay: the cancel is admitted like a call, so it is safe to send
        twice (a retried local activity resends it; the session answers with
        the call's current state). The race between a cancel and a result is
-       decided once by the session, the scope's only writer, and recorded in
-       its history; the program sees only the collected outcome, which is a
-       marker in its own history. `clearTimeout` cancels its sleep.
-     - To check before building: `promise.cancel` computes its reply from
-       the promise's status at preparation and applies its effect at append;
-       an answer landing in between may make it report `cancelled` for an
-       answered promise.
+       decided once and recorded: by the session for activities and waits,
+       by the input-request workflow's inbox row for requests (item 3,
+       settled only when that workflow confirms). The program sees only the
+       collected outcome, which is a marker in its own history.
+       `clearTimeout` cancels its sleep.
+     - `h.cancel()` on an input handle uses the same session-side cancel,
+       not the `promise.cancel` tool. Checked 2026-10-16: `promise.cancel`
+       computes its reply from the promise's status when the call is
+       prepared and applies its effect at append, so an answer landing in
+       between makes it report `cancelled` for an answered promise (the
+       effect itself is right: it skips a settled promise). The status is
+       for logging only and the handle stays the authority, but the session
+       path computes it when it records the cancel, so the race goes away.
   5. **Executions.** A run is one `ProgramRunWorkflow` (workflow id
      `wtx:…`); `continueAsNew` adds an execution to it (same id, new
      Temporal run id, fresh history). Replays after a lost worker re-run the
@@ -701,7 +750,9 @@ loop:
          cancelling them through the session API, or by a policy of whoever
          manages sessions (a bot setting, an operations job). Temporal's
          workflow execution timeout is not used: it ends the chain without
-         settling calls or replying to the session.
+         settling calls or replying to the session. The field is still read
+         in one place: it sets the deadline of the run's own completion
+         promise (`program.rs`, `deadline_ms`), which goes with it.
        - Pinned programs exist only on this branch, so the changed meaning
          of `max_calls` needs no migration.
      - Signals arriving during the handover are not lost: the server
@@ -1119,7 +1170,12 @@ requests are later backends behind the same contract.
   - `answer()`: the pending answer, a promise that may outlive many workers;
   - `remind()`: notify the assignees again through the backend;
   - `reassign({ to })`: replace the assignees without touching the run;
-  - `cancel()`: withdraw the request; `answer()` then fails as cancelled.
+  - `cancel()`: withdraw the request; `answer()` then fails as cancelled,
+    unless the answer was saved first, in which case it returns the answer
+    (D7 "Long runs" item 3: a withdrawal settles only when the input
+    workflow confirms it);
+  - `detach()`: keep the request open past the run's exit; without it,
+    every exit withdraws it (D7 "Long runs" item 3).
 - **`env.input.request(spec)`** is shorthand for `open` and an immediate
   `answer()`.
 - **Spec:** `ask`, a payload to show, an optional response schema,
@@ -1309,8 +1365,9 @@ regenerated contracts).
      measures events per call).
    - Built after: program values out of history (reference payloads and a
      decode-only codec; `program_conclude` as a local activity).
-   - Remaining, in order (D7 "Long runs"): exits that settle every call,
-     per-call `cancel()` and `detach()`; `ctx.state` with
+   - Remaining, in order (D7 "Long runs"): exits that settle every call
+     (withdrawals confirmed by the input workflow, wait-cancellation for
+     tool activities), per-call `cancel()` and `detach()`; `ctx.state` with
      `ctx.continueAsNew` and `ctx.complete`, a scope per execution, and
      run-wide limits (`max_calls` per run, `max_compute`);
      `ctx.shouldContinue()` and `history_exhausted`; Temporal worker
@@ -1394,7 +1451,8 @@ with both tests.
   cross an exit only when detached, with their ids in the state; the
   names `ctx.state`, `ctx.continued`, `continueAsNew`, `complete`; the
   limits (`max_calls` per run, default 50,000; new `max_compute`;
-  `max_wall_clock_ms` removed). Still open: `max_compute`'s default,
+  `max_wall_clock_ms` removed); a withdrawal settles only when the input
+  workflow confirms it. Still open: `max_compute`'s default,
   measured when building.
 - **Isolation** (D9, D12): untrusted program code now runs in a workflow
   worker. Is a separate `program` worker role enough for now, and which
