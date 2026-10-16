@@ -187,6 +187,9 @@ pub const DEFAULT_CHANNELS_TASK_QUEUE: &str = "lightspeed-channels";
 /// Default task queue of the `code` worker role.
 pub const DEFAULT_CODE_TASK_QUEUE: &str = "lightspeed-code";
 
+/// Default task queue of the `program` worker role.
+pub const DEFAULT_PROGRAM_TASK_QUEUE: &str = "lightspeed-program";
+
 /// Independent interpreter capacity for a code worker process.
 pub const DEFAULT_CODE_MAX_CONCURRENT_EXECUTIONS: usize = 4;
 
@@ -199,6 +202,7 @@ pub struct TaskQueues {
     pub bots: String,
     pub channels: String,
     pub code: String,
+    pub program: String,
 }
 
 impl TaskQueues {
@@ -208,6 +212,7 @@ impl TaskQueues {
             bots: DEFAULT_BOTS_TASK_QUEUE.to_owned(),
             channels: DEFAULT_CHANNELS_TASK_QUEUE.to_owned(),
             code: DEFAULT_CODE_TASK_QUEUE.to_owned(),
+            program: DEFAULT_PROGRAM_TASK_QUEUE.to_owned(),
         }
     }
 
@@ -219,6 +224,7 @@ impl TaskQueues {
             bots: format!("{sessions}-bots"),
             channels: format!("{sessions}-channels"),
             code: format!("{sessions}-code"),
+            program: format!("{sessions}-program"),
             sessions,
         }
     }
@@ -230,13 +236,14 @@ impl TaskQueues {
             crate::roles::Role::Bots => Some(&self.bots),
             crate::roles::Role::Channels => Some(&self.channels),
             crate::roles::Role::Code => Some(&self.code),
+            crate::roles::Role::Program => Some(&self.program),
         }
     }
 }
 
 /// `LIGHTSPEED_TASK_QUEUE` (sessions), `LIGHTSPEED_TASK_QUEUE_BOTS`,
-/// `LIGHTSPEED_TASK_QUEUE_CHANNELS`, and `LIGHTSPEED_TASK_QUEUE_CODE`, with
-/// the deployment defaults.
+/// `LIGHTSPEED_TASK_QUEUE_CHANNELS`, `LIGHTSPEED_TASK_QUEUE_CODE`, and
+/// `LIGHTSPEED_TASK_QUEUE_PROGRAM`, with the deployment defaults.
 pub fn task_queues_from_env() -> anyhow::Result<TaskQueues> {
     let defaults = TaskQueues::defaults();
     Ok(TaskQueues {
@@ -244,6 +251,7 @@ pub fn task_queues_from_env() -> anyhow::Result<TaskQueues> {
         bots: optional_env("LIGHTSPEED_TASK_QUEUE_BOTS").unwrap_or(defaults.bots),
         channels: optional_env("LIGHTSPEED_TASK_QUEUE_CHANNELS").unwrap_or(defaults.channels),
         code: optional_env("LIGHTSPEED_TASK_QUEUE_CODE").unwrap_or(defaults.code),
+        program: optional_env("LIGHTSPEED_TASK_QUEUE_PROGRAM").unwrap_or(defaults.program),
     })
 }
 
@@ -471,6 +479,19 @@ mod tests {
         assert_eq!(queues.code, "deployment-session-code");
         assert_ne!(queues.code, queues.bots);
         assert_ne!(queues.code, queues.channels);
+    }
+
+    #[test]
+    fn program_queue_is_separate_from_code_in_default_and_derived_deployments() {
+        let defaults = TaskQueues::defaults();
+        assert_eq!(
+            defaults.for_role(crate::roles::Role::Program),
+            Some(DEFAULT_PROGRAM_TASK_QUEUE)
+        );
+        assert_ne!(defaults.program, defaults.code);
+        let queues = TaskQueues::derived_from("deployment-session");
+        assert_eq!(queues.program, "deployment-session-program");
+        assert_ne!(queues.program, queues.code);
     }
 
     #[test]

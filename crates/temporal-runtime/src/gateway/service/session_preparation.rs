@@ -8,6 +8,7 @@ pub(crate) struct SessionPreparationService {
     pub(crate) store: Arc<PgStore>,
     pub(crate) task_queue: String,
     pub(crate) code_task_queue: String,
+    pub(crate) program_task_queue: String,
     pub(crate) input_timeouts: tools::human_input::InputTimeouts,
     /// Lists MCP server tools to pin program contracts against; absent
     /// where nothing pins programs.
@@ -356,14 +357,14 @@ impl SessionPreparationService {
     }
 
     /// The system binding that executes a program session's program: a
-    /// joined start of the program run workflow on the code queue. The run
+    /// joined start of the program run workflow on the program queue. The run
     /// owns its single invocation; the program itself can never call it.
     pub(crate) async fn core_program_execute_workflow_tool_declaration(
         &self,
     ) -> Result<WorkflowToolDeclaration, AgentApiError> {
         let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
             workflow_type: tools::program::PROGRAM_RUN_WORKFLOW_TYPE.to_owned(),
-            task_queue: self.code_task_queue.clone(),
+            task_queue: self.program_task_queue.clone(),
         })
         .map_err(|error| {
             AgentApiError::internal(format!("encode program workflow recipe: {error}"))
@@ -751,6 +752,7 @@ impl GatewayAgentApi {
             store: self.store.clone(),
             task_queue: self.task_queue.clone(),
             code_task_queue: self.code_task_queue.clone(),
+            program_task_queue: self.program_task_queue.clone(),
             input_timeouts: self.input_timeouts,
             mcp_inventory: Some(self.mcp_inventory.clone()),
         }

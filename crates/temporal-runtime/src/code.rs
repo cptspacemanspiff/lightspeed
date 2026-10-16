@@ -44,7 +44,7 @@ impl CodeToolCatalog {
         }
     }
 
-    pub(crate) fn validate(&self, scope: &CodeToolScopeReport) -> Result<(), CodeRunError> {
+    fn validate(&self, scope: &CodeToolScopeReport) -> Result<(), CodeRunError> {
         if self.version != 1 {
             return Err(CodeRunError::Catalog("unsupported catalog version".into()));
         }
@@ -421,27 +421,47 @@ impl CodeRunner {
         execution_id: &str,
         latest: Option<CodeToolScopeReport>,
     ) -> (Option<CodeToolScopeReport>, Option<String>) {
-        self.close_scope(code_tools, execution_id, latest, None)
-            .await
+        close_scope(code_tools, execution_id, latest, None, self.cleanup_timeout).await
     }
+}
 
-    /// Close the scope, keeping a program run's context with the close, and
-    /// collect terminal outcomes.
-    pub(crate) async fn close_scope(
-        &self,
-        code_tools: &CodeToolClient,
-        execution_id: &str,
-        mut latest: Option<CodeToolScopeReport>,
-        program_context: Option<harness::ProgramContextInput>,
-    ) -> (Option<CodeToolScopeReport>, Option<String>) {
-        let cleanup = async {
+/// Close a scope, keeping a program run's context with the close, and wait
+/// up to `timeout` for its calls' terminal outcomes.
+pub(crate) async fn close_scope(
+    code_tools: &CodeToolClient,
+    execution_id: &str,
+    mut latest: Option<CodeToolScopeReport>,
+    program_context: Option<harness::ProgramContextInput>,
+    timeout: Duration,
+) -> (Option<CodeToolScopeReport>, Option<String>) {
+    let cleanup = async {
+        latest = Some(
+            code_tools
+                .close_scope(
+                    CloseCodeToolScopeRequest {
+                        execution_id: execution_id.to_owned(),
+                        cancel_pending: true,
+                        program_context: program_context.clone(),
+                    },
+                    Default::default(),
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?,
+        );
+        loop {
+            if latest.as_ref().is_some_and(|scope| {
+                scope.closed && scope.calls.values().all(|call| call.status.is_terminal())
+            }) {
+                return Ok::<_, String>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Update replies are cached; only queries provide fresh progress.
             latest = Some(
                 code_tools
-                    .close_scope(
-                        CloseCodeToolScopeRequest {
+                    .report(
+                        CodeToolScopeReportRequest {
                             execution_id: execution_id.to_owned(),
-                            cancel_pending: true,
-                            program_context: program_context.clone(),
                         },
                         Default::default(),
                     )
@@ -449,40 +469,17 @@ impl CodeRunner {
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?,
             );
-            loop {
-                if latest.as_ref().is_some_and(|scope| {
-                    scope.closed && scope.calls.values().all(|call| call.status.is_terminal())
-                }) {
-                    return Ok::<_, String>(());
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                // Update replies are cached; only queries provide fresh progress.
-                latest = Some(
-                    code_tools
-                        .report(
-                            CodeToolScopeReportRequest {
-                                execution_id: execution_id.to_owned(),
-                            },
-                            Default::default(),
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())?,
-                );
-            }
-        };
-        let error = match tokio::time::timeout(self.cleanup_timeout, cleanup).await {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error),
-            Err(_) => {
-                Some("scope cleanup deadline exceeded; pending outcomes remain unknown".into())
-            }
-        };
-        (latest, error)
-    }
+        }
+    };
+    let error = match tokio::time::timeout(timeout, cleanup).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some("scope cleanup deadline exceeded; pending outcomes remain unknown".into()),
+    };
+    (latest, error)
 }
 
-pub(crate) async fn cancellable_preparation<T>(
+async fn cancellable_preparation<T>(
     deadline: Instant,
     cancellation: &Cancellation,
     work: impl Future<Output = Result<T, CodeRunError>>,
@@ -502,7 +499,7 @@ async fn wait_for_cancellation(cancellation: &Cancellation) {
     }
 }
 
-pub(crate) fn engine_limits(limits: &CodeExecutionLimits) -> codemode::ExecutionLimits {
+fn engine_limits(limits: &CodeExecutionLimits) -> codemode::ExecutionLimits {
     codemode::ExecutionLimits {
         timeout_ms: limits.timeout_ms,
         max_memory_bytes: limits.max_memory_bytes,
@@ -517,7 +514,7 @@ pub(crate) fn engine_limits(limits: &CodeExecutionLimits) -> codemode::Execution
     }
 }
 
-pub(crate) fn host_error(kind: &str, message: impl Into<String>) -> HostError {
+fn host_error(kind: &str, message: impl Into<String>) -> HostError {
     HostError {
         kind: kind.into(),
         message: message.into(),

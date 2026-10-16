@@ -389,6 +389,7 @@ impl UniverseRuntime {
             .with_bot_task_queue(self.task_queues.bots.clone())
             .with_channel_task_queue(self.task_queues.channels.clone())
             .with_code_task_queue(self.task_queues.code.clone())
+            .with_program_task_queue(self.task_queues.program.clone())
             .with_oauth_token_client(self.clients.oauth_token.clone())
             .with_oauth_metadata_client(self.clients.oauth_metadata.clone())
             .with_github_api_client(self.clients.github.clone())
@@ -412,6 +413,7 @@ impl UniverseRuntime {
                 self.environment_gateway.clone(),
             )?
             .with_code_task_queue(self.task_queues.code.clone())
+            .with_program_task_queue(self.task_queues.program.clone())
             .with_input_timeouts(self.input_timeouts),
         );
         Ok(UniverseState {

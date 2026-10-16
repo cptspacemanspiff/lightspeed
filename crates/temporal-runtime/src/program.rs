@@ -21,10 +21,9 @@ use temporal_workflow::{
     MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
-use tokio::sync::Semaphore;
 use tools::program::contracts::ContractError;
 
-use crate::code::{CodeRunError, CodeRunner, read_bounded};
+use crate::code::{CodeRunError, close_scope, read_bounded};
 
 /// The contract bindings a program runs with, as stored by reference on
 /// its descriptor.
@@ -76,32 +75,16 @@ const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
 pub struct ProgramRunner {
     client: Client,
     blobs: Arc<dyn BlobStore>,
-    capacity: Arc<Semaphore>,
     cleanup_timeout: Duration,
 }
 
 impl ProgramRunner {
-    pub fn with_shared_capacity(
-        client: Client,
-        blobs: Arc<dyn BlobStore>,
-        capacity: Arc<Semaphore>,
-        cleanup_timeout: Duration,
-    ) -> Self {
+    pub fn new(client: Client, blobs: Arc<dyn BlobStore>, cleanup_timeout: Duration) -> Self {
         Self {
             client,
             blobs,
-            capacity,
             cleanup_timeout,
         }
-    }
-
-    fn code_runner(&self) -> CodeRunner {
-        CodeRunner::with_shared_capacity(
-            self.client.clone(),
-            self.blobs.clone(),
-            self.capacity.clone(),
-            self.cleanup_timeout,
-        )
     }
 
     /// Close the run's scope and collect terminal outcomes.
@@ -111,9 +94,7 @@ impl ProgramRunner {
         execution_id: &str,
         latest: Option<CodeToolScopeReport>,
     ) -> (Option<CodeToolScopeReport>, Option<String>) {
-        self.code_runner()
-            .cleanup(code_tools, execution_id, latest)
-            .await
+        close_scope(code_tools, execution_id, latest, None, self.cleanup_timeout).await
     }
 
     /// What a workflow needs to run the program itself, with the pins
@@ -275,10 +256,14 @@ impl ProgramRunner {
             },
             _ => None,
         };
-        let (scope, close_error) = self
-            .code_runner()
-            .close_scope(&code_tools, &descriptor.execution_id, None, program_context)
-            .await;
+        let (scope, close_error) = close_scope(
+            &code_tools,
+            &descriptor.execution_id,
+            None,
+            program_context,
+            self.cleanup_timeout,
+        )
+        .await;
         CodeRunReport {
             execution: report,
             scope,

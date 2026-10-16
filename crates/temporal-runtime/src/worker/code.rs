@@ -74,14 +74,6 @@ impl CodeWorkerActivities {
         })
     }
 
-    pub(super) fn universes(&self) -> &WorkerUniverses {
-        &self.universes
-    }
-
-    pub(super) fn capacity(&self) -> Arc<Semaphore> {
-        self.capacity.clone()
-    }
-
     fn runner(&self, api: &GatewayAgentApi) -> CodeRunner {
         CodeRunner::with_shared_capacity(
             api.temporal_client().clone(),
@@ -195,60 +187,6 @@ impl CodeWorkerActivities {
             result = &mut work => result,
             () = &mut heartbeats => unreachable!("heartbeats run until activity exits"),
         }
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_PREPARE)]
-    pub async fn program_prepare(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramPrepareActivityRequest,
-    ) -> Result<temporal_workflow::ProgramPrepareActivityResult, ActivityError> {
-        super::program::prepare_activity(&self, ctx, request).await
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_LOAD)]
-    pub async fn program_load(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramLoadActivityRequest,
-    ) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
-        super::program::load_activity(&self, ctx, request).await
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ADMIT)]
-    pub async fn program_admit(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramAdmitActivityRequest,
-    ) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
-        super::program::admit_activity(&self, ctx, request).await
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_COLLECT)]
-    pub async fn program_collect(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramCollectActivityRequest,
-    ) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
-        super::program::collect_activity(&self, ctx, request).await
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
-    pub async fn program_conclude(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramConcludeActivityRequest,
-    ) -> Result<temporal_workflow::ProgramAttemptActivityResult, ActivityError> {
-        super::program::conclude_activity(&self, ctx, request).await
-    }
-
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_FINALIZE)]
-    pub async fn program_finalize(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        request: temporal_workflow::ProgramFinalizeActivityRequest,
-    ) -> Result<PromiseResolution, ActivityError> {
-        super::program::finalize_activity(&self, ctx, request).await
     }
 }
 
@@ -884,17 +822,14 @@ fn model_report(report: &DetailedCodeReport, report_ref: &BlobRef) -> Value {
     })
 }
 
-pub(super) fn require_activity_owner(
-    ctx: &ActivityContext,
-    execution_id: &str,
-) -> Result<(), ActivityError> {
+fn require_activity_owner(ctx: &ActivityContext, execution_id: &str) -> Result<(), ActivityError> {
     if ctx.info().workflow_id.as_deref() != Some(execution_id) {
         return Err(non_retryable("code activity workflow identity mismatch"));
     }
     Ok(())
 }
 
-pub(super) fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
+fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
     if attempt != 1 {
         return Err(non_retryable(
             "JavaScript execution cannot be retried; prior effect outcomes may be unknown",
@@ -903,7 +838,7 @@ pub(super) fn validate_attempt(attempt: u32) -> Result<(), ActivityError> {
     Ok(())
 }
 
-pub(super) async fn heartbeat(ctx: &ActivityContext) {
+async fn heartbeat(ctx: &ActivityContext) {
     let mut ticks =
         tokio::time::interval(temporal_workflow::ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL);
     loop {
@@ -914,11 +849,11 @@ pub(super) async fn heartbeat(ctx: &ActivityContext) {
     }
 }
 
-pub(super) fn retryable(error: impl std::fmt::Display) -> ActivityError {
+fn retryable(error: impl std::fmt::Display) -> ActivityError {
     ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(error.to_string())))
 }
 
-pub(super) fn non_retryable(error: impl std::fmt::Display) -> ActivityError {
+fn non_retryable(error: impl std::fmt::Display) -> ActivityError {
     ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
         error.to_string()
     )))
@@ -1398,25 +1333,5 @@ mod tests {
             CodeWorkerActivities::code_finalize.name(),
             temporal_workflow::WorkflowActivities::code_finalize.name()
         );
-        for (worker, workflow) in [
-            (
-                CodeWorkerActivities::program_load.name(),
-                temporal_workflow::WorkflowActivities::program_load.name(),
-            ),
-            (
-                CodeWorkerActivities::program_admit.name(),
-                temporal_workflow::WorkflowActivities::program_admit.name(),
-            ),
-            (
-                CodeWorkerActivities::program_collect.name(),
-                temporal_workflow::WorkflowActivities::program_collect.name(),
-            ),
-            (
-                CodeWorkerActivities::program_conclude.name(),
-                temporal_workflow::WorkflowActivities::program_conclude.name(),
-            ),
-        ] {
-            assert_eq!(worker, workflow);
-        }
     }
 }
