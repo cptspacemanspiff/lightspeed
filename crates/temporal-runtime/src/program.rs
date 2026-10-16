@@ -13,11 +13,11 @@ use std::{
 };
 
 use harness::{BlobRef, storage::BlobStore};
-use program_engine::{HostCompletion, HostError, HostRequest};
+use program_engine::{HostCancel, HostCompletion, HostError, HostRequest};
 use serde_json::Value;
 use temporal_workflow::{
-    CodeToolCallOutcome as RecordedOutcome, CodeToolClient, CodeToolRejectionKind,
-    CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
+    CancelCodeToolRequest, CodeToolCallOutcome as RecordedOutcome, CodeToolClient,
+    CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
     MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
@@ -188,14 +188,15 @@ impl ProgramRunner {
         })
     }
 
-    /// Admit one step's requests to the run's scope, in issue order, and
-    /// return the failures the program receives for those not admitted. A
-    /// transport failure is returned as an error so the step is retried;
-    /// admission is idempotent per request id.
+    /// Admit one step's requests to the run's scope, in issue order, then
+    /// send its cancels, and return the failures the program receives for
+    /// requests not admitted. A transport failure is returned as an error so
+    /// the step is retried; admission and cancels are idempotent.
     pub async fn admit_step(
         &self,
         descriptor: &ProgramRunDescriptor,
         requests: Vec<HostRequest>,
+        cancels: Vec<HostCancel>,
     ) -> Result<Vec<HostCompletion>, AdmitStepError> {
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
@@ -212,6 +213,45 @@ impl ProgramRunner {
                     }
                     rejected.push(completion);
                 }
+            }
+        }
+        for cancel in cancels {
+            let target = match cancel {
+                HostCancel::Call { request_id } => {
+                    harness::CodeToolCancelTarget::Call { request_id }
+                }
+                HostCancel::Promise { promise_id } => {
+                    // Handle ids come from the session; a malformed one is
+                    // refused like any cancel the session would refuse.
+                    let Ok(promise_id) = harness::PromiseId::try_new(promise_id.clone()) else {
+                        tracing::warn!(%promise_id, "program cancel names no promise");
+                        continue;
+                    };
+                    harness::CodeToolCancelTarget::Promise { promise_id }
+                }
+            };
+            let sent = code_tools
+                .cancel(
+                    CancelCodeToolRequest {
+                        execution_id: descriptor.execution_id.clone(),
+                        target: target.clone(),
+                    },
+                    Default::default(),
+                )
+                .await
+                .map_err(|error| {
+                    AdmitStepError::Transport(format!("cancel {target:?}: {error}"))
+                })?;
+            // A refused cancel changes nothing the program can see: its
+            // target was never admitted (its refusal reaches the program as
+            // that call's failure) or is not the program's to cancel.
+            if let Err(rejection) = sent {
+                tracing::warn!(
+                    execution_id = %descriptor.execution_id,
+                    ?target,
+                    %rejection,
+                    "program cancel refused"
+                );
             }
         }
         Ok(rejected)

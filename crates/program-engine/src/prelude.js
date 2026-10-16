@@ -1,4 +1,4 @@
-(function (send, keep, catalogJson, programJson) {
+(function (send, cancelHost, keep, catalogJson, programJson) {
     "use strict";
     // Capture intrinsics before user code can replace globals or prototypes.
     const parse = JSON.parse;
@@ -74,6 +74,39 @@
         });
         return { request, promise };
     }
+    // Every call's promise has `cancel()`. A cancel is a request: the call
+    // still settles exactly once, with its result if that came first.
+    // `await promise.cancel()` waits until it has settled and reports how:
+    // `cancelled`, `resolved` (it finished first) or `failed`. The promise
+    // itself stays the authority on the outcome.
+    async function settledStatus(promise, cancelledKind) {
+        try {
+            await promise;
+            return freeze({ status: "resolved" });
+        } catch (error) {
+            const kind = error !== null && typeof error === "object" ? error.kind : undefined;
+            return freeze({ status: kind === cancelledKind ? "cancelled" : "failed" });
+        }
+    }
+    function withCancel(promise, request) {
+        define(promise, "cancel", {
+            value: freeze(async function () {
+                cancelHost("call", request);
+                return await settledStatus(promise, "tool_cancelled");
+            }),
+        });
+        return promise;
+    }
+    // A call as `env` exposes it: argument errors reject its promise.
+    function call(id, args) {
+        let issued;
+        try {
+            issued = invoke(id, args);
+        } catch (error) {
+            return NativePromise.reject(error);
+        }
+        return withCancel(issued.promise, issued.request);
+    }
     const catalog = parse(catalogJson);
     for (let i = 0; i < catalog.length; i++) {
         bindingIds[catalog[i].name] = catalog[i].binding_id;
@@ -94,20 +127,28 @@
             const id = binding.binding_id;
             if (binding.name === "time.sleep") {
                 sleepId = id;
-                place(env, binding.name, freeze(async function (args) {
-                    return await sleep(args);
+                place(env, binding.name, freeze(function (args) {
+                    return sleep(args);
                 }));
                 continue;
             }
             if (binding.name === "input.open") {
-                place(env, binding.name, freeze(async function (spec) {
-                    const opened = await invoke(id, spec).promise;
-                    return inputHandle(opened.executionId, opened.promise);
+                place(env, binding.name, freeze(function (spec) {
+                    let issued;
+                    try {
+                        issued = invoke(id, spec);
+                    } catch (error) {
+                        return NativePromise.reject(error);
+                    }
+                    const opened = issued.promise.then(function (opened) {
+                        return inputHandle(opened.executionId, opened.promise);
+                    });
+                    return withCancel(opened, issued.request);
                 }));
                 continue;
             }
-            place(env, binding.name, freeze(async function (args) {
-                return await invoke(id, args).promise;
+            place(env, binding.name, freeze(function (args) {
+                return call(id, args);
             }));
         }
         return deepFreeze(env);
@@ -137,11 +178,21 @@
     // `time.sleep` is one durable call that completes once its delay has
     // elapsed; the clock is clamped to its deadline.
     let sleepId = null;
-    async function sleep(args) {
-        if (sleepId === null) throw new NativeError("Waiting requires the time.sleep contract");
-        const slept = await invoke(sleepId, args).promise;
-        advance(slept.fire_at_ms);
-        return slept;
+    function sleep(args) {
+        if (sleepId === null) {
+            return NativePromise.reject(new NativeError("Waiting requires the time.sleep contract"));
+        }
+        let issued;
+        try {
+            issued = invoke(sleepId, args);
+        } catch (error) {
+            return NativePromise.reject(error);
+        }
+        const slept = issued.promise.then(function (slept) {
+            advance(slept.fire_at_ms);
+            return slept;
+        });
+        return withCancel(slept, issued.request);
     }
 
     // An open input request. Its operations are ordinary calls: `answer`
@@ -195,8 +246,11 @@
                 const to = args === null || typeof args !== "object" ? undefined : args.to;
                 return await contractCall("input.reassign", { id, to });
             },
+            // Withdraw the request, and wait until it has settled: withdrawn,
+            // or answered if the answer came first.
             cancel: async function () {
-                await contractCall("promise.cancel", { promises: [promise] });
+                cancelHost("promise", promise);
+                return await settledStatus(answer(), "input_cancelled");
             },
             // Remind every `every_ms` until answered; after `max` reminders
             // (default: no limit) wait, reassign to `to`, or cancel.
@@ -396,9 +450,12 @@
             if (!(delay >= 0)) delay = 0;
             delay = floor(delay);
             const id = ++timerSeq;
-            timers[id] = true;
             const tick = function () {
-                sleep({ ms: delay }).then(function () {
+                // The timer holds its current wait, so clearing it cancels
+                // the wait as well as the callback.
+                const waiting = sleep({ ms: delay });
+                timers[id] = waiting;
+                waiting.then(function () {
                     if (!timers[id]) return;
                     if (!repeat) delete timers[id];
                     try {
@@ -415,7 +472,12 @@
             tick();
             return id;
         }
-        const clear = function (id) { delete timers[id]; };
+        const clear = function (id) {
+            const waiting = timers[id];
+            if (waiting === undefined) return;
+            delete timers[id];
+            if (typeof waiting.cancel === "function") waiting.cancel();
+        };
         globalThis.setTimeout = function (callback, ms) {
             return schedule(callback, ms, reflectApply(arraySlice, arguments, [2]), false);
         };

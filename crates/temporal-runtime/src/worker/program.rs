@@ -492,7 +492,10 @@ async fn admit_activity(
     let universe_id = universe_of(&descriptor)?;
     heartbeating(&ctx, async {
         let api = activities.universes.api_for(universe_id).await?;
-        match runner(&api).admit_step(&descriptor, request.requests).await {
+        match runner(&api)
+            .admit_step(&descriptor, request.requests, request.cancels)
+            .await
+        {
             Ok(rejected) => Ok(temporal_workflow::ProgramAdmitActivityResult { rejected }),
             Err(error @ AdmitStepError::Transport(_)) => Err(retryable(error)),
             Err(error @ AdmitStepError::Diverged(_)) => Err(non_retryable(error)),

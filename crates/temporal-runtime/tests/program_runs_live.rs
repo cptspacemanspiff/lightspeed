@@ -266,7 +266,7 @@ impl LosesFirstAdmit {
         self.attempts.lock().expect("attempts lock").push(attempt);
         let rejected = self
             .runner
-            .admit_step(&request.descriptor, request.requests)
+            .admit_step(&request.descriptor, request.requests, request.cancels)
             .await
             .map_err(|error| {
                 ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
@@ -1096,9 +1096,9 @@ const RACED_PROGRAM: &str = r#"
         async run(input, env) {
             const ask = await env.input.open({ ask: "Ship " + input.claim + "?", assignees: ["alice"] });
             await env.time.sleep({ ms: input.wait_ms });
-            await ask.cancel();
+            const cancelled = await ask.cancel();
             try {
-                return { claim: input.claim, slept: input.wait_ms, answer: await ask.answer() };
+                return { claim: input.claim, slept: input.wait_ms, cancelled, answer: await ask.answer() };
             } catch (error) {
                 return { claim: input.claim, slept: input.wait_ms, kind: error.kind };
             }
@@ -1157,6 +1157,12 @@ async fn an_answer_saved_before_a_withdrawal_reaches_the_program() -> anyhow::Re
             let output =
                 read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
             assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+            // The cancel reports what it found once the request settled.
+            assert_eq!(
+                output["cancelled"],
+                json!({"status": "resolved"}),
+                "{output}"
+            );
             let requests = api
                 .list_inbox_requests(api::InboxRequestListParams {
                     session: Some(session_id.to_string()),
@@ -1313,6 +1319,187 @@ async fn a_scoped_call_is_cancelled_alone_and_records_one_outcome() -> anyhow::R
             })
         },
     )
+    .await
+}
+
+const OWN_CANCEL_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const nap = env.time.sleep({ ms: 600000 });
+            await env.time.sleep({ ms: 10 });
+            const cancelled = await nap.cancel();
+            let kind = null;
+            try { await nap; } catch (error) { kind = error.kind; }
+            return { claim: input.claim, slept: 0, cancelled, kind };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_cancels_its_own_call_and_a_lost_cancel_is_sent_again() -> anyhow::Result<()> {
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    with_program_workers_losing(
+        InputTimeouts::default(),
+        Some(LostResult::Admit(attempts.clone())),
+        |api, store, session_id, _| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        OWN_CANCEL_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(&api, &session_id, json!({"claim": "own"})).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                assert_eq!(
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                    json!({
+                        "claim": "own",
+                        "slept": 0,
+                        "cancelled": {"status": "cancelled"},
+                        "kind": "tool_cancelled",
+                    })
+                );
+                // Both steps' admissions ran twice, the cancel's included,
+                // and the session recorded the cancel once.
+                assert_eq!(*attempts.lock().expect("attempts lock"), [1, 2, 1, 2]);
+                let mut requested = 0;
+                let mut after = None;
+                loop {
+                    let page = store
+                        .read_after(harness::storage::ReadSessionEvents {
+                            session_id: session_id.clone(),
+                            after,
+                            limit: 1000,
+                        })
+                        .await?;
+                    for entry in page.entries {
+                        if matches!(
+                            harness::CoreAgentCodec.decode_event(&entry.event)?,
+                            harness::CoreAgentEvent::CodeTool(
+                                harness::CodeToolEvent::CallCancelRequested { .. }
+                            )
+                        ) {
+                            requested += 1;
+                        }
+                    }
+                    if page.complete {
+                        break;
+                    }
+                    after = page.next_after;
+                }
+                assert_eq!(requested, 1);
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+const FIRST_OF_THREE_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const asks = await Promise.all(
+                ["alice", "bob", "carol"].map(to => env.input.open({ ask: "Ship?", assignees: [to] }))
+            );
+            const first = await Promise.any(
+                asks.map(ask => ask.answer().then(answer => ({ id: ask.id, answer })))
+            );
+            const others = await Promise.all(
+                asks.filter(ask => ask.id !== first.id).map(ask => ask.cancel())
+            );
+            return { claim: input.claim, slept: 0, approved: first.answer.approved, others };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn the_first_of_three_approvers_decides_and_the_other_requests_are_withdrawn()
+-> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, FIRST_OF_THREE_PROGRAM, OPENING_CONTRACTS),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(&api, &session_id, json!({"claim": "ship"})).await?;
+            let requests = wait_for_requests(&api, &session_id, 3).await?;
+            let bob = requests
+                .iter()
+                .find(|request| request.assignees == ["bob".to_owned()])
+                .ok_or_else(|| anyhow::anyhow!("no request for bob: {requests:?}"))?;
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: bob.request_id.clone(),
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                json!({
+                    "claim": "ship",
+                    "slept": 0,
+                    "approved": true,
+                    "others": [{"status": "cancelled"}, {"status": "cancelled"}],
+                })
+            );
+            // Each withdrawal settled before the program went on, so the
+            // inbox already shows it.
+            let mut statuses = api
+                .list_inbox_requests(api::InboxRequestListParams {
+                    session: Some(session_id.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .result
+                .requests
+                .into_iter()
+                .map(|request| (request.assignees, request.status))
+                .collect::<Vec<_>>();
+            statuses.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(
+                statuses,
+                [
+                    (vec!["alice".to_owned()], api::InputRequestStatus::Cancelled),
+                    (vec!["bob".to_owned()], api::InputRequestStatus::Answered),
+                    (vec!["carol".to_owned()], api::InputRequestStatus::Cancelled),
+                ]
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
     .await
 }
 

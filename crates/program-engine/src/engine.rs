@@ -3,7 +3,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     rc::Rc,
 };
 
@@ -17,6 +17,14 @@ pub(crate) const PRELUDE: &str = include_str!("prelude.js");
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) pending: BTreeSet<String>,
+    /// Calls whose cancel the program asked for, so it is sent or settled
+    /// once.
+    pub(crate) cancelled: BTreeSet<String>,
+    /// Promises whose cancel the program asked for.
+    pub(crate) cancelled_promises: BTreeSet<String>,
+    /// Calls cancelled in the step that issued them: they never reach the
+    /// host and are delivered to the program as cancelled, in order.
+    pub(crate) local: VecDeque<HostCompletion>,
     pub(crate) failure: Option<ExecutionError>,
     pub(crate) calls: u32,
     pub(crate) jobs: u64,
@@ -133,9 +141,11 @@ pub(crate) fn prepare_context<'js>(
     state: Rc<RefCell<State>>,
     fatal: Rc<Cell<bool>>,
     outbox: Rc<RefCell<Vec<HostRequest>>>,
+    cancels: Rc<RefCell<Vec<HostCancel>>>,
 ) -> Result<Prepared<'js>, ExecutionError> {
     let ctx = ctx.clone();
     let send_state = state.clone();
+    let cancel_outbox = outbox.clone();
     let send_fatal = fatal.clone();
     let send_limits = input.limits.clone();
     let allowed: HashMap<_, _> = input
@@ -191,6 +201,66 @@ pub(crate) fn prepare_context<'js>(
         },
     )
     .map_err(|failure| js_error(&ctx, failure))?;
+    // `cancel(kind, id)`: the program cancels a call or a held promise. A
+    // call still in this step's outbox is withdrawn and settles here; one
+    // the host has admitted, and a promise, are cancelled by the host.
+    let cancel_state = state.clone();
+    let cancel_fatal = fatal.clone();
+    let cancel = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, kind: String, id: String| -> rquickjs::Result<()> {
+            let mut state = cancel_state.borrow_mut();
+            match kind.as_str() {
+                "call" => {
+                    if !issued(&state, &id) {
+                        return Err(fail_callback(
+                            &ctx,
+                            &mut state,
+                            &cancel_fatal,
+                            error(ExecutionErrorKind::Internal, "cancel of an unissued call"),
+                        ));
+                    }
+                    if !state.pending.contains(&id) || !state.cancelled.insert(id.clone()) {
+                        return Ok(());
+                    }
+                    let mut outbox = cancel_outbox.borrow_mut();
+                    if let Some(index) = outbox.iter().position(|request| request.request_id == id)
+                    {
+                        outbox.remove(index);
+                        state.local.push_back(HostCompletion {
+                            request_id: id,
+                            outcome: Err(HostError {
+                                kind: CANCELLED_CALL_KIND.into(),
+                                message: "call was cancelled before it was sent".into(),
+                                value: None,
+                            }),
+                            completed_at_ms: None,
+                        });
+                    } else {
+                        cancels
+                            .borrow_mut()
+                            .push(HostCancel::Call { request_id: id });
+                    }
+                    Ok(())
+                }
+                "promise" => {
+                    if state.cancelled_promises.insert(id.clone()) {
+                        cancels
+                            .borrow_mut()
+                            .push(HostCancel::Promise { promise_id: id });
+                    }
+                    Ok(())
+                }
+                _ => Err(fail_callback(
+                    &ctx,
+                    &mut state,
+                    &cancel_fatal,
+                    error(ExecutionErrorKind::Internal, "unknown cancel target"),
+                )),
+            }
+        },
+    )
+    .map_err(|failure| js_error(&ctx, failure))?;
     // `ctx.setContext`: keeps the program's context for the host. An
     // oversized value is an ordinary exception the program can catch.
     let keep_state = state.clone();
@@ -218,7 +288,7 @@ pub(crate) fn prepare_context<'js>(
     let program = serde_json::to_string(&input.program)
         .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()))?;
     let controls: Object = prelude
-        .call((send, keep, catalog, program))
+        .call((send, cancel, keep, catalog, program))
         .map_err(|failure| js_error(&ctx, failure))?;
     let deliver: Function = controls
         .get("deliver")

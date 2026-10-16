@@ -122,6 +122,10 @@ pub enum ProgramLoadActivityResult {
 pub struct ProgramAdmitActivityRequest {
     pub descriptor: ProgramRunDescriptor,
     pub requests: Vec<program_engine::HostRequest>,
+    /// Cancels the step asked for, sent after its requests: each names a
+    /// call from an earlier step, or a promise the program holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancels: Vec<program_engine::HostCancel>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

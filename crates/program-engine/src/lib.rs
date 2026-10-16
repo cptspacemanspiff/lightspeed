@@ -17,6 +17,10 @@ mod instance;
 
 pub use instance::{ProgramInstance, Step, StepBudget};
 
+/// The error kind of a call that was cancelled before its outcome was
+/// recorded, as the host reports a cancelled call.
+pub const CANCELLED_CALL_KIND: &str = "tool_cancelled";
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -75,6 +79,17 @@ pub struct HostRequest {
     pub request_id: String,
     pub binding_id: String,
     pub arguments: Value,
+}
+
+/// A program's request to cancel something it holds: one of its calls the
+/// host already admitted, or a promise it has a handle to (an opened input
+/// request). A call cancelled in the step that issued it never reaches the
+/// host: it settles in the program as cancelled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum HostCancel {
+    Call { request_id: String },
+    Promise { promise_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
