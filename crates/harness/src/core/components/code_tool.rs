@@ -1125,6 +1125,22 @@ pub fn defer_code_tool_call_proposals(
     )])
 }
 
+/// Whether a waiting call is held until its joined reply's producer confirms
+/// a requested cancellation. Neither a cancel nor its deadline wakes it
+/// again: the reply's settlement does, with the outcome the producer
+/// recorded first.
+pub fn code_tool_awaits_cancel_confirmation(state: &CoreAgentState, call: &CodeToolCall) -> bool {
+    let CodeToolCallStatus::Waiting {
+        suspension: ToolBatchSuspension::JoinedWorkflowCalls { calls, .. },
+    } = &call.status
+    else {
+        return false;
+    };
+    calls
+        .iter()
+        .any(|joined| state.promises.cancel_requested.contains(&joined.promise_id))
+}
+
 pub fn code_tool_wake(
     state: &CoreAgentState,
     origin: &CodeToolOrigin,
@@ -1135,6 +1151,9 @@ pub fn code_tool_wake(
     let CodeToolCallStatus::Waiting { suspension } = &call.status else {
         return None;
     };
+    if code_tool_awaits_cancel_confirmation(state, call) {
+        return None;
+    }
     if scope.cancel_requested || validate_live_owner(state, &scope.spec).is_err() {
         return Some(WakeReason::Cancelled);
     }
@@ -1272,23 +1291,32 @@ pub fn resume_code_tool_call_proposals(
         // so the receiver/owned workflow is cancelled as well as the waiter.
         // Already terminal replies remain authoritative; model-owned submitted
         // promises belong to separate acknowledged calls and are untouched.
+        // A reply whose producer confirms cancellations is never cancelled
+        // here: the session requests the cancellation first
+        // (`RequestPromiseCancel`) and resumes the call once it settles.
         if matches!(wake, Some(WakeReason::Cancelled | WakeReason::Timeout)) {
             for joined in calls {
-                if state
+                if !state
                     .promises
                     .promises
                     .get(&joined.promise_id)
-                    .is_some_and(|promise| {
-                        promise.status == PromiseStatus::Pending
-                            && promise.ownership == PromiseOwnership::Runtime
-                    })
+                    .is_some_and(|promise| promise.ownership == PromiseOwnership::Runtime)
                 {
-                    proposals.push(CoreAgentEventProposal::new(
-                        joins(state, &origin)?,
-                        CoreAgentEvent::Promise(PromiseEvent::Cancelled {
-                            promise_id: joined.promise_id.clone(),
-                        }),
-                    ));
+                    continue;
+                }
+                match crate::promise_cancel_event(state, &joined.promise_id) {
+                    Some(event @ PromiseEvent::Cancelled { .. }) => {
+                        proposals.push(CoreAgentEventProposal::new(
+                            joins(state, &origin)?,
+                            CoreAgentEvent::Promise(event),
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "code tool joined reply must have its cancellation confirmed first",
+                        ));
+                    }
+                    None => {}
                 }
             }
         }
@@ -1359,20 +1387,18 @@ pub fn close_code_tool_scope_proposals(
             } = &call.status
             {
                 for joined in calls {
-                    if state
+                    if !state
                         .promises
                         .promises
                         .get(&joined.promise_id)
-                        .is_some_and(|promise| {
-                            promise.status == PromiseStatus::Pending
-                                && promise.ownership == PromiseOwnership::Runtime
-                        })
+                        .is_some_and(|promise| promise.ownership == PromiseOwnership::Runtime)
                     {
+                        continue;
+                    }
+                    if let Some(event) = crate::promise_cancel_event(state, &joined.promise_id) {
                         proposals.push(CoreAgentEventProposal::new(
                             joins(state, &call.spec.origin)?,
-                            CoreAgentEvent::Promise(PromiseEvent::Cancelled {
-                                promise_id: joined.promise_id.clone(),
-                            }),
+                            CoreAgentEvent::Promise(event),
                         ));
                     }
                 }

@@ -15724,6 +15724,23 @@
             "type": "object"
           },
           {
+            "description": "The promise's cancellation was asked of the workflow that produces\nit. The promise stays pending until that workflow settles it: as\ncancelled, or with an answer it recorded first.",
+            "properties": {
+              "promiseId": {
+                "type": "string"
+              },
+              "type": {
+                "const": "promiseCancelRequested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "promiseId"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "runId": {
                 "type": "string"

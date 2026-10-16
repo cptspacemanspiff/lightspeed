@@ -1918,13 +1918,17 @@ fn tool_call_completed_proposals_inner(
                         promise_id
                     )));
                 }
-                if promise.status.is_terminal() || !resolved_promises.insert(promise_id.clone()) {
+                if !resolved_promises.insert(promise_id.clone()) {
                     continue;
                 }
-                promise_proposals.push(CoreAgentEventProposal::new(
-                    joins.clone(),
-                    CoreAgentEvent::Promise(PromiseEvent::Cancelled { promise_id }),
-                ));
+                // A promise whose producer confirms cancellations stays
+                // pending until it does; its reply may still be an answer.
+                if let Some(event) = crate::promise_cancel_event(state, &promise_id) {
+                    promise_proposals.push(CoreAgentEventProposal::new(
+                        joins.clone(),
+                        CoreAgentEvent::Promise(event),
+                    ));
+                }
             }
             if let Some(promise_id) =
                 crate::core::components::promise::promise_id_from_detach_effect(effect)?
@@ -12948,6 +12952,222 @@ mod tests {
         assert_eq!(
             drive.state().code_tools.scopes[&execution_id].completed,
             vec!["1", "2", "3"]
+        );
+        assert_replays_identically(&drive, &log);
+    }
+
+    fn started_ask_declaration() -> crate::WorkflowToolDeclaration {
+        crate::WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: crate::WorkflowToolId::new("ask"),
+                revision: 1,
+                semantic_type: "test.ask.v1".into(),
+                tool: test_tool_spec("ask"),
+            },
+            crate::WorkflowToolTarget::Start {
+                start: crate::WorkflowStartRef {
+                    recipe_format: 1,
+                    revision: 1,
+                    recipe_ref: BlobRef::from_bytes(b"ask-recipe"),
+                    recipe_fingerprint: "test-ask-recipe".into(),
+                },
+            },
+            crate::WorkflowToolCompletion::Joined {
+                reply_schema_ref: None,
+                deadline_after_ms: 60_000,
+            },
+        )
+    }
+
+    #[test]
+    fn a_program_scope_close_withdraws_started_waits_only_when_their_workflow_confirms() {
+        let session_id = SessionId::new("program-withdraw");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), started_ask_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "ask"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = BTreeMap::from([(
+            "ask".to_owned(),
+            crate::CodeToolBinding {
+                tool_id: test_tool_id("ask"),
+                tool_name: ToolName::new("ask"),
+                contract: Some(test_contract("ask")),
+            },
+        )]);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+
+        // Two questions, each a joined call on a started workflow's reply.
+        let mut asks = Vec::new();
+        for request_id in ["1", "2"] {
+            let call = scoped_call_spec(&execution_id, request_id, "ask");
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            ));
+            let request = crate::code_tool_request(
+                drive.session_id(),
+                drive.state(),
+                &execution_id,
+                request_id,
+            )
+            .unwrap();
+            let (result, _) = code_tool_workflow_effect(&request);
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::CompleteCodeToolCall {
+                    origin: call.origin.clone(),
+                    result,
+                },
+            ));
+            let promise_id = PromiseId::from_number(request.promise_id_base);
+            assert!(crate::promise_cancel_awaits_confirmation(
+                drive.state(),
+                &drive.state().promises.promises[&promise_id]
+            ));
+            asks.push((call, promise_id));
+        }
+
+        // Closing the scope asks each workflow to withdraw its request; the
+        // replies stay pending and the waits are not woken, by the cancel or
+        // by their deadline.
+        let entries = code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CloseCodeToolScope {
+                execution_id: execution_id.clone(),
+                cancel: true,
+                program_context: None,
+            },
+        );
+        let requested = entries
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                CoreAgentEvent::Promise(PromiseEvent::CancelRequested { promise_id }) => {
+                    Some(promise_id.clone())
+                }
+                CoreAgentEvent::Promise(PromiseEvent::Cancelled { .. }) => {
+                    panic!("a confirmed cancellation must not settle at once")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requested,
+            asks.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>()
+        );
+        log.extend(entries);
+        for (call, promise_id) in &asks {
+            assert_eq!(
+                drive.state().promises.promises[promise_id].status,
+                PromiseStatus::Pending
+            );
+            assert_eq!(
+                crate::code_tool_wake(drive.state(), &call.origin, u64::MAX),
+                None
+            );
+        }
+        // Asking again changes nothing.
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::RequestPromiseCancel {
+                    promise_id: asks[0].1.clone(),
+                },
+                101,
+            )
+            .unwrap();
+        assert!(!matches!(action, CoreAgentAction::AppendEvents { .. }));
+
+        // The first person had answered before the withdrawal reached the
+        // inbox: the workflow replies with the answer, and the call records
+        // it. The second request was withdrawn: the call records cancelled.
+        for (promise_id, resolution) in [
+            (
+                asks[0].1.clone(),
+                crate::PromiseResolution::Resolved {
+                    payload_ref: Some(BlobRef::from_bytes(b"approved")),
+                },
+            ),
+            (asks[1].1.clone(), crate::PromiseResolution::Cancelled),
+        ] {
+            let action = drive
+                .admit_command(
+                    CoreAgentCommand::ResolvePromise {
+                        promise_id,
+                        resolution,
+                    },
+                    110,
+                )
+                .unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        assert!(drive.state().promises.cancel_requested.is_empty());
+        for (call, expected) in [
+            (&asks[0].0, ToolCallStatus::Succeeded),
+            (&asks[1].0, ToolCallStatus::Cancelled),
+        ] {
+            // The settled reply wakes the call (the scope is cancelled, so
+            // the reason says so); its result is what the reply recorded.
+            let wake = crate::code_tool_wake(drive.state(), &call.origin, 111);
+            assert_eq!(wake, Some(crate::WakeReason::Cancelled));
+            let result = crate::code_tool_joined_result(drive.state(), &call.origin, true).unwrap();
+            assert_eq!(result.status, expected);
+            let action = drive
+                .admit_command(
+                    CoreAgentCommand::ResumeCodeToolCall {
+                        origin: call.origin.clone(),
+                        result,
+                        claim_observed_at_ms: 111,
+                    },
+                    111,
+                )
+                .unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        assert_eq!(
+            drive.state().code_tools.scopes[&execution_id].completed,
+            vec!["1", "2"]
         );
         assert_replays_identically(&drive, &log);
     }

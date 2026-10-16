@@ -960,6 +960,11 @@ impl<'a> CoreAgentProjector<'a> {
                         promise_id: promise_id.as_str().to_owned(),
                     })
                 }
+                harness::PromiseEvent::CancelRequested { promise_id } => {
+                    Ok(SessionEventKindView::PromiseCancelRequested {
+                        promise_id: promise_id.as_str().to_owned(),
+                    })
+                }
             },
             CoreAgentEvent::Turn(event) => match event {
                 TurnEvent::Started { turn_id, run_id } => Ok(SessionEventKindView::TurnStarted {

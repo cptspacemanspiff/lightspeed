@@ -208,10 +208,11 @@ pub(super) async fn flush_pending_promise_cancellations(
                 completion_key,
                 ..
             } => {
-                // Best-effort per-key cancellation fact to the bound
-                // receiver: the promise is already terminal in the session,
-                // so a late reply is a no-op. This never cancels the shared
-                // receiver workflow execution.
+                // Best-effort per-key cancellation fact to the producer.
+                // Usually the promise is already terminal in the session, so
+                // a late reply is a no-op; a promise whose producer confirms
+                // cancellations stays pending until that reply settles it.
+                // This never cancels the shared receiver workflow execution.
                 let Some((universe_id, _)) = split_workflow_id(ctx.workflow_id()) else {
                     continue;
                 };

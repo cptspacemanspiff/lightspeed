@@ -11,7 +11,7 @@ use crate::workflows::WorkflowContextExt as _;
 use crate::{CodeToolRejection, CodeToolRejectionKind as Rejection};
 use harness::{CodeToolCallStatus, CodeToolOrigin, ToolCallStatus, ToolParallelism};
 use std::{pin::Pin, task::Poll};
-use temporalio_sdk::{ActivityExecutionError, CancellableFuture};
+use temporalio_sdk::{ActivityCancellationType, ActivityExecutionError, CancellableFuture};
 
 type Key = (String, String);
 type AdmissionResult = Result<(), CodeToolRejection>;
@@ -669,6 +669,36 @@ async fn reconcile_waits(ctx: &mut WorkflowContext<AgentSessionWorkflow>) -> any
             .collect::<Vec<_>>()
     });
     for (origin, suspension, wake, sleep) in ready {
+        // A cancelled or expired wait on a reply whose producer confirms
+        // cancellations asks the producer first; the call resumes once the
+        // reply settles, with whatever the producer recorded.
+        if let harness::ToolBatchSuspension::JoinedWorkflowCalls { calls, .. } = &suspension
+            && wake != harness::WakeReason::Terminal
+        {
+            let (requests, confirmed) = ctx.state(|state| {
+                let events = calls
+                    .iter()
+                    .filter_map(|joined| {
+                        harness::promise_cancel_event(&state.core_state, &joined.promise_id)
+                            .map(|event| (joined.promise_id.clone(), event))
+                    })
+                    .collect::<Vec<_>>();
+                let confirmed = events.iter().any(|(_, event)| {
+                    matches!(event, harness::PromiseEvent::CancelRequested { .. })
+                });
+                (
+                    events.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    confirmed,
+                )
+            });
+            if confirmed {
+                for promise_id in requests {
+                    apply_internal(ctx, CoreAgentCommand::RequestPromiseCancel { promise_id })
+                        .await?;
+                }
+                continue;
+            }
+        }
         let results =
             ctx.state(|state| awaits::promise_snapshot(suspension.spec(), &state.core_state));
         let result = match &suspension {
@@ -776,6 +806,7 @@ pub(super) fn nearest_wake_ms(state: &AgentSessionWorkflow) -> Option<u64> {
         .scopes
         .values()
         .flat_map(|scope| scope.calls.values())
+        .filter(|call| !harness::code_tool_awaits_cancel_confirmation(&state.core_state, call))
         .filter_map(|call| match &call.status {
             CodeToolCallStatus::Waiting { suspension } => suspension.spec().deadline_at_ms,
             _ => None,
@@ -872,15 +903,31 @@ struct Inflight<'a> {
 }
 fn start_invoke<'a>(
     ctx: &'a WorkflowContext<AgentSessionWorkflow>,
+    origin: &CodeToolOrigin,
     request: &harness::ToolInvocationCallRequest,
 ) -> TaskFuture<'a> {
+    let mut options = crate::tool_call_activity_options(request.execution);
+    // A program run's calls record what the tool really did: a cancelled
+    // activity is waited for until it reports, so a call that finished
+    // anyway is recorded as finished, never assumed cancelled.
+    if ctx.state(|state| run_owned(state, origin)) {
+        options.cancellation_type = ActivityCancellationType::WaitCancellationCompleted;
+    }
     TaskFuture::Invoke(Box::pin(ctx.execute_activity(
         WorkflowActivities::code_tool_invoke,
         crate::CodeToolInvokeActivityRequest {
             request: request.clone(),
         },
-        crate::tool_call_activity_options(request.execution),
+        options,
     )))
+}
+fn run_owned(state: &AgentSessionWorkflow, origin: &CodeToolOrigin) -> bool {
+    state
+        .core_state
+        .code_tools
+        .scopes
+        .get(&origin.execution_id)
+        .is_some_and(|scope| matches!(scope.spec.owner, harness::ScopeOwner::Run { .. }))
 }
 fn scope_cancelled(state: &AgentSessionWorkflow, origin: &CodeToolOrigin) -> bool {
     state
@@ -984,7 +1031,7 @@ pub(super) async fn run_dispatch_loop(
                     crate::boundary_error_blob_activity_options(),
                 )))
             } else {
-                start_invoke(&activity_ctx, &request)
+                start_invoke(&activity_ctx, &origin, &request)
             };
             inflight.push(Inflight {
                 origin,
@@ -1051,7 +1098,7 @@ pub(super) async fn run_dispatch_loop(
             TaskOutcome::Readiness(Ok(crate::AwaitEnvironmentReadyActivityResult::Ready))
                 if !cancel =>
             {
-                task.future = start_invoke(&activity_ctx, &task.request);
+                task.future = start_invoke(&activity_ctx, &task.origin, &task.request);
                 inflight.push(task);
                 continue;
             }
@@ -1068,7 +1115,7 @@ pub(super) async fn run_dispatch_loop(
                         task.request = batch
                             .call_request(0, task.request.execution)
                             .expect("single code tool call");
-                        task.future = start_invoke(&activity_ctx, &task.request);
+                        task.future = start_invoke(&activity_ctx, &task.origin, &task.request);
                         inflight.push(task);
                         continue;
                     }

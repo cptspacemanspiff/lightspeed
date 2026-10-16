@@ -1091,6 +1091,102 @@ async fn an_opened_request_is_reminded_reassigned_answered_and_withdrawn() -> an
     .await
 }
 
+const RACED_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const ask = await env.input.open({ ask: "Ship " + input.claim + "?", assignees: ["alice"] });
+            await env.time.sleep({ ms: input.wait_ms });
+            await ask.cancel();
+            try {
+                return { claim: input.claim, slept: input.wait_ms, answer: await ask.answer() };
+            } catch (error) {
+                return { claim: input.claim, slept: input.wait_ms, kind: error.kind };
+            }
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn an_answer_saved_before_a_withdrawal_reaches_the_program() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, RACED_PROGRAM, OPENING_CONTRACTS),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // The answer lands in the inbox row, but its workflow has not
+            // read it yet when the program withdraws the request: the row
+            // decides, so the program gets the answer, not a cancellation.
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "raced", "wait_ms": 4000}),
+            )
+            .await?;
+            let [request] = <[_; 1]>::try_from(wait_for_requests(&api, &session_id, 1).await?)
+                .map_err(|requests| anyhow::anyhow!("one request expected: {requests:?}"))?;
+            store
+                .answer_input_request(
+                    &request.request_id,
+                    &api::InputRequestAnswer {
+                        approved: true,
+                        value: None,
+                        comment: None,
+                        answered_by: api::Attribution::Local,
+                        answered_at_ms: 1,
+                    },
+                )
+                .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            if run.status == api::RunStatus::Failed {
+                let failure = run_failure(&store, &session_id).await?;
+                let message = match &failure.message_ref {
+                    Some(reference) => String::from_utf8_lossy(&store.read_bytes(reference).await?)
+                        .into_owned(),
+                    None => String::new(),
+                };
+                anyhow::bail!("{failure:?}: {message}");
+            }
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+            let requests = api
+                .list_inbox_requests(api::InboxRequestListParams {
+                    session: Some(session_id.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .result
+                .requests;
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request.status)
+                    .collect::<Vec<_>>(),
+                vec![api::InputRequestStatus::Answered],
+                "{requests:?}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A Streamable HTTP MCP server on loopback whose `createIssue` input
 /// schema can change between listings, recording every call it serves.
 struct McpFixture {

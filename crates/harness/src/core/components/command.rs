@@ -117,6 +117,13 @@ pub enum CoreAgentCommand {
         promise_id: PromiseId,
         resolution: PromiseResolution,
     },
+    /// Cancel a pending promise the way its producer needs: at once, or as a
+    /// request its producer confirms (`PromiseEvent::CancelRequested`). A
+    /// settled promise, or one already waiting for a confirmation, makes
+    /// this an idempotent no-op.
+    RequestPromiseCancel {
+        promise_id: PromiseId,
+    },
     /// Terminal push-delivery failure for one promise-bearing workflow-tool
     /// invocation: atomically records `WorkflowTool::DeliveryFailed` and
     /// fails every still-pending completion promise of that invocation, so a

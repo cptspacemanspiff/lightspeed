@@ -1570,6 +1570,12 @@ pub enum SessionEventKindView {
     PromiseDetached {
         promise_id: String,
     },
+    /// The promise's cancellation was asked of the workflow that produces
+    /// it. The promise stays pending until that workflow settles it: as
+    /// cancelled, or with an answer it recorded first.
+    PromiseCancelRequested {
+        promise_id: String,
+    },
     TurnStarted {
         run_id: RunId,
         turn_id: String,

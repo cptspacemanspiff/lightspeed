@@ -511,8 +511,12 @@ emissions reuse their invocation id as the emission id.
   `holder_workflow_id` is the session endpoint to signal with replies; do not
   reconstruct that id. Model arguments remain in CAS at `arguments_ref`.
 - `invocation_cancellation`: a best-effort notice that one completion Promise
-  is already cancelled. Stop the corresponding domain work when practical;
-  a later reply is ignored because the Promise is terminal.
+  is cancelled. Stop the corresponding domain work when practical. Usually
+  the Promise is already terminal and a later reply is ignored. A workflow
+  started for a program's scoped call is the exception: its Promise stays
+  pending until the workflow replies, so it must settle the reply after the
+  notice, as cancelled or with the outcome it recorded first. If it ends
+  without replying, the session's recovery poll settles the Promise.
 
 ## Producer authorization
 
