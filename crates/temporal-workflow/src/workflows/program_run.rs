@@ -1,10 +1,9 @@
-//! Durable supervision of a program run: one invocation of a program
-//! session's pinned program. Session-owned activities still execute every
-//! tool effect. An attempt runs until the program finishes or has waited
-//! only on calls for the hold window; a suspended run holds no interpreter
-//! and resumes, replaying its recorded calls, when the session reports that
-//! one of them completed. An attempt lost with its worker is retried and
-//! replays the same way.
+//! Durable execution of a program run: one invocation of a program
+//! session's pinned program, stepped inside this workflow. Session-owned
+//! activities still execute every tool effect. A waiting program holds no
+//! worker; it steps again when the session reports that one of its calls
+//! completed. A program lost with its worker replays from this workflow's
+//! history to the same point.
 
 use std::time::Duration;
 
@@ -289,7 +288,7 @@ fn scope_progress(
 
 /// Run the pinned program in this workflow. The program is stepped on the
 /// workflow thread: the requests a step issues are admitted to the run's
-/// scope by one activity, and the session's progress emissions wake the
+/// scope by one local activity, and the session's progress emissions wake the
 /// workflow to collect outcomes, which feed the next step. Every input to a
 /// step is in this workflow's history, so a replay after a lost worker or
 /// cache eviction re-runs the program to the same point, and a waiting
@@ -366,7 +365,7 @@ async fn run_program(
         if !requests.is_empty() {
             let admitted = cancellable(
                 ctx,
-                ctx.execute_activity(
+                ctx.execute_local_activity(
                     WorkflowActivities::program_admit,
                     crate::ProgramAdmitActivityRequest {
                         descriptor: descriptor.clone(),
@@ -573,9 +572,23 @@ fn preparation_options() -> ActivityOptions {
     bounded_options(Duration::from_secs(60), Duration::from_secs(90), 3)
 }
 
-/// Admission is idempotent per request id, so it retries freely.
-fn admission_options() -> ActivityOptions {
-    bounded_options(Duration::from_secs(30), Duration::from_secs(120), 5)
+/// Admission runs on the program worker inside the workflow task, so a step
+/// costs one marker instead of an activity and a second workflow task. A
+/// rerun after a lost result is safe: admission is idempotent per request id.
+/// Short tries keep a stalled session from holding the task long; the total
+/// matches the server-scheduled activity this replaced.
+fn admission_options() -> LocalActivityOptions {
+    LocalActivityOptions::builder()
+        .schedule_to_close_timeout(Duration::from_secs(120))
+        .start_to_close_timeout(Duration::from_secs(5))
+        .retry_policy(
+            temporalio_client::RetryPolicy::builder()
+                .initial_interval(Duration::from_secs(1))
+                .backoff_coefficient(2.0)
+                .maximum_interval(Duration::from_secs(5))
+                .build(),
+        )
+        .build()
 }
 
 fn collect_options() -> LocalActivityOptions {

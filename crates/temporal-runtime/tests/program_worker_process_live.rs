@@ -15,7 +15,10 @@ use harness::{
     CoreAgentIoError, CoreAgentLlm, LlmGenerationRequest, LlmGenerationResult, SessionId,
     storage::BlobStore,
 };
-use programs::{activity_attempts, admitted_tools, program_execution_id, session_state};
+use programs::{
+    activity_attempts, admitted_tools, local_activity_attempts, program_execution_id,
+    session_state,
+};
 use serde_json::{Value, json};
 use support::live::{
     LIVE_TEST_LOCK, require_storage_live_env, run_with_live_worker_builder, seed_agent_default,
@@ -165,9 +168,9 @@ fn profile(profile_id: &api::ProfileId) -> api::AgentProfileInput {
 /// Run the resuming program on a child program worker, kill that worker while
 /// the program waits on its question, answer, and finish on a replacement
 /// worker. Checks the run's output and that no call was admitted twice,
-/// then returns the Temporal attempts of each load and admission activity
-/// the run scheduled.
-async fn resume_after_losing_the_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<Vec<i32>>)> {
+/// then returns the Temporal attempts of each load activity and the attempt
+/// each local admission recorded.
+async fn resume_after_losing_the_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<u64>)> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -320,7 +323,7 @@ async fn resume_after_losing_the_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<
                         .await?;
                     *attempts_out = (
                         activity_attempts(&events, ACTIVITY_PROGRAM_LOAD),
-                        activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
+                        local_activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
                     );
                     WorkflowReplayer::new(
                         WorkflowReplayerOptions::new()
@@ -375,6 +378,6 @@ async fn a_waiting_program_resumes_on_a_new_worker_when_its_question_is_answered
     // once, none retried.
     let (loads, admissions) = resume_after_losing_the_worker().await?;
     assert_eq!(loads, [vec![1]]);
-    assert_eq!(admissions, [vec![1], vec![1]]);
+    assert_eq!(admissions, [1, 1]);
     Ok(())
 }

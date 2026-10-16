@@ -1,6 +1,8 @@
 //! Helpers for live tests of program runs: the session's reduced state, its
 //! program run's workflow, and the attempts that workflow ran.
 
+#![allow(dead_code)]
+
 use harness::{
     CoreAgentState, SessionId, WorkflowToolTarget,
     storage::{ReadSessionEvents, SessionStore},
@@ -93,5 +95,35 @@ pub fn activity_attempts(events: &[HistoryEvent], activity: &str) -> Vec<Vec<i32
                 })
                 .collect()
         })
+        .collect()
+}
+
+/// How many events of each type `events` holds.
+pub fn event_counts(events: &[HistoryEvent]) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for event in events {
+        *counts
+            .entry(format!("{:?}", event.event_type()))
+            .or_default() += 1;
+    }
+    counts
+}
+
+/// For each local `activity` recorded in `events`, the attempt its marker
+/// recorded.
+pub fn local_activity_attempts(events: &[HistoryEvent], activity: &str) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match &event.attributes {
+            Some(Attributes::MarkerRecordedEventAttributes(attributes))
+                if attributes.marker_name == "core_local_activity" =>
+            {
+                let data = attributes.details.get("data")?.payloads.first()?;
+                serde_json::from_slice::<serde_json::Value>(&data.data).ok()
+            }
+            _ => None,
+        })
+        .filter(|data| data["activity_type"] == activity)
+        .filter_map(|data| data["attempt"].as_u64())
         .collect()
 }
