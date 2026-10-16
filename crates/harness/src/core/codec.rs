@@ -195,6 +195,9 @@ fn core_agent_event_envelope_kind(event: &CoreAgentEvent) -> &'static str {
             }
             crate::CodeToolEvent::CallDeferred { .. } => "lightspeed.core.code_tool.call_deferred",
             crate::CodeToolEvent::ScopeClosed { .. } => "lightspeed.core.code_tool.scope_closed",
+            crate::CodeToolEvent::CallCancelRequested { .. } => {
+                "lightspeed.core.code_tool.call_cancel_requested"
+            }
         },
         CoreAgentEvent::WorkflowTool(event) => match event {
             crate::WorkflowToolEvent::Emitted { .. } => "lightspeed.core.workflow_tool.emitted",

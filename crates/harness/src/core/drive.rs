@@ -13173,6 +13173,252 @@ mod tests {
     }
 
     #[test]
+    fn a_program_cancels_one_call_at_a_time_and_each_records_one_outcome() {
+        let session_id = SessionId::new("program-cancel");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), started_ask_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let names = [
+            crate::PROGRAM_EXECUTE_TOOL_NAME,
+            "ask",
+            "local_echo",
+            crate::TIME_SLEEP_TOOL_ID,
+        ];
+        let tools = names
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = names[1..]
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    crate::CodeToolBinding {
+                        tool_id: ToolName::new(*name),
+                        tool_name: ToolName::new(*name),
+                        contract: Some(test_contract(name)),
+                    },
+                )
+            })
+            .collect();
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let cancel = |request_id: &str| CoreAgentCommand::CancelCodeTool {
+            execution_id: execution_id.clone(),
+            target: crate::CodeToolCancelTarget::Call {
+                request_id: request_id.to_owned(),
+            },
+        };
+
+        // A call the session has not finished: the cancel is recorded once,
+        // and a resend records nothing.
+        let echo = scoped_call_spec(&execution_id, "1", "local_echo");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall { call: echo.clone() },
+        ));
+        let entries = code_tool_commit(&mut drive, cancel("1"));
+        assert!(matches!(
+            &entries[..],
+            [CoreAgentEntry {
+                event: CoreAgentEvent::CodeTool(crate::CodeToolEvent::CallCancelRequested { .. }),
+                ..
+            }]
+        ));
+        log.extend(entries);
+        assert!(crate::code_tool_call_cancel_requested(
+            drive.state(),
+            &echo.origin
+        ));
+        let resend = drive.admit_command(cancel("1"), 101).unwrap();
+        assert!(!matches!(resend, CoreAgentAction::AppendEvents { .. }));
+        // Its result landed before the cancel took effect: the result is the
+        // outcome, and cancelling a finished call records nothing.
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
+                .unwrap();
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: echo.origin.clone(),
+                result: completed_tool_result(&request).results.remove(0),
+            },
+        ));
+        let finished = drive.admit_command(cancel("1"), 102).unwrap();
+        assert!(!matches!(finished, CoreAgentAction::AppendEvents { .. }));
+
+        // A sleep wakes cancelled at once, long before its deadline.
+        let sleep = scoped_call_spec(&execution_id, "2", crate::TIME_SLEEP_TOOL_ID);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: sleep.clone(),
+            },
+        ));
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::DeferCodeToolCall {
+                origin: sleep.origin.clone(),
+                spec: AwaitSpec {
+                    promise_ids: Vec::new(),
+                    mode: crate::AwaitMode::All,
+                    deadline_at_ms: Some(10_000),
+                },
+            },
+        ));
+        assert_eq!(
+            crate::code_tool_wake(drive.state(), &sleep.origin, 200),
+            None
+        );
+        log.extend(code_tool_commit(&mut drive, cancel("2")));
+        assert_eq!(
+            crate::code_tool_wake(drive.state(), &sleep.origin, 200),
+            Some(crate::WakeReason::Cancelled)
+        );
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResumeCodeToolCall {
+                    origin: sleep.origin.clone(),
+                    result: ToolInvocationResult {
+                        call_id: crate::code_tool_call_id(&sleep.origin),
+                        status: ToolCallStatus::Cancelled,
+                        output_ref: None,
+                        error_ref: None,
+                        model_visible_context_entries: Vec::new(),
+                        effects: Vec::new(),
+                        attachments: Vec::new(),
+                        duration_ms: None,
+                        output_bytes: None,
+                        truncated: false,
+                    },
+                    claim_observed_at_ms: 200,
+                },
+                200,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+
+        // A question wakes cancelled, but its withdrawal is the workflow's to
+        // confirm: the session asks, and the call waits for the reply.
+        let ask = scoped_call_spec(&execution_id, "3", "ask");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall { call: ask.clone() },
+        ));
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "3")
+                .unwrap();
+        let (result, _) = code_tool_workflow_effect(&request);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: ask.origin.clone(),
+                result,
+            },
+        ));
+        let reply = PromiseId::from_number(request.promise_id_base);
+        // The holder cancels the call, not the runtime-owned reply.
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::CancelCodeTool {
+                        execution_id: execution_id.clone(),
+                        target: crate::CodeToolCancelTarget::Promise {
+                            promise_id: reply.clone(),
+                        },
+                    },
+                    210,
+                )
+                .is_err()
+        );
+        log.extend(code_tool_commit(&mut drive, cancel("3")));
+        assert_eq!(
+            crate::code_tool_wake(drive.state(), &ask.origin, 210),
+            Some(crate::WakeReason::Cancelled)
+        );
+        assert!(matches!(
+            crate::promise_cancel_event(drive.state(), &reply),
+            Some(PromiseEvent::CancelRequested { .. })
+        ));
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::RequestPromiseCancel {
+                promise_id: reply.clone(),
+            },
+        ));
+        assert_eq!(crate::code_tool_wake(drive.state(), &ask.origin, 210), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id: reply,
+                    resolution: crate::PromiseResolution::Cancelled,
+                },
+                220,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let result = crate::code_tool_joined_result(drive.state(), &ask.origin, true).unwrap();
+        assert_eq!(result.status, ToolCallStatus::Cancelled);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResumeCodeToolCall {
+                    origin: ask.origin.clone(),
+                    result,
+                    claim_observed_at_ms: 221,
+                },
+                221,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+
+        // Each call recorded one outcome; the scope itself was never cancelled.
+        let scope = &drive.state().code_tools.scopes[&execution_id];
+        assert!(!scope.cancel_requested);
+        assert_eq!(scope.completed, vec!["1", "2", "3"]);
+        assert!(drive.admit_command(cancel("4"), 230).is_err());
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
     fn a_program_sleep_waits_for_its_deadline_alone_and_replays() {
         let session_id = SessionId::new("program-sleep");
         let mut drive =

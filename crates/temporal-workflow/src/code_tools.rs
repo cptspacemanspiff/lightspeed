@@ -19,6 +19,7 @@ use crate::AgentSessionWorkflow;
 pub const OPEN_CODE_TOOL_SCOPE_UPDATE: &str = "open_code_tool_scope";
 pub const INVOKE_CODE_TOOL_UPDATE: &str = "invoke_code_tool";
 pub const CLOSE_CODE_TOOL_SCOPE_UPDATE: &str = "close_code_tool_scope";
+pub const CANCEL_CODE_TOOL_UPDATE: &str = "cancel_code_tool";
 pub const CODE_TOOL_SCOPE_REPORT_QUERY: &str = "code_tool_scope_report";
 pub const SCOPE_RECORDED_OUTCOMES_QUERY: &str = "scope_recorded_outcomes";
 
@@ -72,6 +73,35 @@ pub struct CloseCodeToolScopeRequest {
     /// written as the session's newest only if the run completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_context: Option<harness::ProgramContextInput>,
+}
+
+/// Cancel one call of a scope, or a promise its owner holds a handle to (an
+/// opened input request). A cancel is a request, not an outcome: the target
+/// still records exactly one outcome, which is its result if that came
+/// first. Resending is safe; requests are admitted in order with calls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelCodeToolRequest {
+    pub execution_id: String,
+    pub target: harness::CodeToolCancelTarget,
+}
+
+/// Where the target stood once the cancel was recorded. `Requested` means
+/// its outcome is still to come; the outcome itself is read where it always
+/// is (a call's recorded outcome, a promise's resolution). This status is
+/// for logging, not for deciding what happened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CodeToolCancelOutcome {
+    pub status: CodeToolCancelStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeToolCancelStatus {
+    Requested,
+    Cancelled,
+    Resolved,
+    Failed,
 }
 
 /// Read an authoritative snapshot, including after a runner loses its waiters.
@@ -267,6 +297,7 @@ impl std::error::Error for CodeToolRejection {}
 pub type CodeToolScopeResult = Result<CodeToolScopeReport, CodeToolRejection>;
 pub type CodeToolInvocationResult = Result<CodeToolCallOutcome, CodeToolRejection>;
 pub type ScopeRecordedOutcomesResult = Result<ScopeRecordedOutcomes, CodeToolRejection>;
+pub type CodeToolCancelResult = Result<CodeToolCancelOutcome, CodeToolRejection>;
 
 /// Temporal is the transport even when the runner and session share a process.
 /// Dropping one of these futures only drops the client waiter; explicit scope
@@ -324,6 +355,18 @@ impl CodeToolClient {
                 request,
                 options,
             )
+            .await
+    }
+
+    pub async fn cancel(
+        &self,
+        request: CancelCodeToolRequest,
+        rpc_options: RpcOptions,
+    ) -> Result<CodeToolCancelResult, WorkflowUpdateError> {
+        let options = update_options(CANCEL_CODE_TOOL_UPDATE, &request, rpc_options);
+        self.client
+            .get_workflow_handle::<AgentSessionWorkflow>(self.session_workflow_id.clone())
+            .execute_update(AgentSessionWorkflow::cancel_code_tool, request, options)
             .await
     }
 

@@ -1146,8 +1146,9 @@ async fn an_answer_saved_before_a_withdrawal_reaches_the_program() -> anyhow::Re
             if run.status == api::RunStatus::Failed {
                 let failure = run_failure(&store, &session_id).await?;
                 let message = match &failure.message_ref {
-                    Some(reference) => String::from_utf8_lossy(&store.read_bytes(reference).await?)
-                        .into_owned(),
+                    Some(reference) => {
+                        String::from_utf8_lossy(&store.read_bytes(reference).await?).into_owned()
+                    }
                     None => String::new(),
                 };
                 anyhow::bail!("{failure:?}: {message}");
@@ -1184,6 +1185,134 @@ async fn an_answer_saved_before_a_withdrawal_reaches_the_program() -> anyhow::Re
             Ok(())
         })
     })
+    .await
+}
+
+const LONG_SLEEP_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            try {
+                await env.time.sleep({ ms: 600000 });
+                return { claim: input.claim, slept: 600000 };
+            } catch (error) {
+                return { claim: input.claim, slept: 0, kind: error.kind };
+            }
+        }
+    };
+"#;
+
+/// The origin of the first scoped call that was deferred in the session.
+async fn first_deferred_call(
+    store: &store_pg::PgStore,
+    session_id: &SessionId,
+) -> anyhow::Result<harness::CodeToolOrigin> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let page = store
+            .read_after(harness::storage::ReadSessionEvents {
+                session_id: session_id.clone(),
+                after: None,
+                limit: 1000,
+            })
+            .await?;
+        for entry in page.entries {
+            if let harness::CoreAgentEvent::CodeTool(harness::CodeToolEvent::CallDeferred {
+                origin,
+                ..
+            }) = harness::CoreAgentCodec.decode_event(&entry.event)?
+            {
+                return Ok(origin);
+            }
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "no scoped call was deferred in {session_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_scoped_call_is_cancelled_alone_and_records_one_outcome() -> anyhow::Result<()> {
+    with_program_workers_and_client(
+        InputTimeouts::default(),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        LONG_SLEEP_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run =
+                    start_program_run(&api, &session_id, json!({"claim": "cut short"})).await?;
+
+                // Cancel the ten-minute sleep by itself, twice: the second send
+                // is the same request and changes nothing.
+                let origin = first_deferred_call(&store, &session_id).await?;
+                let code_tools = temporal_workflow::CodeToolClient::new(
+                    client,
+                    temporal_workflow::compose_workflow_id(live_universe_id()?, &session_id),
+                );
+                let request = temporal_workflow::CancelCodeToolRequest {
+                    execution_id: origin.execution_id.clone(),
+                    target: harness::CodeToolCancelTarget::Call {
+                        request_id: origin.request_id.clone(),
+                    },
+                };
+                for _ in 0..2 {
+                    let outcome = code_tools
+                        .cancel(request.clone(), Default::default())
+                        .await?
+                        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+                    assert!(
+                        matches!(
+                            outcome.status,
+                            temporal_workflow::CodeToolCancelStatus::Requested
+                                | temporal_workflow::CodeToolCancelStatus::Cancelled
+                        ),
+                        "{outcome:?}"
+                    );
+                }
+                // A request the scope never admitted is refused.
+                let unknown = code_tools
+                    .cancel(
+                        temporal_workflow::CancelCodeToolRequest {
+                            execution_id: origin.execution_id.clone(),
+                            target: harness::CodeToolCancelTarget::Call {
+                                request_id: "call-99".to_owned(),
+                            },
+                        },
+                        Default::default(),
+                    )
+                    .await?;
+                assert!(unknown.is_err(), "{unknown:?}");
+
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                assert_eq!(
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                    json!({"claim": "cut short", "slept": 0, "kind": "tool_cancelled"})
+                );
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
     .await
 }
 

@@ -429,6 +429,11 @@ pub struct CodeToolScope {
     /// the scope closed. It is written only if the run completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_context: Option<crate::ProgramContextInput>,
+    /// Calls whose cancellation was requested one by one. A cancel is a
+    /// request, not an outcome: each call still records exactly one outcome,
+    /// which may be its result if that came first.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cancel_requested_calls: BTreeSet<String>,
 }
 
 impl CodeToolScope {
@@ -474,6 +479,21 @@ pub enum CodeToolEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program_context: Option<crate::ProgramContextInput>,
     },
+    /// The scope's owner asked to cancel one call. The call stops the way
+    /// its kind can and still records one outcome.
+    CallCancelRequested {
+        origin: CodeToolOrigin,
+    },
+}
+
+/// What a scope's owner asks to cancel: one of its calls, or a promise it
+/// holds a handle to (an opened input request).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CodeToolCancelTarget {
+    Call { request_id: String },
+    Promise { promise_id: crate::PromiseId },
 }
 
 fn invalid(message: impl Into<String>) -> DomainError {
@@ -1154,7 +1174,9 @@ pub fn code_tool_wake(
     if code_tool_awaits_cancel_confirmation(state, call) {
         return None;
     }
-    if scope.cancel_requested || validate_live_owner(state, &scope.spec).is_err() {
+    if code_tool_call_cancel_requested(state, origin)
+        || validate_live_owner(state, &scope.spec).is_err()
+    {
         return Some(WakeReason::Cancelled);
     }
     let spec = suspension.spec();
@@ -1344,6 +1366,86 @@ pub(crate) fn stamp_code_tool_completions(
         }) = &mut proposal.event
         {
             *completed_at_ms = Some(observed_at_ms);
+        }
+    }
+}
+
+/// Whether a call's cancellation was requested, by its own cancel or by its
+/// scope's.
+pub fn code_tool_call_cancel_requested(state: &CoreAgentState, origin: &CodeToolOrigin) -> bool {
+    state
+        .code_tools
+        .scopes
+        .get(&origin.execution_id)
+        .is_some_and(|scope| {
+            scope.cancel_requested || scope.cancel_requested_calls.contains(&origin.request_id)
+        })
+}
+
+/// Cancel one call of a scope, or a promise its owner holds a handle to.
+/// Resending is a no-op: a settled target, or one whose cancellation was
+/// already requested, needs nothing more. Every cancelled call still
+/// records one outcome; a promise is cancelled the way its producer needs
+/// (`promise_cancel_event`).
+pub fn cancel_code_tool_proposals(
+    state: &CoreAgentState,
+    execution_id: &str,
+    target: &CodeToolCancelTarget,
+) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
+    let scope = state
+        .code_tools
+        .scopes
+        .get(execution_id)
+        .ok_or_else(|| invalid("unknown code tool execution scope"))?;
+    match target {
+        CodeToolCancelTarget::Call { request_id } => {
+            let call = scope
+                .calls
+                .get(request_id)
+                .ok_or_else(|| invalid("unknown code tool request"))?;
+            let origin = &call.spec.origin;
+            if call.status.is_terminal() || code_tool_call_cancel_requested(state, origin) {
+                return Ok(Vec::new());
+            }
+            Ok(vec![CoreAgentEventProposal::new(
+                joins(state, origin)?,
+                CoreAgentEvent::CodeTool(CodeToolEvent::CallCancelRequested {
+                    origin: origin.clone(),
+                }),
+            )])
+        }
+        CodeToolCancelTarget::Promise { promise_id } => {
+            let run_id = scope_owner(state, &scope.spec)?.run_id;
+            let promise = state
+                .promises
+                .promises
+                .get(promise_id)
+                .ok_or_else(|| invalid(format!("unknown promise {promise_id}")))?;
+            if promise.ownership != PromiseOwnership::Model {
+                return Err(invalid(format!(
+                    "promise {promise_id} is runtime-owned and cannot be cancelled by its holder"
+                )));
+            }
+            match promise.scope {
+                crate::PromiseScope::Run { run_id: owner } if owner != run_id => {
+                    return Err(invalid(format!(
+                        "promise {promise_id} belongs to run {owner}, not run {run_id}"
+                    )));
+                }
+                _ => {}
+            }
+            Ok(crate::promise_cancel_event(state, promise_id)
+                .map(|event| {
+                    CoreAgentEventProposal::new(
+                        CoreAgentJoins {
+                            run_id: Some(run_id),
+                            ..CoreAgentJoins::default()
+                        },
+                        CoreAgentEvent::Promise(event),
+                    )
+                })
+                .into_iter()
+                .collect())
         }
     }
 }
@@ -1630,6 +1732,7 @@ pub(crate) fn apply_code_tool_event(
                     calls: BTreeMap::new(),
                     completed: Vec::new(),
                     program_context: None,
+                    cancel_requested_calls: BTreeSet::new(),
                 },
             );
         }
@@ -1769,6 +1872,25 @@ pub(crate) fn apply_code_tool_event(
                 .status = CodeToolCallStatus::Waiting {
                 suspension: suspension.clone(),
             };
+        }
+        CodeToolEvent::CallCancelRequested { origin } => {
+            let call = code_tool_call(state, origin)
+                .ok_or_else(|| invalid("unknown code tool request"))?;
+            if call.status.is_terminal() {
+                return Err(invalid("a completed code tool request cannot be cancelled"));
+            }
+            let inserted = state
+                .code_tools
+                .scopes
+                .get_mut(&origin.execution_id)
+                .expect("validated scope")
+                .cancel_requested_calls
+                .insert(origin.request_id.clone());
+            if !inserted {
+                return Err(invalid(
+                    "code tool request cancellation was already requested",
+                ));
+            }
         }
         CodeToolEvent::ScopeClosed {
             execution_id,

@@ -7510,14 +7510,23 @@
     },
     "CodeToolProgressPhase": {
       "description": "Bounded lifecycle telemetry for a session-owned code tool execution.",
-      "enum": [
-        "scopeOpened",
-        "callAdmitted",
-        "callDeferred",
-        "callCompleted",
-        "scopeClosed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "scopeOpened",
+            "callAdmitted",
+            "callDeferred",
+            "callCompleted",
+            "scopeClosed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "callCancelRequested",
+          "description": "The scope's owner asked to cancel the call; its outcome follows.",
+          "type": "string"
+        }
+      ]
     },
     "CompactionPolicy": {
       "oneOf": [

@@ -136,6 +136,23 @@
     "BotTriggerId": {
       "type": "string"
     },
+    "CancelCodeToolRequest": {
+      "additionalProperties": false,
+      "description": "Cancel one call of a scope, or a promise its owner holds a handle to (an\nopened input request). A cancel is a request, not an outcome: the target\nstill records exactly one outcome, which is its result if that came\nfirst. Resending is safe; requests are admitted in order with calls.",
+      "properties": {
+        "execution_id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/definitions/CodeToolCancelTarget"
+        }
+      },
+      "required": [
+        "execution_id",
+        "target"
+      ],
+      "type": "object"
+    },
     "ChannelAccountId": {
       "type": "string"
     },
@@ -774,6 +791,64 @@
         "unavailable"
       ],
       "type": "string"
+    },
+    "CodeToolCancelOutcome": {
+      "description": "Where the target stood once the cancel was recorded. `Requested` means\nits outcome is still to come; the outcome itself is read where it always\nis (a call's recorded outcome, a promise's resolution). This status is\nfor logging, not for deciding what happened.",
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/CodeToolCancelStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "CodeToolCancelStatus": {
+      "enum": [
+        "requested",
+        "cancelled",
+        "resolved",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "CodeToolCancelTarget": {
+      "description": "What a scope's owner asks to cancel: one of its calls, or a promise it\nholds a handle to (an opened input request).",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "call",
+              "type": "string"
+            },
+            "request_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "request_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "promise",
+              "type": "string"
+            },
+            "promise_id": {
+              "$ref": "#/definitions/PromiseId"
+            }
+          },
+          "required": [
+            "kind",
+            "promise_id"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "CodeToolRejection": {
       "description": "Admission failures are successful protocol replies, distinct from transport\nfailures and the tool's own failed result. They never imply tool execution.",

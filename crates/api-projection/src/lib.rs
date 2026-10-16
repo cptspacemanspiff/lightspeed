@@ -706,6 +706,12 @@ impl<'a> CoreAgentProjector<'a> {
                     harness::CodeToolEvent::ScopeClosed { execution_id, .. } => {
                         (execution_id.clone(), None, Phase::ScopeClosed, None)
                     }
+                    harness::CodeToolEvent::CallCancelRequested { origin } => (
+                        origin.execution_id.clone(),
+                        Some(origin.request_id.clone()),
+                        Phase::CallCancelRequested,
+                        None,
+                    ),
                 };
                 Ok(SessionEventKindView::CodeToolProgress {
                     execution_id,

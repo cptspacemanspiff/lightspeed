@@ -124,6 +124,13 @@ pub enum CoreAgentCommand {
     RequestPromiseCancel {
         promise_id: PromiseId,
     },
+    /// A scope's owner cancels one of its calls, or a promise it holds a
+    /// handle to. Idempotent: a settled target, or one already cancelling,
+    /// records nothing.
+    CancelCodeTool {
+        execution_id: String,
+        target: crate::CodeToolCancelTarget,
+    },
     /// Terminal push-delivery failure for one promise-bearing workflow-tool
     /// invocation: atomically records `WorkflowTool::DeliveryFailed` and
     /// fails every still-pending completion promise of that invocation, so a

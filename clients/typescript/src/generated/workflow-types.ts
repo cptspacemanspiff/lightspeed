@@ -58,6 +58,36 @@ export type BotId = string;
  */
 export type BotTriggerId = string;
 /**
+ * What a scope's owner asks to cancel: one of its calls, or a promise it
+ * holds a handle to (an opened input request).
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "CodeToolCancelTarget".
+ */
+export type CodeToolCancelTarget =
+  | {
+      kind: "call";
+      request_id: string;
+    }
+  | {
+      kind: "promise";
+      promise_id: PromiseId;
+    };
+/**
+ * Stable identifier for a promise: a session-scoped counter rendered as
+ * `promise_<n>`, the same convention as `run_<n>`, so the model copies a
+ * short handle rather than a digest. The harness hands every tool batch a
+ * base one past the session cursor (`ToolInvocationBatchRequest::
+ * promise_id_base`); the executor numbers the promises it creates from
+ * that base, and the reducer accepts a creation only at or above the
+ * batch's base and never twice. Producer correlation lives on
+ * `PromiseSource`, not in the id.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "PromiseId".
+ */
+export type PromiseId = string;
+/**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "ChannelAccountId".
  */
@@ -181,6 +211,11 @@ export type CodeToolCallStatus =
   "pending" | "waiting" | "succeeded" | "failed" | "cancelled" | "unavailable";
 /**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "CodeToolCancelStatus".
+ */
+export type CodeToolCancelStatus = "requested" | "cancelled" | "resolved" | "failed";
+/**
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "CodeToolRejectionKind".
  */
 export type CodeToolRejectionKind =
@@ -252,20 +287,6 @@ export type EmissionBody =
  * via the `definition` "RunStatus".
  */
 export type RunStatus = "active" | "parked" | "cancelling" | "completed" | "failed" | "cancelled";
-/**
- * Stable identifier for a promise: a session-scoped counter rendered as
- * `promise_<n>`, the same convention as `run_<n>`, so the model copies a
- * short handle rather than a digest. The harness hands every tool batch a
- * base one past the session cursor (`ToolInvocationBatchRequest::
- * promise_id_base`); the executor numbers the promises it creates from
- * that base, and the reducer accepts a creation only at or above the
- * batch's base and never twice. Producer correlation lives on
- * `PromiseSource`, not in the id.
- *
- * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
- * via the `definition` "PromiseId".
- */
-export type PromiseId = string;
 /**
  * Bounded durable record of one successful workflow-tool tool call.
  *
@@ -421,6 +442,19 @@ export interface AttachmentSource {
   id: string;
   kind: string;
   path: string;
+}
+/**
+ * Cancel one call of a scope, or a promise its owner holds a handle to (an
+ * opened input request). A cancel is a request, not an outcome: the target
+ * still records exactly one outcome, which is its result if that came
+ * first. Resending is safe; requests are admitted in order with calls.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "CancelCodeToolRequest".
+ */
+export interface CancelCodeToolRequest {
+  execution_id: string;
+  target: CodeToolCancelTarget;
 }
 /**
  * One connector activity call. `idempotency_key` is the invocation id, or
@@ -667,6 +701,18 @@ export interface CodeToolCallOutcome {
   output_ref?: string | null;
   request_id: string;
   status: CodeToolCallStatus;
+}
+/**
+ * Where the target stood once the cancel was recorded. `Requested` means
+ * its outcome is still to come; the outcome itself is read where it always
+ * is (a call's recorded outcome, a promise's resolution). This status is
+ * for logging, not for deciding what happened.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "CodeToolCancelOutcome".
+ */
+export interface CodeToolCancelOutcome {
+  status: CodeToolCancelStatus;
 }
 /**
  * Admission failures are successful protocol replies, distinct from transport

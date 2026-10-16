@@ -1404,6 +1404,8 @@ pub enum CodeToolProgressPhase {
     CallDeferred,
     CallCompleted,
     ScopeClosed,
+    /// The scope's owner asked to cancel the call; its outcome follows.
+    CallCancelRequested,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
