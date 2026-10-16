@@ -10,6 +10,7 @@ use crate::{
     universe::{UniverseError, UniverseRuntime},
 };
 
+#[derive(Clone)]
 pub(super) enum WorkerUniverses {
     /// One pre-built service for one universe.
     Fixed {

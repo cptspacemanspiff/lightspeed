@@ -5253,6 +5253,7 @@ dependencies = [
  "object_store",
  "profiles",
  "program-engine",
+ "prost",
  "rand 0.10.3",
  "release-info",
  "reqwest",

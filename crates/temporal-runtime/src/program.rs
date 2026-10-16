@@ -53,19 +53,35 @@ fn host_error(kind: &str, message: impl Into<String>) -> HostError {
     }
 }
 
-/// A recorded outcome as the value or failure the program receives.
+/// A recorded outcome as the completion the program receives, and which of
+/// its parts are a blob's content (so they can travel by reference).
+pub struct CollectedCompletion {
+    pub completion: HostCompletion,
+    /// The blob holding the completion's value (`Ok`, or the error's `value`).
+    pub value_ref: Option<BlobRef>,
+    /// The blob holding the error's message.
+    pub message_ref: Option<BlobRef>,
+}
+
 async fn materialize(
     blobs: &dyn BlobStore,
     outcome: &RecordedOutcome,
     limit: u64,
-) -> Result<Value, HostError> {
-    crate::code::materialize(blobs, outcome, limit)
-        .await
-        .map_err(|error| HostError {
-            kind: error.kind,
-            message: error.message,
-            value: error.value,
-        })
+) -> CollectedCompletion {
+    let parts = crate::code::materialize_parts(blobs, outcome, limit).await;
+    CollectedCompletion {
+        completion: HostCompletion {
+            request_id: outcome.request_id.clone(),
+            outcome: parts.result.map_err(|error| HostError {
+                kind: error.kind,
+                message: error.message,
+                value: error.value,
+            }),
+            completed_at_ms: outcome.completed_at_ms,
+        },
+        value_ref: parts.value_ref,
+        message_ref: parts.message_ref,
+    }
 }
 
 /// Bytes of a program context's JSON shown as its preview.
@@ -209,7 +225,7 @@ impl ProgramRunner {
         execution_id: &str,
         after: u64,
         max_result_bytes: u64,
-    ) -> Result<Vec<HostCompletion>, String> {
+    ) -> Result<Vec<CollectedCompletion>, String> {
         let code_tools = CodeToolClient::new(self.client.clone(), session_workflow_id.to_owned());
         let page = code_tools
             .recorded_outcomes(
@@ -225,13 +241,16 @@ impl ProgramRunner {
             .map_err(|error| error.to_string())?;
         let mut completions = Vec::with_capacity(page.outcomes.len());
         for outcome in &page.outcomes {
-            completions.push(HostCompletion {
-                request_id: outcome.request_id.clone(),
-                outcome: materialize(self.blobs.as_ref(), outcome, max_result_bytes)
-                    .await
-                    .map_err(structured_failure),
-                completed_at_ms: outcome.completed_at_ms,
-            });
+            let mut collected = materialize(self.blobs.as_ref(), outcome, max_result_bytes).await;
+            if let Err(error) = &mut collected.completion.outcome {
+                let structured = structured_failure(error.clone());
+                // A rewritten message is no longer the blob's content.
+                if structured.message != error.message {
+                    collected.message_ref = None;
+                }
+                *error = structured;
+            }
+            completions.push(collected);
         }
         Ok(completions)
     }
