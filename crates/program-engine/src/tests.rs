@@ -44,8 +44,10 @@ fn drive(
     let mut requests = Vec::new();
     loop {
         let (issued, finished) = match step {
-            Step::Waiting { requests } => (requests, None),
-            Step::Finished { requests, report } => (requests, Some(report)),
+            Step::Waiting { requests, .. } => (requests, None),
+            Step::Finished {
+                requests, report, ..
+            } => (requests, Some(report)),
         };
         let ready = issued.iter().flat_map(&mut respond).collect::<Vec<_>>();
         requests.extend(issued);
@@ -344,7 +346,8 @@ fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
     let (requests, report) =
         run_program(program_input(source, &["time.sleep"], SEED), sleep_outcome);
     assert_eq!(report.error, None);
-    // Each wait, timer or explicit sleep, is exactly one recorded call.
+    // Each wait, timer or explicit sleep, is exactly one recorded call. A
+    // timer cleared in the step that set it never sends its sleep.
     assert!(
         requests
             .iter()
@@ -355,12 +358,7 @@ fn timers_are_durable_sleeps_through_the_time_sleep_contract() {
             .iter()
             .map(|request| request.arguments.clone())
             .collect::<Vec<_>>(),
-        [
-            json!({"ms": 5}),
-            json!({"ms": 20}),
-            json!({"ms": 30}),
-            json!({"ms": -1})
-        ]
+        [json!({"ms": 20}), json!({"ms": 30}), json!({"ms": -1})]
     );
     assert_eq!(
         report.return_value,
@@ -507,7 +505,7 @@ fn an_open_input_request_is_a_handle_over_ordinary_calls() {
             ),
             // A handle awaits its promise once, however often it is asked.
             ("opaque-promise.await", json!({"promises": ["promise_3"]})),
-            ("opaque-promise.cancel", json!({"promises": ["promise_3"]})),
+            // `cancel()` asks the host directly; it is not a call.
             ("opaque-input.open", json!({"ask": "Again?"})),
             ("opaque-promise.await", json!({"promises": ["promise_3"]})),
         ]
@@ -651,8 +649,10 @@ fn run_shuffled(seed: u64) -> (Vec<HostRequest>, ExecutionReport, Journal) {
     let mut journal = Journal::new();
     loop {
         let (issued, finished) = match step {
-            Step::Waiting { requests } => (requests, None),
-            Step::Finished { requests, report } => (requests, Some(report)),
+            Step::Waiting { requests, .. } => (requests, None),
+            Step::Finished {
+                requests, report, ..
+            } => (requests, Some(report)),
         };
         for request in &issued {
             outstanding.push((request.request_id.clone(), conformance_outcome(request)));
@@ -720,7 +720,7 @@ fn a_recorded_completion_for_an_unissued_request_is_nondeterminism() {
     "#;
     let (mut instance, step) =
         ProgramInstance::start(program_input(source, &["test.call"], SEED), STEP_BUDGET).unwrap();
-    assert!(matches!(step, Step::Waiting { requests } if requests.len() == 1));
+    assert!(matches!(step, Step::Waiting { requests, .. } if requests.len() == 1));
     let Step::Finished { report, .. } = instance.step(vec![HostCompletion {
         request_id: "call-2".into(),
         outcome: Ok(Value::Null),
@@ -749,7 +749,9 @@ fn step_through(journal: &Journal, group: usize) -> (Vec<HostRequest>, Execution
     let mut batches = journal.chunks(group.max(1));
     loop {
         match step {
-            Step::Waiting { requests: issued } => {
+            Step::Waiting {
+                requests: issued, ..
+            } => {
                 requests.extend(issued);
                 let batch = batches.next().expect("program waits past its journal");
                 step = instance.step(batch.to_vec());
@@ -757,6 +759,7 @@ fn step_through(journal: &Journal, group: usize) -> (Vec<HostRequest>, Execution
             Step::Finished {
                 requests: issued,
                 report,
+                ..
             } => {
                 requests.extend(issued);
                 assert!(instance.is_finished());
@@ -764,6 +767,7 @@ fn step_through(journal: &Journal, group: usize) -> (Vec<HostRequest>, Execution
                     instance.step(Vec::new()),
                     Step::Finished {
                         requests: Vec::new(),
+                        cancels: Vec::new(),
                         report: report.clone()
                     }
                 );
@@ -819,7 +823,7 @@ fn a_step_budget_is_per_step() {
     let (mut instance, mut step) =
         ProgramInstance::start(program_input(source, &["test.call"], SEED), STEP_BUDGET).unwrap();
     let mut rounds = 0;
-    while let Step::Waiting { requests } = step {
+    while let Step::Waiting { requests, .. } = step {
         let [request] = <[_; 1]>::try_from(requests).unwrap();
         rounds += 1;
         step = instance.step(vec![HostCompletion {
@@ -907,4 +911,199 @@ fn an_oversized_result_arrives_as_a_failure_the_program_can_catch() {
         (Ok(json!("x".repeat(32 * 1024))), None)
     });
     assert_eq!(report.return_value, Some(json!("payload_too_large")));
+}
+
+fn waiting(step: Step) -> (Vec<HostRequest>, Vec<HostCancel>) {
+    match step {
+        Step::Waiting { requests, cancels } => (requests, cancels),
+        Step::Finished { report, .. } => panic!("the program finished: {report:?}"),
+    }
+}
+
+fn finished(step: Step) -> (Vec<HostCancel>, ExecutionReport) {
+    match step {
+        Step::Finished {
+            cancels, report, ..
+        } => (cancels, report),
+        Step::Waiting { .. } => panic!("the program is still waiting"),
+    }
+}
+
+fn completed(request_id: &str, outcome: Result<Value, HostError>) -> HostCompletion {
+    HostCompletion {
+        request_id: request_id.into(),
+        outcome,
+        completed_at_ms: None,
+    }
+}
+
+fn cancelled_call() -> HostError {
+    HostError {
+        kind: CANCELLED_CALL_KIND.into(),
+        message: "cancelled".into(),
+        value: None,
+    }
+}
+
+#[test]
+fn a_call_cancelled_in_the_step_that_issued_it_never_reaches_the_host() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const h = env.web.fetch({ url: "a" });
+                const cancelled = await h.cancel();
+                let kind = null;
+                try { await h; } catch (error) { kind = error.kind; }
+                const other = await env.web.fetch({ url: "b" });
+                return { cancelled, kind, other };
+            }
+        };
+    "#;
+    let (mut instance, step) =
+        ProgramInstance::start(program_input(source, &["web.fetch"], SEED), STEP_BUDGET).unwrap();
+    let (requests, cancels) = waiting(step);
+    // Only the second fetch is sent; the first settled in the program.
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (request.request_id.as_str(), request.arguments.clone()))
+            .collect::<Vec<_>>(),
+        [("call-2", json!({"url": "b"}))]
+    );
+    assert!(cancels.is_empty());
+    let (_, report) = finished(instance.step(vec![completed("call-2", Ok(json!("page")))]));
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "cancelled": {"status": "cancelled"},
+            "kind": "tool_cancelled",
+            "other": "page",
+        }))
+    );
+}
+
+#[test]
+fn a_sent_call_is_cancelled_by_the_host_and_its_recorded_outcome_wins() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const slow = env.web.fetch({ url: "slow" });
+                const lost = env.web.fetch({ url: "lost" });
+                await env.web.fetch({ url: "fast" });
+                const [first, again] = await Promise.all([slow.cancel(), slow.cancel()]);
+                const second = await lost.cancel();
+                return { first, again, value: await slow, second };
+            }
+        };
+    "#;
+    let (mut instance, step) =
+        ProgramInstance::start(program_input(source, &["web.fetch"], SEED), STEP_BUDGET).unwrap();
+    let (requests, _) = waiting(step);
+    assert_eq!(requests.len(), 3);
+    // Both cancels go to the host once each, in order, after the calls
+    // they name were sent; the program waits for their outcomes.
+    let (requests, cancels) = waiting(instance.step(vec![completed("call-3", Ok(json!("fast")))]));
+    assert!(requests.is_empty());
+    assert_eq!(
+        cancels,
+        [HostCancel::Call {
+            request_id: "call-1".into()
+        }]
+    );
+    // The slow fetch finished before the cancel took effect.
+    let (requests, cancels) =
+        waiting(instance.step(vec![completed("call-1", Ok(json!("slow page")))]));
+    assert!(requests.is_empty());
+    assert_eq!(
+        cancels,
+        [HostCancel::Call {
+            request_id: "call-2".into()
+        }]
+    );
+    let (cancels, report) =
+        finished(instance.step(vec![completed("call-2", Err(cancelled_call()))]));
+    assert!(cancels.is_empty());
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "first": {"status": "resolved"},
+            "again": {"status": "resolved"},
+            "value": "slow page",
+            "second": {"status": "cancelled"},
+        }))
+    );
+}
+
+#[test]
+fn cancelling_an_input_handle_asks_the_host_and_waits_for_its_answer() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const ask = await env.input.open({ ask: "Ship?" });
+                return await ask.cancel();
+            }
+        };
+    "#;
+    let (mut instance, step) =
+        ProgramInstance::start(program_input(source, INPUT_CONTRACTS, SEED), STEP_BUDGET).unwrap();
+    let (requests, _) = waiting(step);
+    assert_eq!(requests[0].binding_id, "opaque-input.open");
+    // The withdrawal goes to the host; the answer comes from awaiting the
+    // handle's promise.
+    let (requests, cancels) = waiting(instance.step(vec![completed("call-1", Ok(opened()))]));
+    assert_eq!(
+        cancels,
+        [HostCancel::Promise {
+            promise_id: "promise_3".into()
+        }]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (request.binding_id.as_str(), request.arguments.clone()))
+            .collect::<Vec<_>>(),
+        [("opaque-promise.await", json!({"promises": ["promise_3"]}))]
+    );
+    // The person answered before the withdrawal reached the inbox.
+    let (_, report) = finished(instance.step(vec![completed(
+        "call-2",
+        Ok(json!({"outcome": "completed", "results": [
+            {"promise_id": "promise_3", "status": "resolved", "output": {"approved": true}}
+        ]})),
+    )]));
+    assert_eq!(report.error, None);
+    assert_eq!(report.return_value, Some(json!({"status": "resolved"})));
+}
+
+#[test]
+fn clearing_a_timer_cancels_its_sleep() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                let fired = false;
+                const timer = setTimeout(() => { fired = true; }, 60000);
+                await env.web.fetch({ url: "a" });
+                clearTimeout(timer);
+                return fired;
+            }
+        };
+    "#;
+    let (mut instance, step) = ProgramInstance::start(
+        program_input(source, &["web.fetch", "time.sleep"], SEED),
+        STEP_BUDGET,
+    )
+    .unwrap();
+    let (requests, _) = waiting(step);
+    assert_eq!(requests.len(), 2);
+    let (cancels, report) = finished(instance.step(vec![completed("call-2", Ok(json!("page")))]));
+    assert_eq!(
+        cancels,
+        [HostCancel::Call {
+            request_id: "call-1".into()
+        }]
+    );
+    assert_eq!(report.return_value, Some(json!(false)));
+    assert_eq!(report.pending_request_ids, ["call-1"]);
 }

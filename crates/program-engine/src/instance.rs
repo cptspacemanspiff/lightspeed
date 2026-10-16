@@ -27,14 +27,21 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     /// The program waits on its outstanding requests; `requests` are those
-    /// it issued during this step, in issue order.
-    Waiting { requests: Vec<HostRequest> },
-    /// The program returned or failed. `requests` are those it issued
-    /// during this step before finishing, which the host still sends, as
-    /// a threaded execution's host would. Every later step reports the
-    /// same report with no requests.
+    /// it issued during this step, in issue order, and `cancels` the
+    /// cancels it asked for, in order. A cancel always names a call from an
+    /// earlier step (one from this step settles here), so the host sends
+    /// the requests first.
+    Waiting {
+        requests: Vec<HostRequest>,
+        cancels: Vec<HostCancel>,
+    },
+    /// The program returned or failed. `requests` and `cancels` are those
+    /// it made during this step before finishing, which the host still
+    /// sends, as a threaded execution's host would. Every later step
+    /// reports the same report with nothing to send.
     Finished {
         requests: Vec<HostRequest>,
+        cancels: Vec<HostCancel>,
         report: ExecutionReport,
     },
 }
@@ -74,6 +81,7 @@ pub struct ProgramInstance {
     input: ExecutionInput,
     state: Rc<RefCell<State>>,
     outbox: Rc<RefCell<Vec<HostRequest>>>,
+    cancels: Rc<RefCell<Vec<HostCancel>>>,
     budget: StepBudget,
     remaining: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
@@ -123,6 +131,7 @@ impl ProgramInstance {
             input,
             state: Rc::new(RefCell::new(State::default())),
             outbox: Rc::new(RefCell::new(Vec::new())),
+            cancels: Rc::new(RefCell::new(Vec::new())),
             budget,
             remaining,
             exhausted,
@@ -139,6 +148,7 @@ impl ProgramInstance {
                 instance.state.clone(),
                 fatal,
                 instance.outbox.clone(),
+                instance.cancels.clone(),
             )?;
             Ok::<_, ExecutionError>(Controls {
                 deliver: Persistent::save(&ctx, deliver),
@@ -162,6 +172,7 @@ impl ProgramInstance {
         if let Some(report) = &self.finished {
             return Step::Finished {
                 requests: Vec::new(),
+                cancels: Vec::new(),
                 report: report.clone(),
             };
         }
@@ -226,6 +237,16 @@ impl ProgramInstance {
                         return Ok(Some(value));
                     }
                 }
+                // Calls cancelled in the step that issued them settle here,
+                // one per quiescent point, after the host's completions.
+                loop {
+                    let next = state.borrow_mut().local.pop_front();
+                    let Some(completion) = next else { break };
+                    apply_completion(&ctx, &deliver, &state, completion)?;
+                    if let Some(value) = settled()? {
+                        return Ok(Some(value));
+                    }
+                }
                 if state.borrow().pending.is_empty() {
                     return Err(error(
                         ExecutionErrorKind::Javascript,
@@ -237,6 +258,7 @@ impl ProgramInstance {
         match outcome {
             Ok(None) => Step::Waiting {
                 requests: std::mem::take(&mut *self.outbox.borrow_mut()),
+                cancels: std::mem::take(&mut *self.cancels.borrow_mut()),
             },
             Ok(Some(value)) => self.finish(Ok(value)),
             Err(failure) => self.finish(Err(failure)),
@@ -247,6 +269,10 @@ impl ProgramInstance {
         // A budget or bridge failure stays terminal even if the guest
         // caught the exception raised at the interrupt.
         let mut state = self.state.borrow_mut();
+        // Calls cancelled in the finishing step never reached the host.
+        for completion in std::mem::take(&mut state.local) {
+            state.pending.remove(&completion.request_id);
+        }
         let budget_failure = self.exhausted.get().then(|| {
             error(
                 ExecutionErrorKind::LimitExceeded,
@@ -277,9 +303,14 @@ impl ProgramInstance {
         };
         drop(state);
         let requests = std::mem::take(&mut *self.outbox.borrow_mut());
+        let cancels = std::mem::take(&mut *self.cancels.borrow_mut());
         self.controls = None;
         self.finished = Some(report.clone());
-        Step::Finished { requests, report }
+        Step::Finished {
+            requests,
+            cancels,
+            report,
+        }
     }
 }
 

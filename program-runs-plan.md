@@ -675,13 +675,18 @@ loop:
      not an outcome: the session records exactly one outcome per call,
      first wins, and the program reads it from the call's promise. A
      result that lands before the cancel is delivered as the result.
-     `h.cancel()` reports the status it found, `cancelled`, `resolved` or
-     `failed` (as `promise.cancel` does today), for logging only.
+     `await h.cancel()` waits until the call has settled and reports how
+     (user, 2026-10-16): `{ status }` with `cancelled`, `resolved` (it
+     finished first) or `failed`. A cancel is not done until it is
+     confirmed, so the program never sees an in-between "requested". The
+     call's promise stays the authority on the outcome. Built in
+     `prelude.js` (`withCancel`, `settledStatus`).
      - Guest to session: the engine emits a cancel for an issued request;
-       `program_admit` sends it in issue order as a new
-       `cancel_code_tool_call` Update; the session appends "cancel
-       requested". A call started and cancelled in the same step never
-       leaves the engine and settles locally as cancelled.
+       `program_admit` sends it after the step's requests (a cancel always
+       names a call from an earlier step) as the `cancel_code_tool` Update;
+       the session appends "cancel requested". A call started and cancelled
+       in the same step never leaves the engine and settles locally as
+       cancelled (`tool_cancelled`), waking nothing.
      - In the session (exists for scope cancel): the dispatcher cancels the
        call's activity (`future.cancel()`); the activity sees it on its next
        heartbeat and drops its work. A call not yet dispatched is recorded
@@ -700,7 +705,8 @@ loop:
        collected outcome, which is a marker in its own history.
        `clearTimeout` cancels its sleep.
      - `h.cancel()` on an input handle uses the same session-side cancel,
-       not the `promise.cancel` tool. Checked 2026-10-16: `promise.cancel`
+       not the `promise.cancel` tool, and waits for the request's answer
+       (`input_cancelled` means withdrawn). Checked 2026-10-16: `promise.cancel`
        computes its reply from the promise's status when the call is
        prepared and applies its effect at append, so an answer landing in
        between makes it report `cancelled` for an answered promise (the
@@ -1173,7 +1179,8 @@ requests are later backends behind the same contract.
   - `cancel()`: withdraw the request; `answer()` then fails as cancelled,
     unless the answer was saved first, in which case it returns the answer
     (D7 "Long runs" item 3: a withdrawal settles only when the input
-    workflow confirms it);
+    workflow confirms it). `await cancel()` resolves once the request has
+    settled, with `{ status: "cancelled" | "resolved" | "failed" }`;
   - `detach()`: keep the request open past the run's exit; without it,
     every exit withdraws it (D7 "Long runs" item 3).
 - **`env.input.request(spec)`** is shorthand for `open` and an immediate

@@ -358,11 +358,15 @@ async fn run_program(
     // Recorded outcomes of the scope already collected.
     let mut collected = 0u64;
     loop {
-        let (requests, finished) = match step {
-            program_engine::Step::Waiting { requests } => (requests, None),
-            program_engine::Step::Finished { requests, report } => (requests, Some(report)),
+        let (requests, cancels, finished) = match step {
+            program_engine::Step::Waiting { requests, cancels } => (requests, cancels, None),
+            program_engine::Step::Finished {
+                requests,
+                cancels,
+                report,
+            } => (requests, cancels, Some(report)),
         };
-        if !requests.is_empty() {
+        if !requests.is_empty() || !cancels.is_empty() {
             let admitted = cancellable(
                 ctx,
                 ctx.execute_local_activity(
@@ -370,6 +374,7 @@ async fn run_program(
                     crate::ProgramAdmitActivityRequest {
                         descriptor: descriptor.clone(),
                         requests,
+                        cancels,
                     },
                     admission_options(),
                 ),
