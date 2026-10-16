@@ -23,13 +23,19 @@ use support::live::{
 use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
+    program::ProgramRunner,
     worker::{
         ActivityState, ProgramWorkerActivities, SessionTools, WorkerActivities, program_worker,
         worker_runtime,
     },
 };
 use temporal_workflow::{ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD};
-use temporalio_sdk::workflow_replayer::{WorkflowReplayer, WorkflowReplayerOptions};
+use temporalio_common::error::ApplicationFailure;
+use temporalio_macros::activities;
+use temporalio_sdk::{
+    activities::{ActivityContext, ActivityError},
+    workflow_replayer::{WorkflowReplayer, WorkflowReplayerOptions},
+};
 use tools::human_input::{
     INPUT_DEFAULT_DEADLINE_ENV, INPUT_MIN_DEADLINE_ENV, INPUT_MIN_REMIND_AFTER_ENV, InputTimeouts,
 };
@@ -240,9 +246,60 @@ async fn with_program_workers(
     .await
 }
 
+/// A `program_admit` that admits a step for real and then fails its first
+/// attempt, as if the worker had lost the result after the session accepted
+/// the calls. Records each attempt it ran.
+pub struct LosesFirstAdmit {
+    runner: ProgramRunner,
+    attempts: Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+#[activities]
+impl LosesFirstAdmit {
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ADMIT)]
+    pub async fn program_admit(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramAdmitActivityRequest,
+    ) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
+        let attempt = ctx.info().attempt;
+        self.attempts.lock().expect("attempts lock").push(attempt);
+        let rejected = self
+            .runner
+            .admit_step(&request.descriptor, request.requests)
+            .await
+            .map_err(|error| {
+                ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+                    error.to_string()
+                )))
+            })?;
+        if attempt == 1 {
+            return Err(ActivityError::application(ApplicationFailure::new(
+                anyhow::anyhow!("admitted, but the result was lost"),
+            )));
+        }
+        Ok(temporal_workflow::ProgramAdmitActivityResult { rejected })
+    }
+}
+
 /// [`with_program_workers`] whose `body` also gets the Temporal client.
 async fn with_program_workers_and_client(
     input_timeouts: InputTimeouts,
+    body: impl FnOnce(
+        Arc<GatewayAgentApi>,
+        Arc<store_pg::PgStore>,
+        SessionId,
+        temporalio_client::Client,
+    ) -> ProgramTestBody,
+) -> anyhow::Result<()> {
+    with_program_workers_admitting(input_timeouts, None, body).await
+}
+
+/// [`with_program_workers_and_client`] whose program worker, given
+/// `lost_admits`, runs [`LosesFirstAdmit`] in place of `program_admit`.
+async fn with_program_workers_admitting(
+    input_timeouts: InputTimeouts,
+    lost_admits: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     body: impl FnOnce(
         Arc<GatewayAgentApi>,
         Arc<store_pg::PgStore>,
@@ -284,7 +341,27 @@ async fn with_program_workers_and_client(
             );
             let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone());
             let runtime = worker_runtime()?;
-            let mut worker = program_worker(&runtime, client.clone(), program_queue, activities)?;
+            let mut worker = match lost_admits {
+                None => program_worker(&runtime, client.clone(), program_queue, activities)?,
+                // A later registration under the same name replaces the
+                // worker's own `program_admit`.
+                Some(attempts) => temporalio_sdk::Worker::new(
+                    &runtime,
+                    client.clone(),
+                    temporalio_sdk::WorkerOptions::new(program_queue)
+                        .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                        .register_activities(activities)
+                        .register_activities(LosesFirstAdmit {
+                            runner: ProgramRunner::new(
+                                client.clone(),
+                                store.clone(),
+                                Duration::from_secs(10),
+                            ),
+                            attempts,
+                        })
+                        .build(),
+                )?,
+            };
             let shutdown = worker.shutdown_handle();
             let worker_run = worker.run();
             tokio::pin!(worker_run);
@@ -1451,6 +1528,179 @@ const SLEEPING_PROGRAM: &str = r#"
 "#;
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice()
+-> anyhow::Result<()> {
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    with_program_workers_admitting(
+        InputTimeouts::default(),
+        Some(attempts.clone()),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let fixture = McpFixture::start().await?;
+                let server = format!(
+                    "prog_mcp_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..12]
+                );
+                let profile_id = mcp_program_profile(
+                    &api,
+                    &fixture,
+                    &server,
+                    &[&format!("mcp.{server}.create_issue")],
+                )
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "once", "server": server}),
+                )
+                .await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output = read_json(
+                    &store,
+                    &run.output.as_ref().expect("program output").content_ref,
+                )
+                .await?;
+                assert!(output["created"].to_string().contains("once"), "{output}");
+                // The second admission found the call the first had admitted:
+                // the server was called once and the scope holds one call.
+                assert_eq!(
+                    fixture.state.lock().await.calls,
+                    vec![json!({"name": "createIssue", "arguments": {"title": "once"}})]
+                );
+                let state = programs::session_state(&store, &session_id).await?;
+                assert_eq!(programs::admitted_tools(&state).len(), 1);
+                // History keeps only the attempt whose result it recorded.
+                let handle = client.get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(
+                    programs::program_execution_id(&state)?,
+                );
+                let events = handle
+                    .fetch_history(Default::default())
+                    .into_events()
+                    .await?;
+                assert_eq!(
+                    programs::local_activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
+                    [2]
+                );
+                WorkflowReplayer::new(
+                    WorkflowReplayerOptions::new()
+                        .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                        .build(),
+                )?
+                .replay_workflow(handle.fetch_history(Default::default()))
+                .await?;
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await?;
+    assert_eq!(*attempts.lock().expect("attempts lock"), [1, 2]);
+    Ok(())
+}
+
+const SEQUENTIAL_SLEEPS_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            for (let i = 0; i < input.sleeps; i++) {
+                await env.time.sleep({ ms: 10 });
+            }
+            return { claim: input.claim, slept: input.sleeps };
+        }
+    };
+"#;
+
+/// The history events of one completed run of [`SEQUENTIAL_SLEEPS_PROGRAM`]
+/// in a new session.
+async fn sequential_sleeps_history(
+    api: &GatewayAgentApi,
+    store: &store_pg::PgStore,
+    client: &temporalio_client::Client,
+    session_id: &SessionId,
+    profile_id: &api::ProfileId,
+    sleeps: u64,
+) -> anyhow::Result<Vec<temporalio_common::protos::temporal::api::history::v1::HistoryEvent>> {
+    start_program_session(api, session_id, profile_id).await?;
+    let run = start_program_run(api, session_id, json!({"claim": "sleeps", "sleeps": sleeps})).await?;
+    let run = wait_for_terminal_run(api, session_id, &run.id).await?;
+    assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+    let state = programs::session_state(store, session_id).await?;
+    let events = client
+        .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(
+            programs::program_execution_id(&state)?,
+        )
+        .fetch_history(Default::default())
+        .into_events()
+        .await?;
+    let _ = api
+        .close_session(api::SessionCloseParams {
+            session_id: session_id.to_string(),
+            force: true,
+        })
+        .await;
+    Ok(events)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn each_sequential_call_adds_a_bounded_number_of_history_events() -> anyhow::Result<()> {
+    with_program_workers_and_client(
+        InputTimeouts::default(),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        SEQUENTIAL_SLEEPS_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                let one = sequential_sleeps_history(
+                    &api,
+                    &store,
+                    &client,
+                    &SessionId::new(format!("{session_id}-one")),
+                    &profile_id,
+                    1,
+                )
+                .await?;
+                let many = sequential_sleeps_history(
+                    &api, &store, &client, &session_id, &profile_id, 6,
+                )
+                .await?;
+                // Each further call is the session's wake (a signal), one
+                // workflow task, and the markers of its collection and its
+                // admission: six events.
+                assert_eq!(
+                    many.len() - one.len(),
+                    5 * 6,
+                    "1 call: {:?}\n6 calls: {:?}",
+                    programs::event_counts(&one),
+                    programs::event_counts(&many),
+                );
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
 async fn a_sleeping_program_waits_in_its_workflow_and_replays_from_history() -> anyhow::Result<()> {
     with_program_workers_and_client(
@@ -1475,7 +1725,7 @@ async fn a_sleeping_program_waits_in_its_workflow_and_replays_from_history() -> 
                     read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
                     json!({"claim": "nap", "slept": 2, "inOrder": true})
                 );
-                // The program ran in its workflow: one load, one admission
+                // The program ran in its workflow: one load, one local admission
                 // per step that issued a call, and no call admitted twice.
                 let state = programs::session_state(&store, &session_id).await?;
                 assert_eq!(
@@ -1494,8 +1744,8 @@ async fn a_sleeping_program_waits_in_its_workflow_and_replays_from_history() -> 
                     [vec![1]]
                 );
                 assert_eq!(
-                    programs::activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
-                    [vec![1], vec![1]]
+                    programs::local_activity_attempts(&events, ACTIVITY_PROGRAM_ADMIT),
+                    [1, 1]
                 );
                 // Replaying the history runs the program again to the same
                 // commands.
