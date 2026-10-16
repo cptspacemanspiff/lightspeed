@@ -1503,6 +1503,115 @@ async fn the_first_of_three_approvers_decides_and_the_other_requests_are_withdra
     .await
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn an_approved_call_does_not_start_or_is_stopped_once_withdrawn() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let fixture = McpFixture::start().await?;
+            let server = format!(
+                "prog_mcp_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let profile_id = mcp_program_profile_with(
+                &api,
+                &fixture,
+                &server,
+                &[&format!("mcp.{server}.create_issue"), "time.sleep"],
+                WITHDRAWN_APPROVAL_PROGRAM,
+                api::RemoteMcpApprovalPolicy::Always,
+                Some(api::ProgramApprovals {
+                    assignees: vec!["alice".to_owned()],
+                    ..Default::default()
+                }),
+            )
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let cancelled = |claim: &str| {
+                json!({
+                    "claim": claim,
+                    "slept": 0,
+                    "cancelled": {"status": "cancelled"},
+                    "kind": "tool_cancelled",
+                })
+            };
+
+            // Approved in the inbox, but the workflow has not read it when
+            // the program withdraws the call: the call never starts.
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "early", "server": server, "wait_ms": 3000}),
+            )
+            .await?;
+            let request = pending_request(&api, &session_id).await?;
+            store
+                .answer_input_request(
+                    &request.request_id,
+                    &api::InputRequestAnswer {
+                        approved: true,
+                        value: None,
+                        comment: None,
+                        answered_by: api::Attribution::Local,
+                        answered_at_ms: 1,
+                    },
+                )
+                .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                cancelled("early")
+            );
+            assert!(fixture.state.lock().await.calls.is_empty());
+
+            // Approved and running when the program withdraws it: the call
+            // is stopped long before its minute is up.
+            let started = tokio::time::Instant::now();
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "slow", "server": server, "wait_ms": 3000}),
+            )
+            .await?;
+            let request = pending_request(&api, &session_id).await?;
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: request.request_id.clone(),
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert_eq!(
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                cancelled("slow")
+            );
+            assert_eq!(
+                fixture.state.lock().await.calls,
+                vec![json!({"name": "createIssue", "arguments": {"title": "slow"}})]
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the running call was not stopped: {:?}",
+                started.elapsed()
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A Streamable HTTP MCP server on loopback whose `createIssue` input
 /// schema can change between listings, recording every call it serves.
 struct McpFixture {
@@ -1592,6 +1701,11 @@ async fn mcp_fixture_handler(
                 "name": params.get("name"),
                 "arguments": params.get("arguments"),
             }));
+            // A title starting with "slow" keeps the call running for a
+            // minute, so a test can stop it partway.
+            if title.starts_with("slow") {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
             reply(json!({
                 "content": [{"type": "text", "text": format!("created {title}")}],
                 "structuredContent": {"number": 7, "title": title},
@@ -1600,6 +1714,19 @@ async fn mcp_fixture_handler(
         _ => axum::http::StatusCode::BAD_REQUEST.into_response(),
     }
 }
+
+const WITHDRAWN_APPROVAL_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const call = env.mcp[input.server].create_issue({ title: input.claim });
+            await env.time.sleep({ ms: input.wait_ms });
+            const cancelled = await call.cancel();
+            let kind = null;
+            try { await call; } catch (error) { kind = error.kind; }
+            return { claim: input.claim, slept: 0, cancelled, kind };
+        }
+    };
+"#;
 
 const MCP_PROGRAM: &str = r#"
     export default {
