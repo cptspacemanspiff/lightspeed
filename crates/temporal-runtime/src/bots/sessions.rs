@@ -25,7 +25,7 @@ use bots::{
     tools::{
         BOT_TOOL_DESCRIPTION_NAMES, BOT_TOOL_NAMES, BOT_TOOL_SCHEMA_NAMES, BotSessionInstructions,
         bot_instructions, bot_tool_description, bot_tool_schema, bot_workflow_tool_declarations,
-        compose_instructions,
+        compose_instructions, parse_event_resolve_args,
     },
     views::{delivery_input_items, program_delivery_input, steer_input_items},
 };
@@ -919,13 +919,29 @@ pub async fn read_json_blob(
     api: &GatewayAgentApi,
     request: BotReadJsonBlobRequest,
 ) -> Result<serde_json::Value, ActivityError> {
-    let bytes = read_blob(api.store().as_ref(), &request.blob_ref).await?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        non_retryable(format!(
-            "blob {} is not valid JSON: {error}",
-            request.blob_ref
-        ))
+    read_json(api, &request.blob_ref).await
+}
+
+/// A run's decision on its delivery, parsed here so the blob itself never
+/// reaches the controller's history.
+pub async fn read_resolution(
+    api: &GatewayAgentApi,
+    request: BotReadResolutionRequest,
+) -> Result<BotReadResolutionResult, ActivityError> {
+    let value = read_json(api, &request.blob_ref).await?;
+    Ok(match parse_event_resolve_args(&value) {
+        Ok(args) => BotReadResolutionResult::Resolved {
+            outcome: args.outcome,
+            summary: args.summary,
+        },
+        Err(message) => BotReadResolutionResult::Invalid { message },
     })
+}
+
+async fn read_json(api: &GatewayAgentApi, blob_ref: &str) -> Result<serde_json::Value, ActivityError> {
+    let bytes = read_blob(api.store().as_ref(), blob_ref).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| non_retryable(format!("blob {blob_ref} is not valid JSON: {error}")))
 }
 
 #[cfg(test)]

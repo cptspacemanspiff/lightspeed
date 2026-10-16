@@ -45,6 +45,7 @@ use temporal_runtime::{
 };
 use temporal_workflow::{DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, connect_temporal};
 use temporalio_client::{Client, WorkflowDescribeOptions};
+use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
 
 const WAIT: Duration = Duration::from_secs(90);
 
@@ -573,6 +574,77 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
         // Its output's verdict decides the delivery.
         assert_eq!(second.outcome, Some(BotEventOutcome::Ignored));
         assert_eq!(second.outcome_detail.as_deref(), Some("nothing to do"));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_program_verdict_keeps_the_output_out_of_controller_history() -> anyhow::Result<()>
+{
+    const PROBE: &str = "controller-history-probe;";
+    run_bots_live(Llm::Program, |api, client| async move {
+        let profile_id = ProfileId::new(unique("bots-live-large-output"));
+        let mut profile = program_profile_input(&profile_id, 1);
+        profile.document.program.as_mut().expect("program").source = api::ProgramSource::Text {
+            text: format!(
+                "export default {{ async run() {{ return {{ outcome: \"ignored\", \
+                 summary: \"s\".repeat(3000), padding: \"{PROBE}\".repeat(8000) }}; }} }};"
+            ),
+        };
+        profile
+            .document
+            .program
+            .as_mut()
+            .expect("program")
+            .output_schema = None;
+        api.create_profile(ProfileCreateParams { profile }).await?;
+        let bot_id = create_bot(&api, &profile_id, |_| {}, Vec::new()).await?;
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("large output"),
+        })
+        .await?;
+        let events = wait_for_outcomes(&api, &bot_id, 1).await?;
+        // The verdict still decides the delivery, with its summary cut to
+        // the bot summary cap.
+        assert_eq!(events[0].outcome, Some(BotEventOutcome::Ignored));
+        let detail = events[0].outcome_detail.as_deref().expect("summary");
+        assert!(!detail.is_empty() && detail.len() <= bots::validate::MAX_SUMMARY_LEN);
+        assert!(detail.bytes().all(|byte| byte == b's'));
+
+        // Only the verdict crossed into the controller's history: no
+        // activity result carries the ~200 KB output.
+        let handle = client.get_workflow_handle::<temporal_workflow::BotControllerWorkflow>(
+            bot_controller_workflow_id(live_universe_id()?, &bot_id),
+        );
+        let history = handle
+            .fetch_history(Default::default())
+            .into_events()
+            .await?;
+        let mut largest = 0;
+        for event in &history {
+            let Some(Attributes::ActivityTaskCompletedEventAttributes(completed)) =
+                &event.attributes
+            else {
+                continue;
+            };
+            for payload in completed.result.iter().flat_map(|result| &result.payloads) {
+                largest = largest.max(payload.data.len());
+                assert!(
+                    !payload
+                        .data
+                        .windows(PROBE.len())
+                        .any(|window| window == PROBE.as_bytes()),
+                    "the program output reached the controller's history"
+                );
+            }
+        }
+        assert!(
+            largest < 16 * 1024,
+            "largest activity result {largest} bytes"
+        );
         Ok(())
     })
     .await

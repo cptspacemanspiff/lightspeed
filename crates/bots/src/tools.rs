@@ -20,6 +20,8 @@ use api::{
 };
 use serde_json::{Value, json};
 
+use crate::validate::MAX_SUMMARY_LEN;
+
 pub const BOT_EVENT_RESOLVE_TOOL_ID: &str = "lightspeed.bots.event.resolve.v1";
 pub const BOT_STATUS_TOOL_ID: &str = "lightspeed.bots.status.v1";
 pub const BOT_TRIGGER_PUT_TOOL_ID: &str = "lightspeed.bots.trigger.put.v1";
@@ -592,7 +594,8 @@ pub struct EventResolveArgs {
 
 /// Resolve arguments are correlated by the run that produced them — the
 /// controller runs one delivery per session run — so the model never echoes
-/// a delivery id. Unknown extra keys are ignored.
+/// a delivery id. Unknown extra keys are ignored; a summary is cut to
+/// `MAX_SUMMARY_LEN` bytes. A program run's output is read the same way.
 pub fn parse_event_resolve_args(value: &Value) -> Result<EventResolveArgs, String> {
     let args = value
         .as_object()
@@ -606,23 +609,21 @@ pub fn parse_event_resolve_args(value: &Value) -> Result<EventResolveArgs, Strin
     };
     let summary = match args.get("summary") {
         None | Some(Value::Null) => None,
-        Some(Value::String(summary)) => Some(summary.clone()),
+        Some(Value::String(summary)) => Some(truncate_bytes(summary, MAX_SUMMARY_LEN).to_owned()),
         Some(_) => return Err("summary must be a string or null".to_owned()),
     };
     Ok(EventResolveArgs { outcome, summary })
 }
 
-/// A program run's verdict on its delivery, from the run's output: an
-/// object with a model-decision `outcome` (and optionally a string
-/// `summary`) decides it, as `bot_event_resolve` would; any other output
-/// of a completed run is `handled`.
-pub fn program_verdict(output: Option<&Value>) -> EventResolveArgs {
-    output
-        .and_then(|output| parse_event_resolve_args(output).ok())
-        .unwrap_or(EventResolveArgs {
-            outcome: BotEventOutcome::Handled,
-            summary: None,
-        })
+fn truncate_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 // ── bot_trigger_put ─────────────────────────────────────────────────────────
@@ -1448,27 +1449,11 @@ mod tests {
     }
 
     #[test]
-    fn a_program_output_decides_its_delivery_else_handles_it() {
-        assert_eq!(
-            program_verdict(Some(&json!({"outcome": "deferred", "summary": "waiting on CI", "extra": 1}))),
-            EventResolveArgs {
-                outcome: BotEventOutcome::Deferred,
-                summary: Some("waiting on CI".to_owned()),
-            }
-        );
-        let handled = EventResolveArgs {
-            outcome: BotEventOutcome::Handled,
-            summary: None,
-        };
-        for output in [
-            None,
-            Some(json!({"claim": "x"})),
-            Some(json!({"outcome": "run_failed"})),
-            Some(json!({"outcome": "ignored", "summary": 7})),
-            Some(json!("ignored")),
-        ] {
-            assert_eq!(program_verdict(output.as_ref()), handled, "{output:?}");
-        }
+    fn cuts_a_long_resolve_summary_on_a_char_boundary() {
+        let summary = format!("{}é", "s".repeat(MAX_SUMMARY_LEN - 1));
+        let parsed =
+            parse_event_resolve_args(&json!({ "outcome": "handled", "summary": summary })).unwrap();
+        assert_eq!(parsed.summary.unwrap(), "s".repeat(MAX_SUMMARY_LEN - 1));
     }
 
     #[test]
