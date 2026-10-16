@@ -821,6 +821,23 @@ pub fn admit_command(
                 CoreAgentEvent::Promise(event),
             )])
         }
+        CoreAgentCommand::RequestPromiseCancel { promise_id } => {
+            if !state.promises.promises.contains_key(&promise_id) {
+                return reject(
+                    CommandRejectionKind::UnknownReference,
+                    format!("unknown promise {promise_id}"),
+                );
+            }
+            Ok(crate::promise_cancel_event(state, &promise_id)
+                .map(|event| {
+                    CoreAgentEventProposal::new(
+                        CoreAgentJoins::default(),
+                        CoreAgentEvent::Promise(event),
+                    )
+                })
+                .into_iter()
+                .collect())
+        }
         CoreAgentCommand::FailWorkflowToolDelivery {
             invocation_id,
             error_ref,

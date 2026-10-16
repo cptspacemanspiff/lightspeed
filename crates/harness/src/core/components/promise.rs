@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -209,6 +209,12 @@ pub struct Promise {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromiseComponentState {
     pub promises: BTreeMap<PromiseId, Promise>,
+    /// Pending promises whose cancellation was requested and waits for their
+    /// producer to confirm it (`promise_cancel_awaits_confirmation`). Each
+    /// leaves the set when it settles, with whatever outcome the producer
+    /// recorded first.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cancel_requested: BTreeSet<PromiseId>,
 }
 
 impl PromiseComponentState {
@@ -254,6 +260,13 @@ pub enum Event {
         promise_id: PromiseId,
     },
     Detached {
+        promise_id: PromiseId,
+    },
+    /// The promise's cancellation was requested from a producer that
+    /// confirms it. The promise stays pending until the producer's reply
+    /// settles it: cancelled when the work was withdrawn, or the outcome it
+    /// recorded first.
+    CancelRequested {
         promise_id: PromiseId,
     },
 }
@@ -313,6 +326,7 @@ pub(crate) fn apply_event(state: &mut CoreAgentState, event: &Event) -> Result<(
             let promise = pending_promise_mut(state, promise_id)?;
             promise.status = PromiseStatus::Resolved;
             promise.payload_ref = payload_ref.clone();
+            state.promises.cancel_requested.remove(promise_id);
             Ok(())
         }
         Event::Failed {
@@ -322,11 +336,27 @@ pub(crate) fn apply_event(state: &mut CoreAgentState, event: &Event) -> Result<(
             let promise = pending_promise_mut(state, promise_id)?;
             promise.status = PromiseStatus::Failed;
             promise.error_ref = error_ref.clone();
+            state.promises.cancel_requested.remove(promise_id);
             Ok(())
         }
         Event::Cancelled { promise_id } => {
             let promise = pending_promise_mut(state, promise_id)?;
             promise.status = PromiseStatus::Cancelled;
+            state.promises.cancel_requested.remove(promise_id);
+            Ok(())
+        }
+        Event::CancelRequested { promise_id } => {
+            pending_promise_mut(state, promise_id)?;
+            if !promise_cancel_awaits_confirmation(state, &state.promises.promises[promise_id]) {
+                return Err(DomainError::InvariantViolation(format!(
+                    "promise {promise_id} is cancelled at once, not by confirmation"
+                )));
+            }
+            if !state.promises.cancel_requested.insert(promise_id.clone()) {
+                return Err(DomainError::InvariantViolation(format!(
+                    "promise {promise_id} cancellation was already requested"
+                )));
+            }
             Ok(())
         }
         Event::Detached { promise_id } => {
@@ -341,6 +371,46 @@ pub(crate) fn apply_event(state: &mut CoreAgentState, event: &Event) -> Result<(
             Ok(())
         }
     }
+}
+
+/// Whether cancelling `promise` waits for its producer to confirm: a
+/// promise of a workflow started for a program's scoped call (an input
+/// request, an approval). That workflow decides what happened first, the
+/// withdrawal or an answer, and settles its reply with it; the session's
+/// recovery poll covers one that ends without replying. Every other promise
+/// is cancelled at once by the session.
+pub fn promise_cancel_awaits_confirmation(state: &CoreAgentState, promise: &Promise) -> bool {
+    let PromiseSource::Workflow {
+        producer_workflow_kind,
+        invocation_id,
+        ..
+    } = &promise.source
+    else {
+        return false;
+    };
+    producer_workflow_kind == crate::WORKFLOW_TOOL_EXECUTION_KIND
+        && crate::WorkflowToolInvocationId::try_new(invocation_id.clone())
+            .ok()
+            .and_then(|id| state.workflow_tools.start_requests.get(&id))
+            .is_some_and(|invocation| {
+                matches!(invocation.context, crate::CallContext::Scope { .. })
+            })
+}
+
+/// The event that cancels `promise_id` now, if any: `Cancelled`, or
+/// `CancelRequested` when its producer confirms cancellations. `None` when the
+/// promise is unknown, settled, or already waiting for a confirmation.
+pub fn promise_cancel_event(state: &CoreAgentState, promise_id: &PromiseId) -> Option<Event> {
+    let promise = state.promises.promises.get(promise_id)?;
+    if promise.status.is_terminal() || state.promises.cancel_requested.contains(promise_id) {
+        return None;
+    }
+    let promise_id = promise_id.clone();
+    Some(if promise_cancel_awaits_confirmation(state, promise) {
+        Event::CancelRequested { promise_id }
+    } else {
+        Event::Cancelled { promise_id }
+    })
 }
 
 fn pending_promise_mut<'state>(

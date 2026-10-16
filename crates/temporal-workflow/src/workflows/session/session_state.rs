@@ -250,8 +250,10 @@ impl AgentSessionWorkflow {
 
     pub(super) fn queue_promise_cancellations_for_entries(&mut self, entries: &[CoreAgentEntry]) {
         for entry in entries {
-            let CoreAgentEvent::Promise(harness::PromiseEvent::Cancelled { promise_id }) =
-                &entry.event
+            let CoreAgentEvent::Promise(
+                harness::PromiseEvent::Cancelled { promise_id }
+                | harness::PromiseEvent::CancelRequested { promise_id },
+            ) = &entry.event
             else {
                 continue;
             };

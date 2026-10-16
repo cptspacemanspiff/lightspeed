@@ -1100,7 +1100,8 @@ impl ChatSessionDriver {
             | SessionEventKindView::PromiseResolved { .. }
             | SessionEventKindView::PromiseFailed { .. }
             | SessionEventKindView::PromiseCancelled { .. }
-            | SessionEventKindView::PromiseDetached { .. } => {}
+            | SessionEventKindView::PromiseDetached { .. }
+            | SessionEventKindView::PromiseCancelRequested { .. } => {}
             SessionEventKindView::TurnStarted { .. } => events.push(self.status_event("planning")),
             SessionEventKindView::TurnPlanned { .. } => events.push(self.status_event("thinking")),
             SessionEventKindView::TurnGenerationRequested { .. } => {

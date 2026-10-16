@@ -685,6 +685,10 @@ export type SessionEventKindView =
       type: "promiseDetached";
     }
   | {
+      promiseId: string;
+      type: "promiseCancelRequested";
+    }
+  | {
       runId: string;
       turnId: string;
       type: "turnStarted";
