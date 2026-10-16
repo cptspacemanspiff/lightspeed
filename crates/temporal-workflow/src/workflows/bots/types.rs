@@ -233,6 +233,28 @@ pub struct BotReadJsonBlobRequest {
     pub blob_ref: String,
 }
 
+/// Read a run's decision on its delivery from a JSON blob: a
+/// `bot_event_resolve` call's arguments or a program run's output. The
+/// activity parses the blob, so only the decision enters the controller's
+/// history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotReadResolutionRequest {
+    pub universe_id: Uuid,
+    pub blob_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum BotReadResolutionResult {
+    Resolved {
+        outcome: BotEventOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// The blob is JSON but not a decision.
+    Invalid { message: String },
+}
+
 /// What the tool executor may tell the model about the controller: labels,
 /// `#N`s, counts — never ids the model must copy back. Plus the private
 /// invocation context `bot_emit` needs (hops, the routed session).

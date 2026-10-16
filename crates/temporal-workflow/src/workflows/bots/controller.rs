@@ -41,8 +41,9 @@ use temporalio_sdk::{
 use super::{
     BOT_BUSY_RETRY_DELAY, BotActivities, BotCloseSessionRequest, BotCountDescendantsRequest,
     BotEnsureSessionRequest, BotEnsureSessionResult, BotReadJsonBlobRequest,
-    BotReadToolInvocationsRequest, BotRecordClosedRequest, BotRecordOutcomesRequest,
-    BotRenameSessionRequest, BotSessionRequest, BotSessionStatus, bot_activity_options,
+    BotReadResolutionRequest, BotReadResolutionResult, BotReadToolInvocationsRequest,
+    BotRecordClosedRequest, BotRecordOutcomesRequest, BotRenameSessionRequest, BotSessionRequest,
+    BotSessionStatus, bot_activity_options,
 };
 pub use state::{BotDelivery, CoalesceBuffer, ManagedSession, WaitingRun};
 use state::{
@@ -53,6 +54,11 @@ use state::{
 /// `workflow_kind` the controller records as lifecycle controller and
 /// pushed-tool receiver of its sessions.
 pub const BOT_CONTROLLER_WORKFLOW_KIND: &str = "BotControllerWorkflow";
+
+/// Controllers past this patch read a run's decision through
+/// `read_resolution`, which keeps resolve arguments and program outputs out
+/// of their history.
+const READ_RESOLUTION_PATCH: &str = "bot_read_resolution_v1";
 
 /// Start argument of the controller: the bot's configuration and, after a
 /// continue-as-new, what the previous execution carried over.
@@ -521,36 +527,16 @@ async fn reconcile_run(
     ctx.state_mut(|state| state.set_cursor(target, pulled.next_seq));
     let mut resolution = None;
     for invocation in resolve_invocations_for_run(&pulled.invocations, run_id) {
-        let args = match activity(
-            ctx,
-            BotActivities::read_json_blob,
-            BotReadJsonBlobRequest {
-                universe_id,
-                blob_ref: invocation.arguments_ref.clone(),
-            },
-        )
-        .await
-        {
-            Ok(args) => args,
-            Err(message) => {
-                ctx.state_mut(|state| {
-                    state.record_error(format!(
-                        "read bot_event_resolve arguments {}: {message}",
-                        invocation.arguments_ref
-                    ))
-                });
-                continue;
-            }
-        };
-        match parse_event_resolve_args(&args) {
-            Ok(parsed) => {
-                resolution = Some(LaneResolution {
-                    outcome: parsed.outcome,
-                    summary: parsed.summary,
-                });
-            }
-            Err(message) => ctx.state_mut(|state| {
+        match read_resolution(ctx, universe_id, &invocation.arguments_ref).await {
+            Ok(Ok(parsed)) => resolution = Some(parsed),
+            Ok(Err(message)) => ctx.state_mut(|state| {
                 state.record_error(format!("bot_event_resolve arguments invalid: {message}"))
+            }),
+            Err(message) => ctx.state_mut(|state| {
+                state.record_error(format!(
+                    "read bot_event_resolve arguments {}: {message}",
+                    invocation.arguments_ref
+                ))
             }),
         }
     }
@@ -570,43 +556,80 @@ async fn reconcile_run(
         });
     }
     if status == RunStatus::Completed && ctx.state(|state| state.program_sessions) {
-        let verdict = bots::tools::program_verdict(
-            program_output(ctx, universe_id, output_ref).await.as_ref(),
-        );
-        return Some(LaneResolution {
-            outcome: verdict.outcome,
-            summary: verdict.summary,
-        });
+        return Some(program_verdict(ctx, universe_id, output_ref).await);
     }
     None
 }
 
-/// A program run's JSON output. An unreadable output is recorded and
-/// counts as none, so the run is handled.
-async fn program_output(
+/// A completed program run's verdict on its delivery, from its output: an
+/// object with a model-decision `outcome` (and optionally a string
+/// `summary`) decides it, as `bot_event_resolve` would; any other output,
+/// or none, is `handled`. An unreadable output is recorded and counts as
+/// none, so the run is handled.
+async fn program_verdict(
     ctx: &Ctx,
     universe_id: uuid::Uuid,
     output_ref: Option<BlobRef>,
-) -> Option<serde_json::Value> {
-    let output_ref = output_ref?;
-    match activity(
-        ctx,
-        BotActivities::read_json_blob,
-        BotReadJsonBlobRequest {
-            universe_id,
-            blob_ref: output_ref.to_string(),
-        },
-    )
-    .await
-    {
-        Ok(output) => Some(output),
+) -> LaneResolution {
+    let handled = LaneResolution {
+        outcome: BotEventOutcome::Handled,
+        summary: None,
+    };
+    let Some(output_ref) = output_ref else {
+        return handled;
+    };
+    match read_resolution(ctx, universe_id, &output_ref.to_string()).await {
+        Ok(Ok(resolution)) => resolution,
+        Ok(Err(_)) => handled,
         Err(message) => {
             ctx.state_mut(|state| {
                 state.record_error(format!("read program output {output_ref}: {message}"))
             });
-            None
+            handled
         }
     }
+}
+
+/// The decision a JSON blob records: `Err` when it cannot be read,
+/// `Ok(Err)` when it is not a decision. Patched controllers have the
+/// activity parse the blob; older histories read the whole blob into the
+/// workflow and parse it here.
+async fn read_resolution(
+    ctx: &Ctx,
+    universe_id: uuid::Uuid,
+    blob_ref: &str,
+) -> Result<Result<LaneResolution, String>, String> {
+    let blob_ref = blob_ref.to_owned();
+    if !ctx.patched(READ_RESOLUTION_PATCH) {
+        let value = activity(
+            ctx,
+            BotActivities::read_json_blob,
+            BotReadJsonBlobRequest {
+                universe_id,
+                blob_ref,
+            },
+        )
+        .await?;
+        return Ok(parse_event_resolve_args(&value).map(|args| LaneResolution {
+            outcome: args.outcome,
+            summary: args.summary,
+        }));
+    }
+    let read = activity(
+        ctx,
+        BotActivities::read_resolution,
+        BotReadResolutionRequest {
+            universe_id,
+            blob_ref,
+        },
+    )
+    .await?;
+    Ok(match read {
+        BotReadResolutionResult::Resolved { outcome, summary } => {
+            Ok(LaneResolution { outcome, summary })
+        }
+        BotReadResolutionResult::Invalid { message } => Err(message),
+    })
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────

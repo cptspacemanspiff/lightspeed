@@ -238,6 +238,20 @@ impl BotWorkerActivities {
         .await
     }
 
+    #[activity(name = ACTIVITY_BOT_READ_RESOLUTION)]
+    pub async fn read_resolution(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: BotReadResolutionRequest,
+    ) -> Result<BotReadResolutionResult, ActivityError> {
+        let (api, authority) = self.controller(&ctx, request.universe_id, None).await?;
+        crate::gateway::service::authorization::with_controller_authority(
+            authority,
+            crate::bots::sessions::read_resolution(&api, request),
+        )
+        .await
+    }
+
     #[activity(name = ACTIVITY_BOT_EXECUTE_TOOL)]
     pub async fn execute_tool(
         self: Arc<Self>,

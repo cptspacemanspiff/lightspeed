@@ -19,6 +19,7 @@ pub const ACTIVITY_BOT_CLOSE_SESSION: &str = "BotActivities::close_session";
 pub const ACTIVITY_BOT_COUNT_DESCENDANTS: &str = "BotActivities::count_descendants";
 pub const ACTIVITY_BOT_READ_TOOL_INVOCATIONS: &str = "BotActivities::read_tool_invocations";
 pub const ACTIVITY_BOT_READ_JSON_BLOB: &str = "BotActivities::read_json_blob";
+pub const ACTIVITY_BOT_READ_RESOLUTION: &str = "BotActivities::read_resolution";
 pub const ACTIVITY_BOT_EXECUTE_TOOL: &str = "BotActivities::execute_tool";
 pub const ACTIVITY_BOT_RECORD_OUTCOMES: &str = "BotActivities::record_outcomes";
 pub const ACTIVITY_BOT_RECORD_CLOSED: &str = "BotActivities::record_closed";
@@ -129,11 +130,22 @@ impl BotActivities {
         unimplemented!("workflow activity definition only")
     }
 
+    /// Superseded by `read_resolution`; kept for controllers whose history
+    /// predates it.
     #[activity(name = ACTIVITY_BOT_READ_JSON_BLOB)]
     pub async fn read_json_blob(
         _ctx: ActivityContext,
         _request: BotReadJsonBlobRequest,
     ) -> Result<serde_json::Value, ActivityError> {
+        unimplemented!("workflow activity definition only")
+    }
+
+    /// Parse a run's decision on its delivery from a JSON blob.
+    #[activity(name = ACTIVITY_BOT_READ_RESOLUTION)]
+    pub async fn read_resolution(
+        _ctx: ActivityContext,
+        _request: BotReadResolutionRequest,
+    ) -> Result<BotReadResolutionResult, ActivityError> {
         unimplemented!("workflow activity definition only")
     }
 
