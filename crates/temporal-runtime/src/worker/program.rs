@@ -18,11 +18,13 @@ use temporal_workflow::{
     ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
     ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
 };
+use temporalio_common::data_converters::RawValue;
 use temporalio_common::error::ApplicationFailure;
 use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use super::universes::WorkerUniverses;
+use super::value_refs::{ValueRefCodec, ValueRefs};
 use crate::{
     code::{CodeRunError, read_bounded},
     gateway::GatewayAgentApi,
@@ -60,6 +62,23 @@ impl ProgramWorkerActivities {
             universes: WorkerUniverses::Runtime(runtime),
         }
     }
+
+    /// The codec that puts referenced values back, reading each universe's
+    /// store the way these activities do.
+    pub fn value_ref_codec(&self) -> ValueRefCodec {
+        let universes = self.universes.clone();
+        ValueRefCodec::new(Arc::new(move |universe_id| {
+            let universes = universes.clone();
+            Box::pin(async move {
+                let api = universes
+                    .api_for(universe_id)
+                    .await
+                    .map_err(|error| format!("universe {universe_id}: {error:?}"))?;
+                let store: Arc<dyn BlobStore> = api.store().clone();
+                Ok(store)
+            })
+        }))
+    }
 }
 
 #[activities]
@@ -78,8 +97,24 @@ impl ProgramWorkerActivities {
         self: Arc<Self>,
         ctx: ActivityContext,
         request: temporal_workflow::ProgramLoadActivityRequest,
-    ) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
-        load_activity(&self, ctx, request).await
+    ) -> Result<RawValue, ActivityError> {
+        let descriptor = request.descriptor.clone();
+        let loaded = load_activity(&self, ctx, request).await?;
+        let mut refs = ValueRefs::new(universe_of(&descriptor)?);
+        if let temporal_workflow::ProgramLoadActivityResult::Loaded {
+            source,
+            input,
+            context,
+            ..
+        } = &loaded
+        {
+            refs.offer_text("/source", &descriptor.source_ref, source);
+            refs.offer_json("/input", &descriptor.input_ref, input);
+            if let (Some(context), Some(context_ref)) = (context, &descriptor.context_ref) {
+                refs.offer_json("/context", context_ref, context);
+            }
+        }
+        refs.into_payload(&loaded).map_err(non_retryable)
     }
 
     #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ADMIT)]
@@ -96,7 +131,7 @@ impl ProgramWorkerActivities {
         self: Arc<Self>,
         ctx: ActivityContext,
         request: temporal_workflow::ProgramCollectActivityRequest,
-    ) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
+    ) -> Result<RawValue, ActivityError> {
         collect_activity(&self, ctx, request).await
     }
 
@@ -461,12 +496,12 @@ async fn collect_activity(
     activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: temporal_workflow::ProgramCollectActivityRequest,
-) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
+) -> Result<RawValue, ActivityError> {
     let (universe_id, _) = temporal_workflow::split_workflow_id(&request.session_workflow_id)
         .ok_or_else(|| non_retryable("invalid program session identity"))?;
     heartbeating(&ctx, async {
         let api = activities.universes.api_for(universe_id).await?;
-        let completions = runner(&api)
+        let collected = runner(&api)
             .collect(
                 &request.session_workflow_id,
                 &request.execution_id,
@@ -475,7 +510,28 @@ async fn collect_activity(
             )
             .await
             .map_err(retryable)?;
-        Ok(temporal_workflow::ProgramCollectActivityResult { completions })
+        // Large values and messages travel by reference to the session's
+        // blobs; the worker's codec puts them back.
+        let mut refs = ValueRefs::new(universe_id);
+        let mut completions = Vec::with_capacity(collected.len());
+        for (index, part) in collected.into_iter().enumerate() {
+            let at = format!("/completions/{index}/outcome");
+            match (&part.completion.outcome, &part.value_ref) {
+                (Ok(value), Some(blob)) => refs.offer_json(format!("{at}/Ok"), blob, value),
+                (Err(error), value_ref) => {
+                    if let (Some(value), Some(blob)) = (&error.value, value_ref) {
+                        refs.offer_json(format!("{at}/Err/value"), blob, value);
+                    }
+                    if let Some(blob) = &part.message_ref {
+                        refs.offer_text(format!("{at}/Err/message"), blob, &error.message);
+                    }
+                }
+                (Ok(_), None) => {}
+            }
+            completions.push(part.completion);
+        }
+        refs.into_payload(&temporal_workflow::ProgramCollectActivityResult { completions })
+            .map_err(non_retryable)
     })
     .await
 }

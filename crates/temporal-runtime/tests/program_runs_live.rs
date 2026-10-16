@@ -26,7 +26,7 @@ use temporal_runtime::{
     program::ProgramRunner,
     worker::{
         ActivityState, ProgramWorkerActivities, SessionTools, WorkerActivities, program_worker,
-        worker_runtime,
+        program_worker_client, worker_runtime,
     },
 };
 use temporal_workflow::{ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD};
@@ -347,7 +347,7 @@ async fn with_program_workers_admitting(
                 // worker's own `program_admit`.
                 Some(attempts) => temporalio_sdk::Worker::new(
                     &runtime,
-                    client.clone(),
+                    program_worker_client(client.clone(), &activities),
                     temporalio_sdk::WorkerOptions::new(program_queue)
                         .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
                         .register_activities(activities)
@@ -1765,6 +1765,187 @@ async fn a_sleeping_program_waits_in_its_workflow_and_replays_from_history() -> 
                     .await;
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+/// Every program run's workflow id on the session, in invocation order.
+fn program_execution_ids(state: &harness::CoreAgentState) -> Vec<String> {
+    state
+        .workflow_tools
+        .start_requests
+        .values()
+        .filter(|request| request.tool_id.as_str() == harness::PROGRAM_EXECUTE_WORKFLOW_TOOL_ID)
+        .filter_map(
+            |request| match &state.workflow_tools.bindings[&request.tool_id].target {
+                harness::WorkflowToolTarget::Start { start } => {
+                    Some(harness::workflow_tool_execution_id(
+                        &request.invocation_id,
+                        &start.recipe_fingerprint,
+                    ))
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// Whether any event of `events` carries `probe` anywhere in its bytes.
+fn history_contains(
+    events: &[temporalio_common::protos::temporal::api::history::v1::HistoryEvent],
+    probe: &str,
+) -> bool {
+    events.iter().any(|event| {
+        prost::Message::encode_to_vec(event)
+            .windows(probe.len())
+            .any(|window| window == probe.as_bytes())
+    })
+}
+
+const SOURCE_PROBE: &str = "source-history-probe;";
+const INPUT_PROBE: &str = "input-history-probe;";
+const CONTEXT_PROBE: &str = "context-history-probe;";
+
+/// Calls the fixture's echoing tool with the claim, keeps `input.keep` as
+/// its context, and reports only sizes, so its output stays small.
+fn large_values_program() -> String {
+    format!(
+        r#"/* {} */
+        export default {{
+            async run(input, env, ctx) {{
+                const created = await env.mcp[input.server].create_issue({{ title: input.claim }});
+                ctx.setContext({{ kept: input.keep }});
+                return {{
+                    claim: "ok",
+                    slept: 0,
+                    claimLength: input.claim.length,
+                    createdHasClaim: JSON.stringify(created).includes(input.claim),
+                    contextLength: ctx.context?.kept?.length ?? 0,
+                }};
+            }}
+        }};"#,
+        SOURCE_PROBE.repeat(1_000)
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result<()> {
+    with_program_workers_and_client(
+        InputTimeouts::default(),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let fixture = McpFixture::start().await?;
+                let server = format!(
+                    "prog_mcp_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..12]
+                );
+                let profile_id = mcp_program_profile_with(
+                    &api,
+                    &fixture,
+                    &server,
+                    &[&format!("mcp.{server}.create_issue")],
+                    &large_values_program(),
+                    api::RemoteMcpApprovalPolicy::Never,
+                    None,
+                )
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let codec = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone())
+                    .value_ref_codec();
+                let claim = INPUT_PROBE.repeat(2_000);
+                let keep = CONTEXT_PROBE.repeat(1_500);
+
+                // Run 1: large source, input and tool result.
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": claim, "server": server, "keep": keep}),
+                )
+                .await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                assert_eq!(
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                    json!({"claim": "ok", "slept": 0, "claimLength": claim.len(),
+                           "createdHasClaim": true, "contextLength": 0})
+                );
+                let first =
+                    program_execution_ids(&programs::session_state(&store, &session_id).await?);
+                assert_eq!(first.len(), 1);
+
+                // Run 2: the large context run 1 kept.
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "small", "server": server, "keep": ""}),
+                )
+                .await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                assert_eq!(
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
+                    json!({"claim": "ok", "slept": 0, "claimLength": 5,
+                           "createdHasClaim": true, "contextLength": keep.len()})
+                );
+                let ids =
+                    program_execution_ids(&programs::session_state(&store, &session_id).await?);
+                let second = ids
+                    .into_iter()
+                    .find(|id| !first.contains(id))
+                    .expect("second run's workflow");
+
+                for (id, absent) in [
+                    (&first[0], [SOURCE_PROBE, INPUT_PROBE]),
+                    (&second, [SOURCE_PROBE, CONTEXT_PROBE]),
+                ] {
+                    let handle = client
+                        .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(id.clone());
+                    let events = handle
+                        .fetch_history(Default::default())
+                        .into_events()
+                        .await?;
+                    for probe in absent {
+                        assert!(
+                            !history_contains(&events, probe),
+                            "{probe} reached {id}'s history"
+                        );
+                    }
+                    assert!(history_contains(&events, "lightspeed-ref:sha256:"));
+                    // A replay with the codec reads the references back and
+                    // takes the same path; without it the history is unreadable.
+                    WorkflowReplayer::new(
+                        WorkflowReplayerOptions::new()
+                            .data_converter(codec.clone().data_converter())
+                            .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                            .build(),
+                    )?
+                    .replay_workflow(handle.fetch_history(Default::default()))
+                    .await?;
+                    assert!(
+                        WorkflowReplayer::new(
+                            WorkflowReplayerOptions::new()
+                                .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                                .build(),
+                        )?
+                        .replay_workflow(handle.fetch_history(Default::default()))
+                        .await
+                        .is_err()
+                    );
+                }
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                fixture.task.abort();
                 Ok(())
             })
         },

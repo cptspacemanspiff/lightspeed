@@ -12,6 +12,7 @@ pub(crate) mod secrets;
 mod session_content;
 mod session_tools;
 mod universes;
+pub mod value_refs;
 
 use temporalio_client::Client;
 use temporalio_sdk::{Runtime, Worker, WorkerOptions, runtime::RuntimeOptions};
@@ -136,12 +137,22 @@ pub fn code_worker(
 /// The `program` role runs program run workflows with their activities.
 /// Program JavaScript runs on this worker's workflow thread, so it gets a
 /// queue and workers of its own.
+/// `client` with the codec program workflows need: their activities return
+/// large values by reference, and this copy of the client puts them back.
+/// Any worker that runs `ProgramRunWorkflow` must use it.
+pub fn program_worker_client(client: Client, activities: &ProgramWorkerActivities) -> Client {
+    let mut client = client;
+    client.options_mut().data_converter = activities.value_ref_codec().data_converter();
+    client
+}
+
 pub fn program_worker(
     runtime: &Runtime,
     client: Client,
     task_queue: String,
     activities: ProgramWorkerActivities,
 ) -> anyhow::Result<Worker> {
+    let client = program_worker_client(client, &activities);
     let worker_options = WorkerOptions::new(task_queue)
         .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
         .register_activities(activities)

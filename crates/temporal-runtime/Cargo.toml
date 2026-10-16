@@ -67,6 +67,7 @@ test-support = { path = "../test-support" }
 dotenvy = "0.15"
 environment-daemon = { path = "../environment-daemon" }
 futures-util = "0.3"
+prost = "0.14"
 tempfile = "3"
 
 [[bin]]

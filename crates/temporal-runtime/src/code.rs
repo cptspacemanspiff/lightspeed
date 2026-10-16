@@ -566,20 +566,55 @@ pub(crate) async fn materialize(
     outcome: &CodeToolCallOutcome,
     limit: u64,
 ) -> Result<Value, HostError> {
+    materialize_parts(blobs, outcome, limit).await.result
+}
+
+/// A recorded outcome as code receives it, and which of its parts are a
+/// blob's content.
+pub(crate) struct Materialized {
+    pub result: Result<Value, HostError>,
+    /// `output_ref`, when the value (`Ok`, or the error's `value`) is its
+    /// content.
+    pub value_ref: Option<BlobRef>,
+    /// `error_ref`, when the error's message is its content.
+    pub message_ref: Option<BlobRef>,
+}
+
+pub(crate) async fn materialize_parts(
+    blobs: &dyn BlobStore,
+    outcome: &CodeToolCallOutcome,
+    limit: u64,
+) -> Materialized {
+    let failed = |error| Materialized {
+        result: Err(error),
+        value_ref: None,
+        message_ref: None,
+    };
     let value = match &outcome.output_ref {
         Some(reference) => {
-            let bytes = read_bounded(blobs, reference, limit).await?;
-            Some(serde_json::from_slice(&bytes).map_err(|error| {
-                host_error(
-                    "invalid_output",
-                    format!("tool output is not JSON: {error}"),
-                )
-            })?)
+            let bytes = match read_bounded(blobs, reference, limit).await {
+                Ok(bytes) => bytes,
+                Err(error) => return failed(error),
+            };
+            match serde_json::from_slice(&bytes) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    return failed(host_error(
+                        "invalid_output",
+                        format!("tool output is not JSON: {error}"),
+                    ));
+                }
+            }
         }
         None => None,
     };
+    let value_ref = value.as_ref().and(outcome.output_ref.clone());
     if outcome.status == CodeToolCallStatus::Succeeded {
-        return Ok(value.unwrap_or(Value::Null));
+        return Materialized {
+            result: Ok(value.unwrap_or(Value::Null)),
+            value_ref,
+            message_ref: None,
+        };
     }
     let kind = match outcome.status {
         CodeToolCallStatus::Failed => "tool_failed",
@@ -588,20 +623,32 @@ pub(crate) async fn materialize(
         _ => "invalid_output",
     };
     let message = match &outcome.error_ref {
-        Some(reference) => String::from_utf8(read_bounded(blobs, reference, limit).await?)
-            .map_err(|error| {
-                host_error(
-                    "invalid_output",
-                    format!("tool error is not UTF-8: {error}"),
-                )
-            })?,
+        Some(reference) => {
+            let bytes = match read_bounded(blobs, reference, limit).await {
+                Ok(bytes) => bytes,
+                Err(error) => return failed(error),
+            };
+            match String::from_utf8(bytes) {
+                Ok(message) => message,
+                Err(error) => {
+                    return failed(host_error(
+                        "invalid_output",
+                        format!("tool error is not UTF-8: {error}"),
+                    ));
+                }
+            }
+        }
         None => format!("tool completed with status {:?}", outcome.status),
     };
-    Err(HostError {
-        kind: kind.into(),
-        message,
-        value,
-    })
+    Materialized {
+        result: Err(HostError {
+            kind: kind.into(),
+            message,
+            value,
+        }),
+        value_ref,
+        message_ref: outcome.error_ref.clone(),
+    }
 }
 
 #[cfg(test)]
