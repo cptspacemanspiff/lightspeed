@@ -670,6 +670,12 @@ loop:
        result → that). The exit's cleanup waits for it like any call.
        Scope this to workflow-owned promises; the model's own
        `concurrency.cancel` keeps its behaviour.
+     - **An approved call honours a cancel like any call** (user,
+       2026-10-16): a withdrawal that reached the approval workflow before
+       the approved call started means it never starts (the reply is
+       cancelled, though the inbox shows the approval); one that arrives
+       while it runs stops it (`input_request_execute` with
+       wait-cancellation), and the reply is what it really did.
   4. **Per-call cancel.** Every call returns a promise that also has
      `h.cancel()` (today only input handles do). A cancel is a request,
      not an outcome: the session records exactly one outcome per call,

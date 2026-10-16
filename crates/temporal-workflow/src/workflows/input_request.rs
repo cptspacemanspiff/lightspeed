@@ -7,14 +7,17 @@
 //!
 //! An approval request is the same wait for a program call its scope
 //! parked: once approved, the workflow runs that call itself and replies
-//! with its result; a rejection or expiry fails the call.
+//! with its result; a rejection or expiry fails the call. A withdrawal
+//! after approval is honoured like any call's cancel: the call does not
+//! start, or is stopped, and the reply says which.
 
 use std::time::{Duration, UNIX_EPOCH};
 
 use futures::{FutureExt, select_biased};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{
-    CancellableFuture, SyncWorkflowContext, WorkflowContext, WorkflowContextView, WorkflowResult,
+    ActivityCancellationType, CancellableFuture, SyncWorkflowContext, WorkflowContext,
+    WorkflowContextView, WorkflowResult,
 };
 
 use crate::{
@@ -159,23 +162,55 @@ enum Waited {
 }
 
 /// Run the approved call once: a call that failed or timed out is not
-/// retried, as for any call that is not retry-safe.
+/// retried, as for any call that is not retry-safe. A cancel is honoured as
+/// for any other call: one that arrived before the call started means it
+/// never starts, and one that arrives while it runs stops it. The reply is
+/// what the call really did: its result if it finished anyway, otherwise
+/// cancelled.
 async fn execute_approved(
     ctx: &WorkflowContext<InputRequestWorkflow>,
     start: &WorkflowToolStartArgs,
 ) -> WorkflowResult<harness::PromiseResolution> {
-    ctx.execute_activity(
+    let withdrawn =
+        || ctx.state(|state| state.holder_cancelled) || ctx.cancellation_token().is_cancelled();
+    if withdrawn() {
+        return Ok(harness::PromiseResolution::Cancelled);
+    }
+    let mut options = crate::tool_call_activity_options(harness::ToolExecutionSpec::new(
+        harness::ToolExecutionClass::RemoteInteractive,
+        false,
+    ));
+    options.cancellation_type = ActivityCancellationType::WaitCancellationCompleted;
+    let mut execution = ctx.execute_activity(
         WorkflowActivities::input_request_execute,
         InputRequestExecuteActivityRequest {
             start: start.clone(),
         },
-        crate::tool_call_activity_options(harness::ToolExecutionSpec::new(
-            harness::ToolExecutionClass::RemoteInteractive,
-            false,
-        )),
-    )
-    .await
-    .map_err(|error| {
+        options,
+    );
+    let finished = {
+        let holder_cancel = ctx.wait_for_state(|state| state.holder_cancelled);
+        let external_cancel = ctx.cancelled().fuse();
+        let work = (&mut execution).fuse();
+        futures::pin_mut!(holder_cancel, external_cancel, work);
+        select_biased! {
+            result = work => Some(result),
+            _ = holder_cancel => None,
+            _ = external_cancel => None,
+        }
+    };
+    let result = match finished {
+        Some(result) => result,
+        None => {
+            execution.cancel();
+            match execution.await {
+                // It finished before the cancel reached it.
+                Ok(resolution) => return Ok(resolution),
+                Err(_) => return Ok(harness::PromiseResolution::Cancelled),
+            }
+        }
+    };
+    result.map_err(|error| {
         temporalio_sdk::ApplicationFailure::new(anyhow::anyhow!("run approved call: {error}"))
             .into()
     })
