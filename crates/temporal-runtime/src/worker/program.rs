@@ -1,7 +1,9 @@
-//! Code-role activities for program runs: prepare the run's scope and
-//! descriptor, run one attempt, and finalize the run's reply.
+//! Program-role activities for program runs: prepare the run's scope and
+//! descriptor, load the program, admit each step's requests, collect
+//! recorded outcomes, conclude the run, and finalize its reply. The program
+//! itself runs in `ProgramRunWorkflow`; these activities hold no interpreter.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use harness::{
     BlobRef, PromiseResolution,
@@ -16,15 +18,16 @@ use temporal_workflow::{
     ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
     ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
 };
+use temporalio_common::error::ApplicationFailure;
+use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
-use super::code::{
-    CodeWorkerActivities, heartbeat, non_retryable, require_activity_owner, retryable,
-};
+use super::universes::WorkerUniverses;
 use crate::{
     code::{CodeRunError, read_bounded},
     gateway::GatewayAgentApi,
     program::{AdmitStepError, CodeRunReport, ProgramRunner, program_catalog, put_json},
+    universe::UniverseRuntime,
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -40,11 +43,86 @@ enum PreparationError {
     Transport(String),
 }
 
-fn runner(activities: &CodeWorkerActivities, api: &GatewayAgentApi) -> ProgramRunner {
-    ProgramRunner::with_shared_capacity(
+/// The `program` worker role's activities.
+pub struct ProgramWorkerActivities {
+    universes: WorkerUniverses,
+}
+
+impl ProgramWorkerActivities {
+    pub fn for_universe(universe_id: uuid::Uuid, api: Arc<GatewayAgentApi>) -> Self {
+        Self {
+            universes: WorkerUniverses::Fixed { universe_id, api },
+        }
+    }
+
+    pub fn with_runtime(runtime: Arc<UniverseRuntime>) -> Self {
+        Self {
+            universes: WorkerUniverses::Runtime(runtime),
+        }
+    }
+}
+
+#[activities]
+impl ProgramWorkerActivities {
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_PREPARE)]
+    pub async fn program_prepare(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: ProgramPrepareActivityRequest,
+    ) -> Result<ProgramPrepareActivityResult, ActivityError> {
+        prepare_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_LOAD)]
+    pub async fn program_load(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramLoadActivityRequest,
+    ) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
+        load_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_ADMIT)]
+    pub async fn program_admit(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramAdmitActivityRequest,
+    ) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
+        admit_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_COLLECT)]
+    pub async fn program_collect(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramCollectActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
+        collect_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
+    pub async fn program_conclude(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramConcludeActivityRequest,
+    ) -> Result<ProgramAttemptActivityResult, ActivityError> {
+        conclude_activity(&self, ctx, request).await
+    }
+
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_FINALIZE)]
+    pub async fn program_finalize(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: ProgramFinalizeActivityRequest,
+    ) -> Result<PromiseResolution, ActivityError> {
+        finalize_activity(&self, ctx, request).await
+    }
+}
+
+fn runner(api: &GatewayAgentApi) -> ProgramRunner {
+    ProgramRunner::new(
         api.temporal_client().clone(),
         api.store().clone(),
-        activities.capacity(),
         CLEANUP_TIMEOUT,
     )
 }
@@ -193,15 +271,15 @@ async fn prepare(
     })
 }
 
-pub(super) async fn prepare_activity(
-    activities: &CodeWorkerActivities,
+async fn prepare_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: ProgramPrepareActivityRequest,
 ) -> Result<ProgramPrepareActivityResult, ActivityError> {
     require_activity_owner(&ctx, &request.start.execution_id)?;
     let work = async {
         let api = activities
-            .universes()
+            .universes
             .api_for(request.start.universe_id)
             .await?;
         let result = tokio::time::timeout(PREPARE_TIMEOUT, prepare(&api, &request.start))
@@ -307,8 +385,8 @@ fn universe_of(descriptor: &ProgramRunDescriptor) -> Result<uuid::Uuid, Activity
         .ok_or_else(|| non_retryable("invalid program session identity"))
 }
 
-pub(super) async fn load_activity(
-    activities: &CodeWorkerActivities,
+async fn load_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: temporal_workflow::ProgramLoadActivityRequest,
 ) -> Result<temporal_workflow::ProgramLoadActivityResult, ActivityError> {
@@ -316,8 +394,8 @@ pub(super) async fn load_activity(
     require_activity_owner(&ctx, &descriptor.execution_id)?;
     let universe_id = universe_of(&descriptor)?;
     heartbeating(&ctx, async {
-        let api = activities.universes().api_for(universe_id).await?;
-        match runner(activities, &api).load(&descriptor).await {
+        let api = activities.universes.api_for(universe_id).await?;
+        match runner(&api).load(&descriptor).await {
             Ok(loaded) => Ok(temporal_workflow::ProgramLoadActivityResult::Loaded {
                 source: loaded.source,
                 input: loaded.input,
@@ -360,8 +438,8 @@ pub(super) async fn load_activity(
     .await
 }
 
-pub(super) async fn admit_activity(
-    activities: &CodeWorkerActivities,
+async fn admit_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: temporal_workflow::ProgramAdmitActivityRequest,
 ) -> Result<temporal_workflow::ProgramAdmitActivityResult, ActivityError> {
@@ -369,11 +447,8 @@ pub(super) async fn admit_activity(
     require_activity_owner(&ctx, &descriptor.execution_id)?;
     let universe_id = universe_of(&descriptor)?;
     heartbeating(&ctx, async {
-        let api = activities.universes().api_for(universe_id).await?;
-        match runner(activities, &api)
-            .admit_step(&descriptor, request.requests)
-            .await
-        {
+        let api = activities.universes.api_for(universe_id).await?;
+        match runner(&api).admit_step(&descriptor, request.requests).await {
             Ok(rejected) => Ok(temporal_workflow::ProgramAdmitActivityResult { rejected }),
             Err(error @ AdmitStepError::Transport(_)) => Err(retryable(error)),
             Err(error @ AdmitStepError::Diverged(_)) => Err(non_retryable(error)),
@@ -382,16 +457,16 @@ pub(super) async fn admit_activity(
     .await
 }
 
-pub(super) async fn collect_activity(
-    activities: &CodeWorkerActivities,
+async fn collect_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: temporal_workflow::ProgramCollectActivityRequest,
 ) -> Result<temporal_workflow::ProgramCollectActivityResult, ActivityError> {
     let (universe_id, _) = temporal_workflow::split_workflow_id(&request.session_workflow_id)
         .ok_or_else(|| non_retryable("invalid program session identity"))?;
     heartbeating(&ctx, async {
-        let api = activities.universes().api_for(universe_id).await?;
-        let completions = runner(activities, &api)
+        let api = activities.universes.api_for(universe_id).await?;
+        let completions = runner(&api)
             .collect(
                 &request.session_workflow_id,
                 &request.execution_id,
@@ -405,8 +480,8 @@ pub(super) async fn collect_activity(
     .await
 }
 
-pub(super) async fn conclude_activity(
-    activities: &CodeWorkerActivities,
+async fn conclude_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: temporal_workflow::ProgramConcludeActivityRequest,
 ) -> Result<ProgramAttemptActivityResult, ActivityError> {
@@ -414,10 +489,8 @@ pub(super) async fn conclude_activity(
     require_activity_owner(&ctx, &descriptor.execution_id)?;
     let universe_id = universe_of(&descriptor)?;
     heartbeating(&ctx, async {
-        let api = activities.universes().api_for(universe_id).await?;
-        let report = runner(activities, &api)
-            .conclude(&descriptor, request.report)
-            .await;
+        let api = activities.universes.api_for(universe_id).await?;
+        let report = runner(&api).conclude(&descriptor, request.report).await;
         let outcome = attempt_outcome(api.store().as_ref(), &report).await?;
         let report_ref = store_report(
             api.store().as_ref(),
@@ -468,27 +541,21 @@ async fn attempt_outcome(
     Ok(ProgramAttemptOutcome::Returned { output_ref })
 }
 
-pub(super) async fn finalize_activity(
-    activities: &CodeWorkerActivities,
+async fn finalize_activity(
+    activities: &ProgramWorkerActivities,
     ctx: ActivityContext,
     request: ProgramFinalizeActivityRequest,
 ) -> Result<PromiseResolution, ActivityError> {
     require_activity_owner(&ctx, &request.start.execution_id)?;
-    let work = async {
+    heartbeating(&ctx, async {
         let api = activities
-            .universes()
+            .universes
             .api_for(request.start.universe_id)
             .await?;
-        let runner = runner(activities, &api);
+        let runner = runner(&api);
         finalize(&api, &runner, request).await
-    };
-    tokio::pin!(work);
-    let heartbeats = heartbeat(&ctx);
-    tokio::pin!(heartbeats);
-    tokio::select! {
-        result = &mut work => result,
-        () = &mut heartbeats => unreachable!("heartbeats run until activity exits"),
-    }
+    })
+    .await
 }
 
 async fn finalize(
@@ -670,9 +737,70 @@ async fn validate_output(
         .map_err(|error| format!("output does not satisfy the program's output schema: {error}"))
 }
 
+fn require_activity_owner(ctx: &ActivityContext, execution_id: &str) -> Result<(), ActivityError> {
+    if ctx.info().workflow_id.as_deref() != Some(execution_id) {
+        return Err(non_retryable("program activity workflow identity mismatch"));
+    }
+    Ok(())
+}
+
+async fn heartbeat(ctx: &ActivityContext) {
+    let mut ticks =
+        tokio::time::interval(temporal_workflow::ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL);
+    loop {
+        ticks.tick().await;
+        ctx.record_heartbeat(())
+            .await
+            .expect("unit heartbeat serializes");
+    }
+}
+
+fn retryable(error: impl std::fmt::Display) -> ActivityError {
+    ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(error.to_string())))
+}
+
+fn non_retryable(error: impl std::fmt::Display) -> ActivityError {
+    ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+        error.to_string()
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn program_activity_names_match_the_workflow_contract() {
+        use temporal_workflow::WorkflowActivities;
+        for (worker, workflow) in [
+            (
+                ProgramWorkerActivities::program_prepare.name(),
+                WorkflowActivities::program_prepare.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_load.name(),
+                WorkflowActivities::program_load.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_admit.name(),
+                WorkflowActivities::program_admit.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_collect.name(),
+                WorkflowActivities::program_collect.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_conclude.name(),
+                WorkflowActivities::program_conclude.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_finalize.name(),
+                WorkflowActivities::program_finalize.name(),
+            ),
+        ] {
+            assert_eq!(worker, workflow);
+        }
+    }
 
     #[test]
     fn execution_limits_follow_the_pinned_program() {

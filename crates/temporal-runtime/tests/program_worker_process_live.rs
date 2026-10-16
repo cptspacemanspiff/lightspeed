@@ -1,7 +1,7 @@
-//! Lose the code worker process while a program waits on a person, answer,
+//! Lose the program worker process while a program waits on a person, answer,
 //! and check a replacement process finishes the run from the program
 //! workflow's history instead of making its calls again. Session workers run in this process; the
-//! code worker is a real child process.
+//! program worker is a real child process.
 
 #[path = "support/programs.rs"]
 mod programs;
@@ -62,26 +62,26 @@ const RESUMING_PROGRAM: &str = r#"
     };
 "#;
 
-struct CodeProcess {
+struct ProgramProcess {
     child: Child,
     log: tempfile::NamedTempFile,
 }
 
-impl CodeProcess {
+impl ProgramProcess {
     fn start_with(
         session_queue: &str,
-        code_queue: &str,
+        program_queue: &str,
         env: &[(&str, &str)],
     ) -> anyhow::Result<Self> {
         let log = tempfile::NamedTempFile::new()?;
         let child = Command::new(env!("CARGO_BIN_EXE_lightspeed-runtime"))
             .args([
                 "--roles",
-                "code",
+                "program",
                 "--task-queue",
                 session_queue,
-                "--code-task-queue",
-                code_queue,
+                "--program-task-queue",
+                program_queue,
             ])
             .env("LIGHTSPEED_AUTH_MODE", "authenticated")
             // Programs here use no environment tools. These child-local
@@ -89,7 +89,7 @@ impl CodeProcess {
             .env("LIGHTSPEED_ENVIRONMENT_GATEWAY_URL", "http://127.0.0.1:1")
             .env(
                 "LIGHTSPEED_ENVIRONMENT_GATEWAY_TOKEN",
-                "unused-code-test-route",
+                "unused-program-test-route",
             )
             .env("RUST_LOG", "warn")
             .envs(env.iter().copied())
@@ -104,7 +104,7 @@ impl CodeProcess {
     fn ensure_running(&mut self) -> anyhow::Result<()> {
         if let Some(status) = self.child.try_wait()? {
             let log = std::fs::read_to_string(self.log.path())?;
-            anyhow::bail!("owned code worker exited with {status}: {log}");
+            anyhow::bail!("owned program worker exited with {status}: {log}");
         }
         Ok(())
     }
@@ -162,19 +162,19 @@ fn profile(profile_id: &api::ProfileId) -> api::AgentProfileInput {
     }
 }
 
-/// Run the resuming program on a child code worker, kill that worker while
+/// Run the resuming program on a child program worker, kill that worker while
 /// the program waits on its question, answer, and finish on a replacement
 /// worker. Checks the run's output and that no call was admitted twice,
 /// then returns the Temporal attempts of each load and admission activity
 /// the run scheduled.
-async fn resume_after_losing_the_code_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<Vec<i32>>)> {
+async fn resume_after_losing_the_worker() -> anyhow::Result<(Vec<Vec<i32>>, Vec<Vec<i32>>)> {
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
     seed_agent_default(&store, &support::live::openai_live_model()).await?;
     let activity_store = store.clone();
-    let code_queue = format!("program-process-live-{}", uuid::Uuid::new_v4().simple());
-    let activity_queue = code_queue.clone();
+    let program_queue = format!("program-process-live-{}", uuid::Uuid::new_v4().simple());
+    let activity_queue = program_queue.clone();
     let env: &[(&str, &str)] = &[];
     let mut attempts = (Vec::new(), Vec::new());
     let attempts_out = &mut attempts;
@@ -186,13 +186,13 @@ async fn resume_after_losing_the_code_worker() -> anyhow::Result<(Vec<Vec<i32>>,
                 ActivityState::from_pg_store(activity_store, Arc::new(NoModel), tools.clone())
                     .with_hosted_tools(tools)
                     .with_workflow_tool_executions(client)
-                    .with_code_task_queue(activity_queue),
+                    .with_program_task_queue(activity_queue),
             ))
         },
         move |client, session_queue, session_id| async move {
             let api = GatewayAgentApi::builder(client.clone(), store.clone())
                 .with_task_queue(session_queue.clone())
-                .with_code_task_queue(code_queue.clone())
+                .with_program_task_queue(program_queue.clone())
                 .build();
             let profile_id =
                 api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
@@ -212,7 +212,7 @@ async fn resume_after_losing_the_code_worker() -> anyhow::Result<(Vec<Vec<i32>>,
                 config: None,
             })
             .await?;
-            let mut original = CodeProcess::start_with(&session_queue, &code_queue, env)?;
+            let mut original = ProgramProcess::start_with(&session_queue, &program_queue, env)?;
             let result = async {
                 let run = api
                     .start_run(api::RunStartParams {
@@ -268,7 +268,8 @@ async fn resume_after_losing_the_code_worker() -> anyhow::Result<(Vec<Vec<i32>>,
 
                 // Lose the worker, then answer while a replacement takes over.
                 original.kill_and_reap().await?;
-                let mut replacement = CodeProcess::start_with(&session_queue, &code_queue, env)?;
+                let mut replacement =
+                    ProgramProcess::start_with(&session_queue, &program_queue, env)?;
                 let resumed = async {
                     api.answer_inbox_request(api::InboxRequestAnswerParams {
                         request_id: request.request_id.clone(),
@@ -366,13 +367,13 @@ async fn inbox(
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own code worker; run serially"]
+#[ignore = "requires local Temporal and PostgreSQL; launches and kills its own program worker; run serially"]
 async fn a_waiting_program_resumes_on_a_new_worker_when_its_question_is_answered()
 -> anyhow::Result<()> {
     // The replacement worker rebuilt the program from the workflow's
     // history: it was loaded once, and each of its two steps was admitted
     // once, none retried.
-    let (loads, admissions) = resume_after_losing_the_code_worker().await?;
+    let (loads, admissions) = resume_after_losing_the_worker().await?;
     assert_eq!(loads, [vec![1]]);
     assert_eq!(admissions, [vec![1], vec![1]]);
     Ok(())

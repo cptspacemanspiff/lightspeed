@@ -25,7 +25,7 @@ use tracing_subscriber::{EnvFilter, fmt};
     version = release_info::LONG_VERSION,
     about = "Run the Lightspeed hosted runtime",
     after_help = "When no command is supplied, the server runs every role in this process: \
-gateway, environment-gateway, sessions, bots, channels, code. Select a subset with --roles \
+gateway, environment-gateway, sessions, bots, channels, code, program. Select a subset with --roles \
 (or LIGHTSPEED_ROLES). Each worker role runs its workflows and activities together."
 )]
 struct Cli {
@@ -137,8 +137,8 @@ enum ApiKeyCommand {
 #[derive(Clone, Debug, Args)]
 struct RunArgs {
     /// Roles this process runs: a comma-separated subset of gateway,
-    /// environment-gateway, sessions, bots, channels, code (default: all). Run
-    /// exactly one environment-gateway process per deployment.
+    /// environment-gateway, sessions, bots, channels, code, program (default:
+    /// all). Run exactly one environment-gateway process per deployment.
     #[arg(long, env = "LIGHTSPEED_ROLES")]
     roles: Option<String>,
 
@@ -158,6 +158,9 @@ struct RunArgs {
 
     #[arg(long, env = "LIGHTSPEED_TASK_QUEUE_CODE")]
     code_task_queue: Option<String>,
+
+    #[arg(long, env = "LIGHTSPEED_TASK_QUEUE_PROGRAM")]
+    program_task_queue: Option<String>,
 
     /// Maximum simultaneous JavaScript interpreters in this process.
     #[arg(long, env = "LIGHTSPEED_CODE_MAX_CONCURRENT_EXECUTIONS", default_value_t = temporal_runtime::config::DEFAULT_CODE_MAX_CONCURRENT_EXECUTIONS)]
@@ -212,6 +215,13 @@ impl RunArgs {
             .filter(|value| !value.is_empty())
         {
             queues.code = queue.to_owned();
+        }
+        if let Some(queue) = self
+            .program_task_queue
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            queues.program = queue.to_owned();
         }
         Ok(queues)
     }
@@ -579,6 +589,7 @@ async fn run_roles(args: RunArgs) -> anyhow::Result<()> {
         bots_queue = %task_queues.bots,
         channels_queue = %task_queues.channels,
         code_queue = %task_queues.code,
+        program_queue = %task_queues.program,
         "lightspeed-runtime starting"
     );
 
@@ -656,6 +667,18 @@ async fn run_roles(args: RunArgs) -> anyhow::Result<()> {
                 client.clone(),
                 task_queues.code.clone(),
                 activities,
+            )?,
+        ));
+    }
+
+    if roles.has(Role::Program) {
+        workers.push((
+            Role::Program,
+            worker::program_worker(
+                &runtime,
+                client.clone(),
+                task_queues.program.clone(),
+                worker::ProgramWorkerActivities::with_runtime(universes.clone()),
             )?,
         ));
     }
@@ -815,6 +838,27 @@ mod tests {
         assert_eq!(queues.sessions, "test-sessions");
         assert_eq!(queues.code, "test-code");
         assert_eq!(cli.run.code_max_concurrent_executions, 7);
+    }
+
+    #[test]
+    fn program_role_accepts_its_own_queue() {
+        let cli = Cli::try_parse_from([
+            "lightspeed-runtime",
+            "--roles",
+            "program",
+            "--task-queue",
+            "test-sessions",
+            "--program-task-queue",
+            "test-program",
+        ])
+        .expect("parse program role configuration");
+        assert_eq!(cli.run.roles().unwrap().to_string(), "program");
+        let queues = cli.run.task_queues().expect("deployment queues");
+        assert_eq!(queues.program, "test-program");
+        assert_eq!(
+            queues.code,
+            temporal_runtime::config::DEFAULT_CODE_TASK_QUEUE
+        );
     }
 
     #[test]

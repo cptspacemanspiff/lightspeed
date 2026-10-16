@@ -38,8 +38,9 @@ use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     worker::{
-        ActivityState, BotWorkerActivities, CodeWorkerActivities, FakeLlm, FakeTools, SessionTools,
-        WorkerActivities, bots_worker, code_worker, sessions_worker, worker_runtime,
+        ActivityState, BotWorkerActivities, FakeLlm, FakeTools, ProgramWorkerActivities,
+        SessionTools, WorkerActivities, bots_worker, program_worker, sessions_worker,
+        worker_runtime,
     },
 };
 use temporal_workflow::{DEFAULT_TEMPORAL_NAMESPACE, DEFAULT_TEMPORAL_TARGET, connect_temporal};
@@ -50,7 +51,7 @@ const WAIT: Duration = Duration::from_secs(90);
 enum Llm {
     Fake,
     Real,
-    /// No model: the bot's profile has a program, which runs on the code
+    /// No model: the bot's profile has a program, which runs on the program
     /// worker started beside the others.
     Program,
 }
@@ -82,7 +83,8 @@ where
         .with_task_queue(queues.sessions.clone())
         .with_bot_task_queue(queues.bots.clone())
         .with_channel_task_queue(queues.channels.clone())
-        .with_code_task_queue(queues.code.clone());
+        .with_code_task_queue(queues.code.clone())
+        .with_program_task_queue(queues.program.clone());
     let activity_state = match llm {
         Llm::Fake => {
             let blobs: Arc<dyn BlobStore> = store.clone();
@@ -99,7 +101,7 @@ where
             ActivityState::from_pg_store(store.clone(), llm, tools.clone())
                 .with_hosted_tools(tools)
                 .with_workflow_tool_executions(client.clone())
-                .with_code_task_queue(queues.code.clone())
+                .with_program_task_queue(queues.program.clone())
         }
     };
     let program = matches!(llm, Llm::Program);
@@ -117,27 +119,27 @@ where
         queues.bots.clone(),
         BotWorkerActivities::for_universe(universe, api.clone()),
     )?;
-    let mut code = if program {
-        Some(code_worker(
+    let mut programs = if program {
+        Some(program_worker(
             &runtime,
             client.clone(),
-            queues.code.clone(),
-            CodeWorkerActivities::for_universe(universe, api.clone(), 2)?,
+            queues.program.clone(),
+            ProgramWorkerActivities::for_universe(universe, api.clone()),
         )?)
     } else {
         None
     };
     let shutdown_sessions = sessions_worker.shutdown_handle();
     let shutdown_bots = bots.shutdown_handle();
-    let shutdown_code = code.as_ref().map(|worker| worker.shutdown_handle());
+    let shutdown_programs = programs.as_ref().map(|worker| worker.shutdown_handle());
     let workers = async {
-        let code = async {
-            match code.as_mut() {
+        let programs = async {
+            match programs.as_mut() {
                 Some(worker) => worker.run().await,
                 None => Ok(()),
             }
         };
-        tokio::try_join!(sessions_worker.run(), bots.run(), code)
+        tokio::try_join!(sessions_worker.run(), bots.run(), programs)
             .map(|_| ())
             .map_err(anyhow::Error::from)
     };
@@ -153,8 +155,8 @@ where
     };
     shutdown_sessions();
     shutdown_bots();
-    if let Some(shutdown_code) = shutdown_code {
-        shutdown_code();
+    if let Some(shutdown_programs) = shutdown_programs {
+        shutdown_programs();
     }
     let shutdown_result = support::live::bounded_live_test(
         "worker shutdown",

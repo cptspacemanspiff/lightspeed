@@ -24,7 +24,7 @@ use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     worker::{
-        ActivityState, CodeWorkerActivities, SessionTools, WorkerActivities, code_worker,
+        ActivityState, ProgramWorkerActivities, SessionTools, WorkerActivities, program_worker,
         worker_runtime,
     },
 };
@@ -228,7 +228,7 @@ async fn read_json(store: &store_pg::PgStore, reference: &str) -> anyhow::Result
 
 type ProgramTestBody = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>;
 
-/// Run `body` against a gateway with a session worker and a code worker on
+/// Run `body` against a gateway with a session worker and a program worker on
 /// fresh queues, with no model and the given human-input timeouts.
 async fn with_program_workers(
     input_timeouts: InputTimeouts,
@@ -254,8 +254,8 @@ async fn with_program_workers_and_client(
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
     seed_agent_default(&store, &support::live::openai_live_model()).await?;
-    let code_queue = format!("program-live-{}", uuid::Uuid::new_v4().simple());
-    let activity_queue = code_queue.clone();
+    let program_queue = format!("program-live-{}", uuid::Uuid::new_v4().simple());
+    let activity_queue = program_queue.clone();
     let activity_store = store.clone();
     run_with_live_worker_builder(
         move |client, _| async move {
@@ -269,7 +269,7 @@ async fn with_program_workers_and_client(
                 )
                 .with_hosted_tools(tools)
                 .with_workflow_tool_executions(client)
-                .with_code_task_queue(activity_queue)
+                .with_program_task_queue(activity_queue)
                 .with_input_timeouts(input_timeouts)
                 .with_native_mcp_from_pg_store(activity_store)?,
             ))
@@ -278,24 +278,24 @@ async fn with_program_workers_and_client(
             let api = Arc::new(
                 GatewayAgentApi::builder(client.clone(), store.clone())
                     .with_task_queue(queue)
-                    .with_code_task_queue(code_queue.clone())
+                    .with_program_task_queue(program_queue.clone())
                     .with_input_timeouts(input_timeouts)
                     .build(),
             );
-            let activities = CodeWorkerActivities::for_universe(live_universe_id()?, api.clone(), 2)?;
+            let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone());
             let runtime = worker_runtime()?;
-            let mut worker = code_worker(&runtime, client.clone(), code_queue, activities)?;
+            let mut worker = program_worker(&runtime, client.clone(), program_queue, activities)?;
             let shutdown = worker.shutdown_handle();
             let worker_run = worker.run();
             tokio::pin!(worker_run);
             let result = tokio::select! {
                 result = body(api, store, session_id, client.clone()) => result,
-                result = &mut worker_run => Err(anyhow::anyhow!("code worker stopped early: {result:?}")),
+                result = &mut worker_run => Err(anyhow::anyhow!("program worker stopped early: {result:?}")),
             };
             shutdown();
             let stopped = tokio::time::timeout(Duration::from_secs(15), &mut worker_run).await;
             result?;
-            stopped.map_err(|_| anyhow::anyhow!("code worker did not stop"))??;
+            stopped.map_err(|_| anyhow::anyhow!("program worker did not stop"))??;
             Ok(())
         },
     )

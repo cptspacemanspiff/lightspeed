@@ -24,16 +24,21 @@ pub enum Role {
     Channels,
     /// JavaScript execution workflows and their isolated activity capacity.
     Code,
+    /// Program run workflows. A program's JavaScript runs on the workflow
+    /// thread of the worker holding its run, so programs get workers of
+    /// their own instead of sharing them with sessions or code mode.
+    Program,
 }
 
 impl Role {
-    pub const ALL: [Role; 6] = [
+    pub const ALL: [Role; 7] = [
         Role::Gateway,
         Role::EnvironmentGateway,
         Role::Sessions,
         Role::Bots,
         Role::Channels,
         Role::Code,
+        Role::Program,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -44,6 +49,7 @@ impl Role {
             Self::Bots => "bots",
             Self::Channels => "channels",
             Self::Code => "code",
+            Self::Program => "program",
         }
     }
 
@@ -69,8 +75,9 @@ impl FromStr for Role {
             "bots" => Ok(Self::Bots),
             "channels" => Ok(Self::Channels),
             "code" => Ok(Self::Code),
+            "program" => Ok(Self::Program),
             other => Err(format!(
-                "unknown role {other:?}; expected a comma-separated subset of gateway, environment-gateway, sessions, bots, channels, code"
+                "unknown role {other:?}; expected a comma-separated subset of gateway, environment-gateway, sessions, bots, channels, code, program"
             )),
         }
     }
@@ -152,6 +159,16 @@ mod tests {
         assert!(!only.serves_http());
         assert_eq!(only.worker_roles().collect::<Vec<_>>(), vec![Role::Code]);
         assert!(!only.has(Role::Sessions));
+    }
+
+    #[test]
+    fn program_is_a_worker_role_separate_from_code() {
+        assert!(RoleSet::all().has(Role::Program));
+        let only = RoleSet::parse("program").unwrap();
+        assert!(!only.serves_http());
+        assert_eq!(only.worker_roles().collect::<Vec<_>>(), vec![Role::Program]);
+        assert!(!only.has(Role::Code));
+        assert!(!RoleSet::parse("code").unwrap().has(Role::Program));
     }
 
     #[test]

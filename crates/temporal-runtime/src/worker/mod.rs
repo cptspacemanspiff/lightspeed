@@ -31,6 +31,7 @@ pub use bots::BotWorkerActivities;
 pub use channels::ChannelWorkerActivities;
 pub use code::CodeWorkerActivities;
 pub use fake::{FAKE_TRANSIENT_RETRY_AFTER, FakeLlm, FakeRuntimeCounters, FakeTools};
+pub use program::ProgramWorkerActivities;
 pub use reaper::{
     CasBlobSweeper, CasSweepStats, PromiseReaper, ReaperStats, SessionRetentionReaper,
     SessionRetentionReaperStats,
@@ -127,6 +128,21 @@ pub fn code_worker(
 ) -> anyhow::Result<Worker> {
     let worker_options = WorkerOptions::new(task_queue)
         .register_workflow::<temporal_workflow::CodeExecutionWorkflow>()?
+        .register_activities(activities)
+        .build();
+    Ok(Worker::new(runtime, client, worker_options)?)
+}
+
+/// The `program` role runs program run workflows with their activities.
+/// Program JavaScript runs on this worker's workflow thread, so it gets a
+/// queue and workers of its own.
+pub fn program_worker(
+    runtime: &Runtime,
+    client: Client,
+    task_queue: String,
+    activities: ProgramWorkerActivities,
+) -> anyhow::Result<Worker> {
+    let worker_options = WorkerOptions::new(task_queue)
         .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
         .register_activities(activities)
         .build();

@@ -121,6 +121,7 @@ pub struct ActivityState {
     runtime_projection: Option<RuntimeProjectionActivityDeps>,
     pub(super) preparation_store: Option<Arc<PgStore>>,
     pub(super) code_task_queue: String,
+    pub(super) program_task_queue: String,
     pub(super) input_timeouts: tools::human_input::InputTimeouts,
     audio: AudioActivityDeps,
     environment_jobs: Option<EnvironmentJobActivityDeps>,
@@ -155,6 +156,7 @@ impl ActivityState {
             runtime_projection: None,
             preparation_store: None,
             code_task_queue: crate::config::DEFAULT_CODE_TASK_QUEUE.to_owned(),
+            program_task_queue: crate::config::DEFAULT_PROGRAM_TASK_QUEUE.to_owned(),
             input_timeouts: tools::human_input::InputTimeouts::default(),
             audio: AudioActivityDeps {
                 blobs: blobs.clone(),
@@ -169,6 +171,11 @@ impl ActivityState {
 
     pub fn with_code_task_queue(mut self, task_queue: String) -> Self {
         self.code_task_queue = task_queue;
+        self
+    }
+
+    pub fn with_program_task_queue(mut self, task_queue: String) -> Self {
+        self.program_task_queue = task_queue;
         self
     }
 

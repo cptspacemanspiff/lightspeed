@@ -868,6 +868,7 @@ fn preparation_service(
             store,
             task_queue: ctx.info().task_queue.clone(),
             code_task_queue: state.code_task_queue.clone(),
+            program_task_queue: state.program_task_queue.clone(),
             input_timeouts: state.input_timeouts,
             mcp_inventory: None,
         },
