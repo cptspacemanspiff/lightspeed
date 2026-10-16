@@ -75,7 +75,7 @@ session-owned effects are stronger, called out in D7 and D8.
   unchanged.
 - Checkpointing interpreter heaps. Durability comes from replaying the
   workflow's history; the only saved program state is an explicit JSON
-  checkpoint (`ctx.continueAsNew`, D7, planned).
+  value (`ctx.continueAsNew` / `ctx.complete`, D7, planned).
 - Direct network egress from program code. All I/O goes through tools.
 - Re-executing recorded reads on replay to keep the log small, as Cloudflare's
   `replay: "reexecute"` does (`connectors/base.ts`). Results live in CAS by
@@ -104,6 +104,14 @@ activity (built). Long runs use reference payloads, an explicit
 `ctx.continueAsNew(state)`, `ctx.shouldContinue()` and a typed
 `history_exhausted` failure (D7 "Long runs"); heap checkpoints, history
 rollover and outcomes in the wake signal were considered and rejected.
+
+**Revision (2026-10-16, user), program state and exits.** One carried
+value, `ctx.state`, with two explicit exits: `ctx.continueAsNew(state)`
+(same run, new execution) and `ctx.complete(result, state)` (the next run
+starts from it). It replaces `ctx.context` / `ctx.setContext`. Every exit
+cancels the calls the program still owns and waits, as a workflow await,
+until each has a recorded outcome; `detach()` keeps a promise-backed call
+alive. Every call gets `cancel()`. Details in D7 "Long runs".
 
 ### D1. A session type at the edges, the shared harness in the middle
 
@@ -379,8 +387,10 @@ presentation was active. Add a program-facing contract layer in `crates/tools`:
   `env.web.fetch`, `env.agent.run`, `env.program.run`, `env.mcp.<server>.<tool>`,
   `env.time.sleep`, and from D14 `env.input.request`). Each entry wraps an opaque binding handle from the scope
   (D3); the guest holds no names it can forge. `ctx` carries `say`, `step`,
-  the run's `startedAt` (D11), and from D14 the program context
-  (`ctx.context`, `ctx.setContext`). Calls are methods only, arguments by value as
+  the run's `startedAt` (D11), and from D7 the program state (`ctx.state`,
+  `ctx.continued`, `ctx.continueAsNew`, `ctx.complete`; this replaced D14's
+  `ctx.context` / `ctx.setContext`). Every call returns a promise with
+  `cancel()`; promise-backed calls also have `detach()`. Calls are methods only, arguments by value as
   JSON, no property reads across the boundary. The host never rejects across
   the bridge: a pause, a failed outcome or a host error come back as a control
   value and the generated wrapper throws locally, so the program's own
@@ -534,36 +544,166 @@ loop:
   cancel until the admission returns. Live test
   `a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice`
   (the first attempt admits, then fails; the MCP server is called once).
-- **Long runs** (agreed 2026-10-15, not built). In order:
-  1. **Program values out of history.** Workflows see only blob
-     references; activities read and write the bytes. The program workflow
-     is the exception, since its JS needs values. `program_load` and
-     `program_collect` return the session-owned references (source, input,
-     context, tool output and error) over a threshold (16 KiB, env
-     override). A decode-only worker `PayloadCodec` fetches the bytes from
-     the universe's content store, so replay sees the same values. The
-     codec never encodes: the SDK gives it no workflow context, and
-     ownership stays with the session's records. Values the program
-     creates (its output and `setContext` value) go to `program_conclude`
-     as a local activity, whose arguments Temporal does not record, as
-     with `program_admit`'s tool arguments.
-  2. **`ctx.continueAsNew(state)`**, the only real bound. Temporal's sense
-     of the word: the program hands over explicit JSON state (the same rules
-     as `ctx.setContext`, 64 KiB) and the next execution calls `run` from
-     the top with `ctx.continued = state`, under the same run. Written
-     `return ctx.continueAsNew(state)`, so no code runs after it and a
-     `try/catch` cannot swallow it. Nothing else survives: locals,
-     closures and pending promises are gone, so the author writes the
-     program as a loop that resumes from its state. Each execution gets a
-     fresh scope (call ids restart), so both history and the session's
-     scope log stop growing; `max_calls` applies per execution, plus a
-     per-run total. It refuses while calls are in flight (open: what to do
-     with long-lived `input.open` handles, see Open questions).
-  3. **`ctx.shouldContinue()`** (true when Temporal suggests continue-as-new
-     or our event or byte threshold is near) and a typed
+- **Long runs** (agreed 2026-10-15, revised with the user 2026-10-16). In
+  order:
+  1. **Program values out of history** (built, `40af5026`..`0d258111`).
+     Workflows see only blob references; activities read and write the
+     bytes. The program workflow is the exception, since its JS needs
+     values. `program_load` and `program_collect` return the session-owned
+     references (source, input, state, tool output and error) over a
+     threshold (16 KiB, `LIGHTSPEED_PROGRAM_INLINE_VALUE_BYTES`). A
+     decode-only worker `PayloadCodec` fetches the bytes from the
+     universe's content store, so replay sees the same values. The codec
+     never encodes: the SDK gives it no workflow context, and ownership
+     stays with the session's records. Values the program creates (its
+     output and its handed-over state) go to local activities, whose
+     arguments Temporal does not record, as with `program_admit`'s tool
+     arguments.
+  2. **One state, two clean exits.** A program carries exactly one JSON
+     value forward, `ctx.state`, and ends a run's execution in one of two
+     explicit ways:
+     - `return ctx.continueAsNew(state)`: same run, same `input`, a new
+       execution (Temporal's continue-as-new). `run` is called from the top
+       with `ctx.state = state` and `ctx.continued = true`.
+     - `return ctx.complete(result, state)`: the run ends with `result`; the
+       next run (new input, whenever the session gets one) starts with
+       `ctx.state = state` and `ctx.continued = false`.
+
+     Both take JSON under the same rules and cap (64 KiB) and serialize when
+     called. Each returns an unforgeable token; it takes effect only when
+     `run` returns it, so a `try/catch` cannot swallow it (unlike the
+     Temporal TypeScript SDK's throwing `continueAsNew`), and calling one
+     without returning it, or twice, fails the run. Nothing else survives
+     an exit: locals, closures and promises are gone, so the author writes
+     the program as a loop that resumes from its state. A plain
+     `return value` or a failure leaves the state as it was when the run
+     started (a failed run does not hand over a mid-run checkpoint).
+     `ctx.context` and `ctx.setContext` are replaced by this; internally the
+     `complete` state is stored as today's program context entry when the
+     run completes (retained by `context_retained`, shown in the session
+     view). Typical shape:
+
+     ```js
+     const s = ctx.continued ? ctx.state : { i: 0, head: ctx.state?.head ?? null };
+     // ... loop; every N items: return ctx.continueAsNew({ ...s, i: s.i + 1 });
+     return ctx.complete({ handled }, { head });
+     ```
+
+     Small, bounded state only (cursors, counters, this run's delta, a
+     reference). Data that grows with calls or runs belongs in workspace
+     files (`vfs.*`) or CAS (`blob.put`, e.g. linked chunks), with a
+     reference in the state; this is Temporal's own advice for
+     continue-as-new input.
+  3. **Exits settle every call.** One rule for every exit (`complete`,
+     `continueAsNew`, a plain `return`, `throw`): every call the program
+     still owns is cancelled, and the exit waits until each has a recorded
+     outcome. Nothing in flight crosses an exit, so there is no
+     `calls_in_flight` refusal and no per-contract kinds (wait, read,
+     effect). Cancels resolve the way each call can: a sleep, await or
+     read settles at once; an input request is withdrawn unless answered
+     first; an effect stops or finishes and records which; a process is
+     killed after its grace. Program scopes' tool activities use
+     wait-cancellation-completed, so the recorded outcome is always the
+     activity's real one, never an assumed "cancelled". Costs: a call the
+     program did not await is cancelled (await what you need), a process
+     can be stopped partway, and exits wait for acknowledgements (about one
+     heartbeat, 2 s, plus a tool's cleanup).
+     - **The cleanup is a workflow await, not JS.** The program has already
+       returned, so the host does it: one local activity closes the scope
+       with `cancel_pending` (close and return, no polling), then the
+       workflow suspends on `ScopeProgress` wakes until
+       `recorded == admitted`, exactly like a JS await but with nothing
+       delivered to the engine, and reads the outcomes for the run report.
+       It holds no worker and has no deadline (today's 10 s polling inside
+       `program_conclude`, and its "outcome unknown", go away). Every way a
+       call can end, including cancelled before dispatch, must emit
+       `ScopeProgress`.
+     - **`h.detach()`** keeps a promise-backed call (an input request; later
+       jobs and sub-agents) alive past an exit, through the existing
+       `promise.detach`. The program puts `h.id` in its state and
+       rebuilds the handle later with `env.input.handle(id)`, so a run can
+       continue as new while it waits days for an approval. Activity-backed
+       calls cannot be detached: their scope's close waits for them.
+     - The close must withdraw the run's own undetached input requests
+       (the promise and the inbox item), not only the call awaiting them.
+       Not yet confirmed that it does today (`code_tool_joined_result`
+       marks the waiting call cancelled while the promise is pending).
+  4. **Per-call cancel.** Every call returns a promise that also has
+     `h.cancel()` (today only input handles do). A cancel is a request,
+     not an outcome: the session records exactly one outcome per call,
+     first wins, and the program reads it from the call's promise. A
+     result that lands before the cancel is delivered as the result.
+     `h.cancel()` reports the status it found, `cancelled`, `resolved` or
+     `failed` (as `promise.cancel` does today), for logging only.
+     - Guest to session: the engine emits a cancel for an issued request;
+       `program_admit` sends it in issue order as a new
+       `cancel_code_tool_call` Update; the session appends "cancel
+       requested". A call started and cancelled in the same step never
+       leaves the engine and settles locally as cancelled.
+     - In the session (exists for scope cancel): the dispatcher cancels the
+       call's activity (`future.cancel()`); the activity sees it on its next
+       heartbeat and drops its work. A call not yet dispatched is recorded
+       cancelled without starting. Waits wake `Cancelled` through
+       `code_tool_wake`, which today only checks the scope.
+     - Replay: the cancel is admitted like a call, so it is safe to send
+       twice (a retried local activity resends it; the session answers with
+       the call's current state). The race between a cancel and a result is
+       decided once by the session, the scope's only writer, and recorded in
+       its history; the program sees only the collected outcome, which is a
+       marker in its own history. `clearTimeout` cancels its sleep.
+     - To check before building: `promise.cancel` computes its reply from
+       the promise's status at preparation and applies its effect at append;
+       an answer landing in between may make it report `cancelled` for an
+       answered promise.
+  5. **Executions.** A run is one `ProgramRunWorkflow` (workflow id
+     `wtx:…`); `continueAsNew` adds an execution to it (same id, new
+     Temporal run id, fresh history). Replays after a lost worker re-run the
+     same execution and are not new executions.
+     - Each execution has its own scope: `wtx:…` for the first, `wtx:…~N`
+       after. Call ids restart, so session state and history stop growing.
+       When a run opens a new scope, its earlier closed, settled scopes
+       leave session state (the log keeps them).
+     - `ScopeProgress` for a run-owned scope goes to the run's workflow id
+       (`program_run_execution_id`), not the scope id; the workflow ignores
+       wakes for scopes other than its current one.
+     - A `program_checkpoint` local activity stores the state (its
+       arguments are not recorded), closes the settled scope and opens the
+       next. The workflow's input becomes `{ start, continuation }`; the
+       continuation carries the descriptor (no second prepare), the
+       execution number, the state's reference, the engine clock and the
+       calls used so far. The next execution's random seed derives from
+       the run and execution number; its clock starts where the last one
+       stopped.
+     - Limits: `max_calls` per execution (the scope's limit); a run-wide
+       total `max_run_calls`, proposed optional with no default cap.
+       `max_wall_clock_ms` is not enforced at all since programs moved into
+       the workflow; proposed fix: a durable timer from the run's start,
+       carried across executions.
+     - Signals arriving during the handover are not lost: the server
+       rejects a continue-as-new completion with new events and redelivers
+       them, and later signals reach the current execution by workflow id.
+  6. **`ctx.shouldContinue()`** (true when Temporal suggests continue-as-new
+     or our event or byte threshold is near, the same signals as the
+     TypeScript SDK's `workflowInfo()`) and a typed
      **`history_exhausted`** failure before Temporal's own cap, so a program
      that ignores the signal fails with a clear error instead of being
      terminated by the server.
+- **Considered for long runs and rejected** (2026-10-16, in addition to the
+  list below):
+  - *Separate memory and continuation channels* (`setContext` plus
+    `ctx.continued`): two carry paths that collide when `setContext` is
+    called mid-run. One state with two exits replaces both.
+  - *Refusing an exit with calls in flight*: blocks a program on calls it no
+    longer needs (the losing approvals of a 1-of-3 request).
+  - *Classifying contracts as wait, read or effect* to pick per-call exit
+    behaviour: cancel-and-settle for everything is one rule and needs no
+    classification, which matters for MCP tools whose behaviour is unknown.
+  - *A save point before the handover* (checkpoint, keep running, hand over
+    later and replay the tail): a bounded form of the rejected history
+    rollover. Temporal's model is that the handover is the save point.
+  - *Cleanup in JS* (the prelude cancelling its own outstanding promises):
+    the program has returned and may be the reason the run failed; the
+    host's scope close does it in one message.
 - **Considered for long runs and rejected** (2026-10-15):
   - *Checkpointing the interpreter heap.* JS cannot introspect its own
     closures or suspended frames. Between steps the JS stack is empty and
@@ -1029,11 +1169,12 @@ between runs: a second run gets only its own input. A follow-up months later
 therefore rebuilds its view from the outside world (the issue thread, labels)
 or from state the program stored. A program session's equivalent of an
 agent's context is a **program context**: a JSON document the program
-keeps between runs. A run reads the newest as `ctx.context` (read when the
+keeps between runs. A run reads the newest as `ctx.state` (read when the
 run starts and recorded with its inputs, so replay sees the same value)
-and sets its own with a helper (`ctx.setContext(value)`); the runtime
-appends it when the run completes, so a failed run leaves the previous
-context in place. Each run's context is its own ordinary context entry (a
+and hands over the next with `return ctx.complete(result, state)` (D7
+"Long runs", 2026-10-16; this replaced `ctx.context` / `ctx.setContext`);
+the runtime appends it when the run completes, so a failed run, or one
+that returns without `complete`, leaves the previous context in place. Each run's context is its own ordinary context entry (a
 `ProgramState` kind, JSON content in the content store, tagged with the
 run), so the active context holds a history of recent runs' states and a
 later fork can start from the end of any retained run. Retention is the
@@ -1048,7 +1189,8 @@ events). A routed key moves to a new session (its next generation) when
 its program changes; the new session opens with the newest program
 context seeded, as profile instructions are published at open. Not the
 VFS: a program that wants a readable document writes it to a workspace
-instead.
+instead, and data that grows across runs goes to files or CAS with a
+reference in the state.
 
 ## API surface
 
@@ -1113,7 +1255,8 @@ regenerated contracts).
      `Park` with the same settings; the `withReminders` helper library; the
      waiting run notification and its bot handling (`deferred`, no terminal
      timeout while waiting, `queue`/`supersede`); verdicts from program output;
-     the program context (`ctx.context` / `ctx.setContext`, one context
+     the program context (built as `ctx.context` / `ctx.setContext`, being
+     replaced by `ctx.state` / `ctx.complete` in Phase 4's follow-ups; one context
      entry per run written at completion, the last `context_retained`
      (default 10) kept active, carried across a routed key's generations).
    - Until Phase 4 a wait held a live attempt, bounded by its wall clock;
@@ -1131,8 +1274,11 @@ regenerated contracts).
      admission as a local activity (11 → 6 history events per sequential
      call, with a live test for a lost admission result and one that
      measures events per call).
-   - Remaining, in order (D7 "Long runs"): program values out of history;
-     `ctx.continueAsNew(state)` with a scope per execution;
+   - Built after: program values out of history (reference payloads and a
+     decode-only codec; `program_conclude` as a local activity).
+   - Remaining, in order (D7 "Long runs"): exits that settle every call,
+     per-call `cancel()` and `detach()`; `ctx.state` with
+     `ctx.continueAsNew` and `ctx.complete`, a scope per execution;
      `ctx.shouldContinue()` and `history_exhausted`; Temporal worker
      versioning.
 5. **Composition** (D13).
@@ -1207,14 +1353,15 @@ with both tests.
   program move to a new version (republish, or an adapter)? MCP tools change
   upstream without notice, so their side of this is a policy (fail, or adapt)
   rather than a support window.
-- **Long runs** (D7): the design is agreed (reference payloads,
-  `ctx.continueAsNew`, `ctx.shouldContinue`, `history_exhausted`); the
-  reference threshold is proposed at 16 KiB. Still open: the per-execution
-  and per-run call caps; and whether
-  `ctx.continueAsNew` may carry open `input.open` handles across (their ids
-  in the state, handed back as handles) or must refuse while any is
-  pending, which a program waiting days on an approval could never get
-  past.
+- **Long runs** (D7): the design is agreed (reference payloads, built;
+  `ctx.state` with `continueAsNew` and `complete`; exits that settle every
+  call; per-call `cancel()` and `detach()`; `ctx.shouldContinue`,
+  `history_exhausted`). Settled 2026-10-16: open `input.open` handles
+  cross an exit only when detached, with their ids in the state; the
+  names `ctx.state`, `ctx.continued`, `continueAsNew`, `complete`. Still
+  open, with proposals: `max_run_calls` (optional, no default cap);
+  enforcing `max_wall_clock_ms` (unenforced since programs moved into
+  the workflow; a timer from the run's start, carried across executions).
 - **Isolation** (D9, D12): untrusted program code now runs in a workflow
   worker. Is a separate `program` worker role enough for now, and which
   stronger option comes first: a WebAssembly component or workerd?
