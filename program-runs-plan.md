@@ -100,7 +100,7 @@ and then removed. D14's `env.state` became the program context (`ctx.context`
 / `ctx.setContext`). The sections below are updated to match.
 
 **Revision (2026-10-15, user), long runs.** Admission became a local
-activity (built). Long runs use the claim-check codec, an explicit
+activity (built). Long runs use reference payloads, an explicit
 `ctx.continueAsNew(state)`, `ctx.shouldContinue()` and a typed
 `history_exhausted` failure (D7 "Long runs"); heap checkpoints, history
 rollover and outcomes in the wake signal were considered and rejected.
@@ -535,11 +535,18 @@ loop:
   `a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice`
   (the first attempt admits, then fails; the MCP server is called once).
 - **Long runs** (agreed 2026-10-15, not built). In order:
-  1. **Claim-check payload codec.** Results above a threshold go to the
-     content store and history keeps a ref (`temporalio-sdk` 1.0 has a
-     `PayloadCodec` hook; blobs are content-addressed and immutable, so
-     decoding on replay is deterministic). This takes result bytes out of
-     the 50 MB limit for every workflow, not only programs.
+  1. **Program values out of history.** Workflows see only blob
+     references; activities read and write the bytes. The program workflow
+     is the exception, since its JS needs values. `program_load` and
+     `program_collect` return the session-owned references (source, input,
+     context, tool output and error) over a threshold (16 KiB, env
+     override). A decode-only worker `PayloadCodec` fetches the bytes from
+     the universe's content store, so replay sees the same values. The
+     codec never encodes: the SDK gives it no workflow context, and
+     ownership stays with the session's records. Values the program
+     creates (its output and `setContext` value) go to `program_conclude`
+     as a local activity, whose arguments Temporal does not record, as
+     with `program_admit`'s tool arguments.
   2. **`ctx.continueAsNew(state)`**, the only real bound. Temporal's sense
      of the word: the program hands over explicit JSON state (the same rules
      as `ctx.setContext`, 64 KiB) and the next execution calls `run` from
@@ -1124,7 +1131,7 @@ regenerated contracts).
      admission as a local activity (11 → 6 history events per sequential
      call, with a live test for a lost admission result and one that
      measures events per call).
-   - Remaining, in order (D7 "Long runs"): the claim-check payload codec;
+   - Remaining, in order (D7 "Long runs"): program values out of history;
      `ctx.continueAsNew(state)` with a scope per execution;
      `ctx.shouldContinue()` and `history_exhausted`; Temporal worker
      versioning.
@@ -1200,9 +1207,10 @@ with both tests.
   program move to a new version (republish, or an adapter)? MCP tools change
   upstream without notice, so their side of this is a policy (fail, or adapt)
   rather than a support window.
-- **Long runs** (D7): the design is agreed (codec, `ctx.continueAsNew`,
-  `ctx.shouldContinue`, `history_exhausted`). Still open: the per-execution
-  and per-run call caps; the codec's size threshold; and whether
+- **Long runs** (D7): the design is agreed (reference payloads,
+  `ctx.continueAsNew`, `ctx.shouldContinue`, `history_exhausted`); the
+  reference threshold is proposed at 16 KiB. Still open: the per-execution
+  and per-run call caps; and whether
   `ctx.continueAsNew` may carry open `input.open` handles across (their ids
   in the state, handed back as handles) or must refuse while any is
   pending, which a program waiting days on an approval could never get
