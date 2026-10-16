@@ -1578,6 +1578,12 @@ pub enum SessionEventKindView {
     PromiseCancelRequested {
         promise_id: String,
     },
+    /// A detached promise was taken back by a run, which now owns it: the
+    /// run's exit withdraws it unless the run detaches it again.
+    PromiseAdopted {
+        promise_id: String,
+        run_id: RunId,
+    },
     TurnStarted {
         run_id: RunId,
         turn_id: String,

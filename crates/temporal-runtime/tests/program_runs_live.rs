@@ -2659,8 +2659,8 @@ fn recorded_statuses(scope: &harness::CodeToolScope) -> Vec<String> {
 
 /// The run's only program scope, from the session's state.
 fn only_program_scope(state: &harness::CoreAgentState) -> &harness::CodeToolScope {
-    let [execution_id] = <[_; 1]>::try_from(program_execution_ids(state))
-        .expect("one program execution");
+    let [execution_id] =
+        <[_; 1]>::try_from(program_execution_ids(state)).expect("one program execution");
     &state.code_tools.scopes[&execution_id]
 }
 
@@ -2691,12 +2691,9 @@ async fn a_program_exit_withdraws_its_open_requests_and_the_run_waits_for_them()
             // The program returns holding an opened request and a request it
             // never awaited. Alice's answer is saved before the exit, but its
             // workflow has not read it: the withdrawal finds it, so it stands.
-            let run = start_program_run(
-                &api,
-                &session_id,
-                json!({"claim": "left", "wait_ms": 4000}),
-            )
-            .await?;
+            let run =
+                start_program_run(&api, &session_id, json!({"claim": "left", "wait_ms": 4000}))
+                    .await?;
             let requests = wait_for_requests(&api, &session_id, 2).await?;
             let opened = requests
                 .iter()
@@ -2862,6 +2859,138 @@ async fn a_program_exit_stops_a_running_call_and_records_its_outcome() -> anyhow
             api.delete_profile(api::ProfileDeleteParams { profile_id })
                 .await?;
             fixture.task.abort();
+            Ok(())
+        })
+    })
+    .await
+}
+
+const DETACHING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            if (input.claim === "keep") {
+                const ask = await env.input.open({ ask: "Ship it?", assignees: ["alice"] });
+                await ask.detach();
+                ctx.setContext({ id: ask.id });
+                return { claim: input.claim, slept: 0 };
+            }
+            const ask = await env.input.handle(ctx.context.id);
+            if (input.claim === "drop") return { claim: input.claim, slept: 0 };
+            return { claim: input.claim, slept: 0, answer: await ask.answer() };
+        }
+    };
+"#;
+
+/// The session's inbox requests, by request id.
+async fn inbox_statuses(
+    api: &GatewayAgentApi,
+    session_id: &SessionId,
+) -> anyhow::Result<std::collections::BTreeMap<String, api::InputRequestStatus>> {
+    Ok(api
+        .list_inbox_requests(api::InboxRequestListParams {
+            session: Some(session_id.to_string()),
+            ..Default::default()
+        })
+        .await?
+        .result
+        .requests
+        .into_iter()
+        .map(|request| (request.request_id, request.status))
+        .collect())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_detached_request_outlives_its_run_and_a_later_run_takes_it_back() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(
+                    &profile_id,
+                    DETACHING_PROGRAM,
+                    &[
+                        ("input.open", None),
+                        ("input.handle", None),
+                        ("promise.await", None),
+                        ("promise.detach", None),
+                    ],
+                ),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let completed = |claim: &'static str| {
+                let api = api.clone();
+                let session_id = session_id.clone();
+                async move {
+                    let run =
+                        start_program_run(&api, &session_id, json!({ "claim": claim })).await?;
+                    let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                    anyhow::ensure!(run.status == api::RunStatus::Completed, "{run:?}");
+                    Ok::<_, anyhow::Error>(run)
+                }
+            };
+
+            // A detached request stays open after its run ends.
+            completed("keep").await?;
+            // Its workflow writes the inbox row; it may land after the run.
+            wait_for_requests(&api, &session_id, 1).await?;
+            let statuses = inbox_statuses(&api, &session_id).await?;
+            let [(first, status)] = <[_; 1]>::try_from(statuses.into_iter().collect::<Vec<_>>())
+                .map_err(|statuses| anyhow::anyhow!("one request: {statuses:?}"))?;
+            assert_eq!(status, api::InputRequestStatus::Pending);
+
+            // A later run takes it back and, not detaching it again, withdraws
+            // it at its exit, before the run completes.
+            completed("drop").await?;
+            assert_eq!(
+                inbox_statuses(&api, &session_id).await?[&first],
+                api::InputRequestStatus::Cancelled
+            );
+
+            // Kept again, then taken back and answered.
+            completed("keep").await?;
+            let run = start_program_run(&api, &session_id, json!({ "claim": "answer" })).await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let second = loop {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the second request never appeared"
+                );
+                let statuses = inbox_statuses(&api, &session_id).await?;
+                if let Some((id, _)) = statuses.iter().find(|(id, status)| {
+                    **id != first && **status == api::InputRequestStatus::Pending
+                }) {
+                    break id.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: second.clone(),
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+            assert_eq!(
+                inbox_statuses(&api, &session_id).await?[&second],
+                api::InputRequestStatus::Answered
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
             Ok(())
         })
     })

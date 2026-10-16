@@ -15750,6 +15750,27 @@
             "type": "object"
           },
           {
+            "description": "A detached promise was taken back by a run, which now owns it: the\nrun's exit withdraws it unless the run detaches it again.",
+            "properties": {
+              "promiseId": {
+                "type": "string"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "type": {
+                "const": "promiseAdopted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "promiseId",
+              "runId"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "runId": {
                 "type": "string"

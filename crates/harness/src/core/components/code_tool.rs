@@ -1970,10 +1970,14 @@ pub(crate) fn apply_code_tool_event(
                     return Err(invalid("only a program run's scope withdraws handles"));
                 };
                 let owned = |promise_id: &crate::PromiseId| {
-                    state.promises.promises.get(promise_id).is_some_and(|promise| {
-                        promise.scope == crate::PromiseScope::Run { run_id }
-                            && promise.ownership == PromiseOwnership::Model
-                    })
+                    state
+                        .promises
+                        .promises
+                        .get(promise_id)
+                        .is_some_and(|promise| {
+                            promise.scope == crate::PromiseScope::Run { run_id }
+                                && promise.ownership == PromiseOwnership::Model
+                        })
                 };
                 if !*cancel || !withdrawn.iter().all(owned) {
                     return Err(invalid(

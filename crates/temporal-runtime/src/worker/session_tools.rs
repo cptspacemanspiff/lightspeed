@@ -1007,6 +1007,91 @@ impl SessionTools {
         self.succeeded_tool_result(call, &output, visible).await
     }
 
+    /// `input.handle`: give the calling run back a request an earlier run of
+    /// this session opened and detached. The handle's promise is read from
+    /// the session's own state; the result's adopt effect makes it the run's
+    /// again, so the run's exit withdraws it unless the run detaches it.
+    async fn invoke_input_handle_call(
+        &self,
+        session_id: &harness::SessionId,
+        run_id: harness::RunId,
+        call: &harness::ToolInvocationRequest,
+    ) -> Result<ToolInvocationResult, CoreAgentIoError> {
+        let args = match self
+            .read_tool_args::<tools::human_input::InputHandleArgs>(call)
+            .await
+        {
+            Ok(args) => args,
+            Err(error) => {
+                return failed_result(self.blobs.as_ref(), call.call_id.clone(), error.to_string())
+                    .await;
+            }
+        };
+        let Some(sessions) = &self.sessions else {
+            return failed_result(
+                self.blobs.as_ref(),
+                call.call_id.clone(),
+                "session state is unavailable in this runtime",
+            )
+            .await;
+        };
+        let record = sessions
+            .load_session(session_id)
+            .await
+            .map_err(io_error)?
+            .ok_or_else(|| io_error(format!("session not found: {session_id}")))?;
+        let loaded =
+            crate::checkpoint::load_reduction(sessions.as_ref(), self.blobs.as_ref(), &record)
+                .await
+                .map_err(io_error)?;
+        let state = &loaded.reduced.core_state;
+        let Some(promise) = tools::human_input::opened_request_promise(state, &args.id) else {
+            return failed_result(
+                self.blobs.as_ref(),
+                call.call_id.clone(),
+                format!("unknown input request {}", args.id),
+            )
+            .await;
+        };
+        // A request an earlier run kept without detaching was withdrawn at
+        // its exit; it was never this run's to take.
+        let mut effects = Vec::new();
+        match promise.scope {
+            harness::PromiseScope::Session => {
+                if promise.status == harness::PromiseStatus::Pending {
+                    effects.push(harness::promise_adopt_effect(&promise.promise_id));
+                }
+            }
+            harness::PromiseScope::Run { run_id: owner } if owner == run_id => {}
+            harness::PromiseScope::Run { .. } => {
+                return failed_result(
+                    self.blobs.as_ref(),
+                    call.call_id.clone(),
+                    format!(
+                        "input request {} was not detached by the run that opened it",
+                        args.id
+                    ),
+                )
+                .await;
+            }
+        }
+        let output = tools::human_input::InputHandleOutput {
+            execution_id: args.id,
+            promise: promise.promise_id.as_str().to_owned(),
+            status: match promise.status {
+                harness::PromiseStatus::Pending => "pending",
+                harness::PromiseStatus::Resolved => "resolved",
+                harness::PromiseStatus::Failed => "failed",
+                harness::PromiseStatus::Cancelled => "cancelled",
+            }
+            .to_owned(),
+        };
+        let visible = serde_json::to_string(&output).map_err(io_error)?;
+        let mut result = self.succeeded_tool_result(call, &output, visible).await?;
+        result.effects = effects;
+        Ok(result)
+    }
+
     async fn succeeded_job_read_result(
         &self,
         call: &harness::ToolInvocationRequest,
@@ -2098,6 +2183,16 @@ impl SessionTools {
         }
         if let Some(message) = per_call_batch_rule_violation(&request) {
             return failed_result(self.blobs.as_ref(), call.call_id, message)
+                .await
+                .map(ToolCallExecution::Completed);
+        }
+        if call
+            .tool_id
+            .as_ref()
+            .is_some_and(|id| id.as_str() == tools::human_input::INPUT_HANDLE_TOOL_ID)
+        {
+            return self
+                .invoke_input_handle_call(&request.session_id, request.run_id, &call)
                 .await
                 .map(ToolCallExecution::Completed);
         }

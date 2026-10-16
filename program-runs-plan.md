@@ -650,7 +650,16 @@ loop:
        `env.input.handle(id)`, so a run can continue as new while it waits
        days for an approval. `input.request`'s promise is runtime-owned and
        cannot be detached; activity-backed calls cannot be detached either:
-       their scope's close waits for them.
+       their scope's close waits for them. Built: `h.detach()` calls
+       `promise.detach` (the program requires it) and rejects if the
+       request has already settled (`answer()` has the outcome).
+       `env.input.handle(id)` is a call, awaited like `input.open`: the
+       `input.handle` contract (needs `promise.await`) reads the request's
+       promise from the session's state and takes a detached one back into
+       the calling run (`PromiseEvent::Adopted`). The rule then holds again:
+       the run's exit withdraws it unless the run detaches it again. A
+       request an earlier run did not detach is refused (it was withdrawn
+       at that run's exit).
      - **The close withdraws the run's own undetached requests**, the
        promise and the inbox item, not only the call awaiting them. Checked
        2026-10-16: a cancelling close already cancels the pending reply
@@ -1197,7 +1206,8 @@ requests are later backends behind the same contract.
     workflow confirms it). `await cancel()` resolves once the request has
     settled, with `{ status: "cancelled" | "resolved" | "failed" }`;
   - `detach()`: keep the request open past the run's exit; without it,
-    every exit withdraws it (D7 "Long runs" item 3).
+    every exit withdraws it (D7 "Long runs" item 3). A later run takes it
+    back with `await env.input.handle(id)`, and owns it again.
 - **`env.input.request(spec)`** is shorthand for `open` and an immediate
   `answer()`.
 - **Spec:** `ask`, a payload to show, an optional response schema,

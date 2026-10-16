@@ -70,6 +70,7 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "input.open" => crate::human_input::INPUT_OPEN_TOOL_ID,
     "input.remind" => crate::human_input::INPUT_REMIND_TOOL_ID,
     "input.reassign" => crate::human_input::INPUT_REASSIGN_TOOL_ID,
+    "input.handle" => crate::human_input::INPUT_HANDLE_TOOL_ID,
 };
 
 /// Every contract a program can require, in name order.
@@ -330,8 +331,11 @@ impl ContractError {
 }
 
 /// Contracts that are no use without another: an open input request is
-/// answered by awaiting its promise.
-const COMPANIONS: &[(&str, &str)] = &[("input.open", "promise.await")];
+/// answered by awaiting its promise, and so is one taken back.
+const COMPANIONS: &[(&str, &str)] = &[
+    ("input.open", "promise.await"),
+    ("input.handle", "promise.await"),
+];
 
 /// Pin a program's required contracts against what a session offers. A
 /// requirement that names a digest must match it; one without is pinned to

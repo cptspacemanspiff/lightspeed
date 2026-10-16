@@ -214,6 +214,7 @@ pub fn resolve(
         crate::human_input::INPUT_REASSIGN_TOOL_ID => {
             crate::human_input::input_reassign_definition()
         }
+        crate::human_input::INPUT_HANDLE_TOOL_ID => crate::human_input::input_handle_definition(),
         name if name.starts_with("concurrency.") => {
             concurrency_tool_definitions(&ConcurrencyToolsetConfig::timer())?
                 .into_iter()

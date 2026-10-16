@@ -1963,6 +1963,42 @@ fn tool_call_completed_proposals_inner(
                     CoreAgentEvent::Promise(PromiseEvent::Detached { promise_id }),
                 ));
             }
+            if let Some(promise_id) =
+                crate::core::components::promise::promise_id_from_adopt_effect(effect)?
+            {
+                let Some(promise) = state.promises.promises.get(&promise_id) else {
+                    return Err(DomainError::InvariantViolation(format!(
+                        "promise adopt effect references unknown promise {promise_id}"
+                    )));
+                };
+                if promise.ownership != PromiseOwnership::Model {
+                    return Err(DomainError::InvariantViolation(format!(
+                        "promise {promise_id} is runtime-owned and cannot be adopted"
+                    )));
+                }
+                // A settled promise needs no owner, and one already the
+                // run's stays so; another run's is not this run's to take.
+                if promise.status.is_terminal()
+                    || promise.scope
+                        == (crate::PromiseScope::Run {
+                            run_id: result.run_id,
+                        })
+                {
+                    continue;
+                }
+                if promise.scope != crate::PromiseScope::Session {
+                    return Err(DomainError::InvariantViolation(format!(
+                        "promise adopt effect references promise {promise_id} of another run"
+                    )));
+                }
+                promise_proposals.push(CoreAgentEventProposal::new(
+                    joins.clone(),
+                    CoreAgentEvent::Promise(PromiseEvent::Adopted {
+                        promise_id,
+                        run_id: result.run_id,
+                    }),
+                ));
+            }
             if let Some(invocation) =
                 crate::core::components::workflow_tool::invocation_from_emit_effect(effect)?
             {
@@ -13076,7 +13112,10 @@ mod tests {
         )));
         log.extend(entries);
         let scope = &drive.state().code_tools.scopes[&execution_id];
-        assert_eq!(crate::code_tool_scope_withdrawals(drive.state(), scope), (1, 0));
+        assert_eq!(
+            crate::code_tool_scope_withdrawals(drive.state(), scope),
+            (1, 0)
+        );
         // Every call has its outcome, but the run has not drained: the
         // withdrawn handle has not settled.
         assert!(scope.calls.values().all(|call| call.status.is_terminal()));
@@ -13098,7 +13137,10 @@ mod tests {
             .unwrap();
         log.extend(commit_action(&mut drive, action));
         let scope = &drive.state().code_tools.scopes[&execution_id];
-        assert_eq!(crate::code_tool_scope_withdrawals(drive.state(), scope), (1, 1));
+        assert_eq!(
+            crate::code_tool_scope_withdrawals(drive.state(), scope),
+            (1, 1)
+        );
         assert!(!crate::program_run_is_waiting(drive.state()));
         let action = drive.next_action(51, 8).unwrap();
         log.extend(commit_action(&mut drive, action));
@@ -13107,6 +13149,171 @@ mod tests {
             (record.run_id, record.status),
             (run_id, RunStatus::Cancelled)
         );
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn a_detached_handle_outlives_the_close_until_a_run_takes_it_back() {
+        let session_id = SessionId::new("program-detach");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), opened_ask_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let names = [crate::PROGRAM_EXECUTE_TOOL_NAME, "open", "local_echo"];
+        let tools = names
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = names[1..]
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    crate::CodeToolBinding {
+                        tool_id: test_tool_id(name),
+                        tool_name: ToolName::new(*name),
+                        contract: Some(test_contract(name)),
+                    },
+                )
+            })
+            .collect();
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let mut next = 0;
+        let mut call_with = |drive: &mut CoreAgentDrive,
+                             log: &mut Vec<CoreAgentEntry>,
+                             tool: &str,
+                             effects: Option<Vec<crate::ToolEffect>>|
+         -> PromiseId {
+            next += 1;
+            let request_id = next.to_string();
+            let call = scoped_call_spec(&execution_id, &request_id, tool);
+            log.extend(code_tool_commit(
+                drive,
+                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            ));
+            let request = crate::code_tool_request(
+                drive.session_id(),
+                drive.state(),
+                &execution_id,
+                &request_id,
+            )
+            .unwrap();
+            let result = match effects {
+                None => code_tool_workflow_effect(&request).0,
+                Some(effects) => {
+                    let mut result = completed_tool_result(&request).results.remove(0);
+                    result.effects = effects;
+                    result
+                }
+            };
+            log.extend(code_tool_commit(
+                drive,
+                CoreAgentCommand::CompleteCodeToolCall {
+                    origin: call.origin,
+                    result,
+                },
+            ));
+            PromiseId::from_number(request.promise_id_base)
+        };
+
+        // Two handles, both detached: the session owns them.
+        let kept = call_with(&mut drive, &mut log, "open", None);
+        let taken = call_with(&mut drive, &mut log, "open", None);
+        for handle in [&kept, &taken] {
+            call_with(
+                &mut drive,
+                &mut log,
+                "local_echo",
+                Some(vec![crate::promise_detach_effect(handle)]),
+            );
+            assert_eq!(
+                drive.state().promises.promises[handle].scope,
+                crate::PromiseScope::Session
+            );
+        }
+        // The run takes one back: it is the run's again. Taking it twice
+        // changes nothing.
+        for _ in 0..2 {
+            call_with(
+                &mut drive,
+                &mut log,
+                "local_echo",
+                Some(vec![crate::promise_adopt_effect(&taken)]),
+            );
+        }
+        assert_eq!(
+            drive.state().promises.promises[&taken].scope,
+            crate::PromiseScope::Run { run_id }
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|entry| matches!(
+                    entry.event,
+                    CoreAgentEvent::Promise(PromiseEvent::Adopted { .. })
+                ))
+                .count(),
+            1
+        );
+
+        // The exit withdraws only the handle the run owns.
+        let entries = code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CloseCodeToolScope {
+                execution_id: execution_id.clone(),
+                cancel: true,
+                program_context: None,
+            },
+        );
+        assert!(entries.iter().any(|entry| matches!(
+            &entry.event,
+            CoreAgentEvent::CodeTool(crate::CodeToolEvent::ScopeClosed { withdrawn, .. })
+                if withdrawn == std::slice::from_ref(&taken)
+        )));
+        log.extend(entries);
+        assert_eq!(
+            drive.state().promises.promises[&kept].status,
+            PromiseStatus::Pending
+        );
+        assert!(drive.state().promises.cancel_requested.contains(&taken));
         assert_replays_identically(&drive, &log);
     }
 
