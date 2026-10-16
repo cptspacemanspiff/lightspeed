@@ -67,10 +67,11 @@ pub use program::{
 };
 pub use promise::AwaitOutcome;
 pub use promise::{
-    PROMISE_CANCEL_EFFECT_KIND, PROMISE_CREATE_EFFECT_KIND, PROMISE_DETACH_EFFECT_KIND,
-    PROMISE_ID_PREFIX, Promise, PromiseComponentState, PromiseEvent, PromiseId, PromiseIdAllocator,
-    PromiseIdError, PromiseOwnership, PromiseResolution, PromiseScope, PromiseSource,
-    PromiseStatus, promise_cancel_awaits_confirmation, promise_cancel_effect, promise_cancel_event,
+    PROMISE_ADOPT_EFFECT_KIND, PROMISE_CANCEL_EFFECT_KIND, PROMISE_CREATE_EFFECT_KIND,
+    PROMISE_DETACH_EFFECT_KIND, PROMISE_ID_PREFIX, Promise, PromiseComponentState, PromiseEvent,
+    PromiseId, PromiseIdAllocator, PromiseIdError, PromiseOwnership, PromiseResolution,
+    PromiseScope, PromiseSource, PromiseStatus, promise_adopt_effect,
+    promise_cancel_awaits_confirmation, promise_cancel_effect, promise_cancel_event,
     promise_create_effect, promise_detach_effect,
 };
 pub use run::{

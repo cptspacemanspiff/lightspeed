@@ -147,6 +147,23 @@
                 }));
                 continue;
             }
+            if (binding.name === "input.handle") {
+                // Take back a request an earlier run detached: the handle
+                // is this run's again, withdrawn at its exit unless detached.
+                place(env, binding.name, freeze(function (requestId) {
+                    let issued;
+                    try {
+                        issued = invoke(id, { id: requestId });
+                    } catch (error) {
+                        return NativePromise.reject(error);
+                    }
+                    const taken = issued.promise.then(function (taken) {
+                        return inputHandle(taken.executionId, taken.promise);
+                    });
+                    return withCancel(taken, issued.request);
+                }));
+                continue;
+            }
             place(env, binding.name, freeze(function (args) {
                 return call(id, args);
             }));
@@ -251,6 +268,13 @@
             cancel: async function () {
                 cancelHost("promise", promise);
                 return await settledStatus(answer(), "input_cancelled");
+            },
+            // Keep the request open past the run's exits: the session owns
+            // it until a later run takes it back with `env.input.handle(id)`.
+            // Rejects if the request has already settled; `answer()` has it.
+            detach: async function () {
+                await contractCall("promise.detach", { promises: [promise] });
+                return freeze({ id });
             },
             // Remind every `every_ms` until answered; after `max` reminders
             // (default: no limit) wait, reassign to `to`, or cancel.

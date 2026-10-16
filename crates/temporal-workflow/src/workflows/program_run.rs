@@ -92,9 +92,9 @@ impl ProgramRunWorkflow {
                 }
                 ProgramEnd::Terminal(interrupted(reason))
             }
-            Ok(Err(_)) => ProgramEnd::Terminal(interrupted(
-                ProgramRunInterruption::PreparationFailed,
-            )),
+            Ok(Err(_)) => {
+                ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed))
+            }
             Ok(Ok(ProgramPrepareActivityResult::Rejected { error_ref })) => {
                 ProgramEnd::Terminal(ProgramRunTerminal::Rejected { error_ref })
             }
@@ -450,7 +450,9 @@ async fn run_program(
                     ready.extend(page.completions);
                 }
                 Err(_) => {
-                    return ProgramEnd::Terminal(interrupted(ProgramRunInterruption::ActivityFailed));
+                    return ProgramEnd::Terminal(interrupted(
+                        ProgramRunInterruption::ActivityFailed,
+                    ));
                 }
             }
         }

@@ -7,7 +7,8 @@
 //! `input.open` starts the same workflow but returns at once with the
 //! request's promise, which the program awaits for the answer or cancels
 //! to withdraw the request. `input.remind` and `input.reassign` act on an
-//! open request through its inbox row while it waits.
+//! open request through its inbox row while it waits. `input.handle` takes
+//! back a request an earlier run detached, by its execution id.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +28,8 @@ pub const INPUT_REMIND_TOOL_ID: &str = "input.remind";
 pub const INPUT_REMIND_TOOL_NAME: &str = "input_remind";
 pub const INPUT_REASSIGN_TOOL_ID: &str = "input.reassign";
 pub const INPUT_REASSIGN_TOOL_NAME: &str = "input_reassign";
+pub const INPUT_HANDLE_TOOL_ID: &str = "input.handle";
+pub const INPUT_HANDLE_TOOL_NAME: &str = "input_handle";
 pub use harness::{
     APPROVAL_TOOL_NAME as APPROVAL_TOOL_ID, APPROVAL_WORKFLOW_SEMANTIC_TYPE,
     APPROVAL_WORKFLOW_TOOL_ID,
@@ -484,6 +487,64 @@ impl InputReassignArgs {
         }
         validate_people("to", &self.to)
     }
+}
+
+/// A request an earlier run of this session opened and detached, named by
+/// the execution id `input.open` returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputHandleArgs {
+    /// The request's execution id, from `input.open`.
+    pub id: String,
+}
+
+/// The request's handle parts, as `input.open` returned them: its execution
+/// id and the promise that settles with its answer, now the calling run's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InputHandleOutput {
+    pub execution_id: String,
+    pub promise: String,
+    /// pending, resolved, failed or cancelled.
+    pub status: String,
+}
+
+/// The promise of the `input.open` request with this execution id, if this
+/// session opened one.
+pub fn opened_request_promise<'a>(
+    state: &'a harness::CoreAgentState,
+    execution_id: &str,
+) -> Option<&'a harness::Promise> {
+    let binding = state
+        .workflow_tools
+        .bindings
+        .get(&harness::WorkflowToolId::new(INPUT_OPEN_WORKFLOW_TOOL_ID))?;
+    let harness::WorkflowToolTarget::Start { start } = &binding.target else {
+        return None;
+    };
+    state
+        .workflow_tools
+        .start_requests
+        .values()
+        .filter(|invocation| invocation.tool_id == binding.definition.tool_id)
+        .find(|invocation| {
+            harness::workflow_tool_execution_id(
+                &invocation.invocation_id,
+                &start.recipe_fingerprint,
+            ) == execution_id
+        })
+        .and_then(|invocation| invocation.completion_promises.as_ref())
+        .and_then(|promises| promises.get(harness::REPLY_COMPLETION_KEY))
+        .and_then(|promise_id| state.promises.promises.get(promise_id))
+}
+
+pub fn input_handle_definition() -> crate::runtime::FunctionDefinition {
+    crate::runtime::FunctionDefinition::new(
+        INPUT_HANDLE_TOOL_NAME,
+        "Take back an input request an earlier run of this session opened and detached. The calling run owns it again: it is withdrawn at the run's exit unless detached again.",
+        crate::definitions::input_schema_for::<InputHandleArgs>(),
+    )
+    .with_output_schema(crate::definitions::output_schema_for::<InputHandleOutput>())
 }
 
 /// Where a request stands after a reminder or a reassignment. Acting on a

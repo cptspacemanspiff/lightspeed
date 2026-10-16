@@ -525,6 +525,76 @@ fn an_open_input_request_is_a_handle_over_ordinary_calls() {
 }
 
 #[test]
+fn a_detached_request_is_taken_back_by_its_id() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const ask = await env.input.open({ ask: "Ship?" });
+                const kept = await ask.detach();
+                const again = await env.input.handle(ask.id);
+                const answer = await again.answer();
+                let failure = null;
+                try { await env.input.handle("wtx:sha256:other"); } catch (error) { failure = error.message; }
+                return { kept, id: again.id, answer, failure };
+            }
+        };
+    "#;
+    let contracts = [INPUT_CONTRACTS, &["input.handle", "promise.detach"]].concat();
+    let (requests, report) = run_program(program_input(source, &contracts, SEED), |request| {
+        let outcome = match (request.binding_id.as_str(), &request.arguments) {
+            ("opaque-input.open", _) => opened(),
+            ("opaque-promise.detach", _) => {
+                json!({"promises": [{"promise_id": "promise_3", "status": "detached"}]})
+            }
+            ("opaque-input.handle", arguments) if arguments["id"] == "wtx:sha256:abc" => json!({
+                "executionId": "wtx:sha256:abc",
+                "promise": "promise_3",
+                "status": "pending",
+            }),
+            ("opaque-input.handle", _) => {
+                return (
+                    Err(HostError {
+                        kind: "tool_failed".into(),
+                        message: "unknown input request wtx:sha256:other".into(),
+                        value: None,
+                    }),
+                    None,
+                );
+            }
+            ("opaque-promise.await", _) => json!({"outcome": "completed", "results": [
+                {"promise_id": "promise_3", "status": "resolved", "output": {"approved": true}}
+            ]}),
+            (other, _) => panic!("unexpected call {other}"),
+        };
+        (Ok(outcome), None)
+    });
+    assert_eq!(report.error, None);
+    let calls = requests
+        .iter()
+        .map(|request| (request.binding_id.as_str(), request.arguments.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            ("opaque-input.open", json!({"ask": "Ship?"})),
+            ("opaque-promise.detach", json!({"promises": ["promise_3"]})),
+            ("opaque-input.handle", json!({"id": "wtx:sha256:abc"})),
+            ("opaque-promise.await", json!({"promises": ["promise_3"]})),
+            ("opaque-input.handle", json!({"id": "wtx:sha256:other"})),
+        ]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "kept": {"id": "wtx:sha256:abc"},
+            "id": "wtx:sha256:abc",
+            "answer": {"approved": true},
+            "failure": "unknown input request wtx:sha256:other",
+        }))
+    );
+}
+
+#[test]
 fn with_reminders_nudges_on_an_interval_then_reassigns() {
     let source = r#"
         export default {

@@ -530,6 +530,7 @@ pub fn register_toolset(config: &ToolsetConfig) -> ToolResult<RegisteredToolset>
         for id in [
             crate::human_input::INPUT_REMIND_TOOL_ID,
             crate::human_input::INPUT_REASSIGN_TOOL_ID,
+            crate::human_input::INPUT_HANDLE_TOOL_ID,
         ] {
             add(register(
                 id,

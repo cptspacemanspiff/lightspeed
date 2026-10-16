@@ -273,7 +273,9 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         },
         "cancel_requested": true,
         "closed": true,
-        "execution_id": "execution:vector"
+        "execution_id": "execution:vector",
+        "withdrawals": 1,
+        "withdrawals_settled": 1
       },
       "reportRequest": {
         "execution_id": "execution:vector"

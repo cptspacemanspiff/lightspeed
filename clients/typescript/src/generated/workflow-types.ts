@@ -260,6 +260,7 @@ export type EmissionBody =
       completed: number;
       execution_id: string;
       kind: "scope_progress";
+      withdrawals_settled?: number;
     }
   | {
       kind: "source_resolution";
@@ -751,6 +752,12 @@ export interface CodeToolScopeReport {
     [k: string]: ContractBinding;
   };
   execution_id: string;
+  /**
+   * Handles a program run's close withdrew (opened input requests), and
+   * how many of them have settled. A run's exit waits for all of them.
+   */
+  withdrawals?: number;
+  withdrawals_settled?: number;
 }
 /**
  * The contract a scope binding serves.

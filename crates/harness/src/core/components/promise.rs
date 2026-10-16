@@ -269,6 +269,13 @@ pub enum Event {
     CancelRequested {
         promise_id: PromiseId,
     },
+    /// A detached promise was taken back by a run (a program rebuilt the
+    /// handle of a request an earlier run kept open). It belongs to the run
+    /// again, so the run's exit withdraws it unless the run detaches it.
+    Adopted {
+        promise_id: PromiseId,
+        run_id: RunId,
+    },
 }
 
 pub type PromiseEvent = Event;
@@ -359,6 +366,24 @@ pub(crate) fn apply_event(state: &mut CoreAgentState, event: &Event) -> Result<(
             }
             Ok(())
         }
+        Event::Adopted { promise_id, run_id } => {
+            let active = state
+                .runs
+                .active
+                .as_ref()
+                .is_some_and(|active| active.run_id == *run_id);
+            let promise = pending_promise_mut(state, promise_id)?;
+            if promise.ownership != PromiseOwnership::Model
+                || promise.scope != PromiseScope::Session
+                || !active
+            {
+                return Err(DomainError::InvariantViolation(format!(
+                    "only a detached promise can be adopted, by the active run: {promise_id}"
+                )));
+            }
+            promise.scope = PromiseScope::Run { run_id: *run_id };
+            Ok(())
+        }
         Event::Detached { promise_id } => {
             let promise = pending_promise_mut(state, promise_id)?;
             if promise.ownership != PromiseOwnership::Model {
@@ -437,6 +462,7 @@ fn pending_promise_mut<'state>(
 pub const PROMISE_CREATE_EFFECT_KIND: &str = "lightspeed.core.promise.create";
 pub const PROMISE_CANCEL_EFFECT_KIND: &str = "lightspeed.core.promise.cancel";
 pub const PROMISE_DETACH_EFFECT_KIND: &str = "lightspeed.core.promise.detach";
+pub const PROMISE_ADOPT_EFFECT_KIND: &str = "lightspeed.core.promise.adopt";
 
 pub const PROMISE_EFFECT_ID: &str = "promise_id";
 pub const PROMISE_EFFECT_SOURCE: &str = "source";
@@ -529,6 +555,16 @@ pub fn promise_detach_effect(promise_id: &PromiseId) -> crate::ToolEffect {
     }
 }
 
+/// Build the effect that gives a detached promise back to the call's run.
+pub fn promise_adopt_effect(promise_id: &PromiseId) -> crate::ToolEffect {
+    let mut data = BTreeMap::new();
+    data.insert(PROMISE_EFFECT_ID.to_owned(), promise_id.as_str().to_owned());
+    crate::ToolEffect {
+        kind: PROMISE_ADOPT_EFFECT_KIND.to_owned(),
+        data,
+    }
+}
+
 /// Decode a creation effect back into a pending promise owned by `run_id`.
 /// Returns `None` for effects of other kinds; malformed promise effects are
 /// invariant violations (they came from our own executors).
@@ -613,19 +649,33 @@ pub(crate) fn promise_id_from_cancel_effect(
 pub(crate) fn promise_id_from_detach_effect(
     effect: &crate::ToolEffect,
 ) -> Result<Option<PromiseId>, DomainError> {
-    if effect.kind != PROMISE_DETACH_EFFECT_KIND {
+    promise_id_from_effect(effect, PROMISE_DETACH_EFFECT_KIND, "detach")
+}
+
+pub(crate) fn promise_id_from_adopt_effect(
+    effect: &crate::ToolEffect,
+) -> Result<Option<PromiseId>, DomainError> {
+    promise_id_from_effect(effect, PROMISE_ADOPT_EFFECT_KIND, "adopt")
+}
+
+fn promise_id_from_effect(
+    effect: &crate::ToolEffect,
+    kind: &str,
+    name: &str,
+) -> Result<Option<PromiseId>, DomainError> {
+    if effect.kind != kind {
         return Ok(None);
     }
     let Some(promise_id) = effect.data.get(PROMISE_EFFECT_ID) else {
-        return Err(DomainError::InvariantViolation(
-            "promise detach effect is missing `promise_id`".into(),
-        ));
+        return Err(DomainError::InvariantViolation(format!(
+            "promise {name} effect is missing `promise_id`"
+        )));
     };
     PromiseId::try_new(promise_id.clone())
         .map(Some)
         .map_err(|error| {
             DomainError::InvariantViolation(format!(
-                "promise detach effect has an invalid id: {error}"
+                "promise {name} effect has an invalid id: {error}"
             ))
         })
 }

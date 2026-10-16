@@ -178,6 +178,7 @@ fn core_agent_event_envelope_kind(event: &CoreAgentEvent) -> &'static str {
             PromiseEvent::Cancelled { .. } => "lightspeed.core.promise.cancelled",
             PromiseEvent::Detached { .. } => "lightspeed.core.promise.detached",
             PromiseEvent::CancelRequested { .. } => "lightspeed.core.promise.cancel_requested",
+            PromiseEvent::Adopted { .. } => "lightspeed.core.promise.adopted",
         },
         CoreAgentEvent::WorkflowToolConfig(event) => match event {
             WorkflowToolConfigEvent::ManagedBindingsAdmitted { .. } => {
