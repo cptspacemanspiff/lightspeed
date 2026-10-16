@@ -35,6 +35,9 @@ pub struct ProgramRunWorkflow {
     /// The most recorded outcomes the session has reported for the run's
     /// scope. A suspended attempt resumes once this passes what it saw.
     recorded: u64,
+    /// The most handles withdrawn at the run's close the session has
+    /// reported settled. The exit waits for all of them.
+    withdrawals_settled: u64,
 }
 
 #[workflow_methods]
@@ -69,7 +72,7 @@ impl ProgramRunWorkflow {
                 result = work => Ok(result),
             }
         };
-        let mut terminal = match prepared {
+        let end = match prepared {
             Err(reason) => {
                 prepare.cancel();
                 // A prepare receipt can race with cancellation. Record it if
@@ -87,24 +90,17 @@ impl ProgramRunWorkflow {
                     },
                     _ = grace => {},
                 }
-                ProgramRunTerminal::Interrupted {
-                    reason,
-                    result: None,
-                }
+                ProgramEnd::Terminal(interrupted(reason))
             }
-            Ok(Err(_)) => ProgramRunTerminal::Interrupted {
-                reason: ProgramRunInterruption::PreparationFailed,
-                result: None,
-            },
+            Ok(Err(_)) => ProgramEnd::Terminal(interrupted(
+                ProgramRunInterruption::PreparationFailed,
+            )),
             Ok(Ok(ProgramPrepareActivityResult::Rejected { error_ref })) => {
-                ProgramRunTerminal::Rejected { error_ref }
+                ProgramEnd::Terminal(ProgramRunTerminal::Rejected { error_ref })
             }
             Ok(Ok(ProgramPrepareActivityResult::Prepared { descriptor })) => {
                 if !descriptor_matches_start(&descriptor, &start) {
-                    ProgramRunTerminal::Interrupted {
-                        reason: ProgramRunInterruption::PreparationFailed,
-                        result: None,
-                    }
+                    ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed))
                 } else {
                     ctx.state_mut(|state| {
                         state.snapshot.descriptor = Some((*descriptor).clone());
@@ -115,10 +111,25 @@ impl ProgramRunWorkflow {
             }
         };
 
-        ctx.state_mut(|state| {
-            state.snapshot.phase = ProgramRunPhase::Finalizing;
-            state.snapshot.terminal = Some(terminal.clone());
-        });
+        // Every exit, finished or interrupted, cancels what the program
+        // still owns and waits until each call has an outcome and each
+        // withdrawn handle has settled: the same wait an await is, with the
+        // outcomes not delivered to the program. Then the run concludes.
+        ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Finalizing);
+        let program_context = match &end {
+            ProgramEnd::Finished { report, .. } if report.error.is_none() => {
+                report.program_context.clone()
+            }
+            _ => None,
+        };
+        let close_error = settle(ctx, &start, program_context).await;
+        let mut terminal = match end {
+            ProgramEnd::Finished { descriptor, report } => {
+                conclude(ctx, &descriptor, *report, close_error).await
+            }
+            ProgramEnd::Terminal(terminal) => terminal,
+        };
+        ctx.state_mut(|state| state.snapshot.terminal = Some(terminal.clone()));
         // Detached cancellation is intentional: external workflow cancellation
         // must still close the scope and persist a report of acknowledged work.
         let mut resolution = finalize(ctx, &start, &terminal).await?;
@@ -186,8 +197,9 @@ impl ProgramRunWorkflow {
         if crate::workflows::is_holder_reply_cancellation(start, &envelope) {
             self.holder_cancelled = true;
         }
-        if let Some(completed) = scope_progress(start, &envelope) {
+        if let Some((completed, withdrawals_settled)) = scope_progress(start, &envelope) {
             self.recorded = self.recorded.max(completed);
+            self.withdrawals_settled = self.withdrawals_settled.max(withdrawals_settled);
         }
     }
 
@@ -259,12 +271,13 @@ fn terminal_after_cancellation(
     })
 }
 
-/// The run's scope progress an emission reports, if it comes from the
-/// run's own session about the run's own scope.
+/// The run's scope progress an emission reports (recorded outcomes, settled
+/// withdrawals), if it comes from the run's own session about the run's own
+/// scope.
 fn scope_progress(
     start: &WorkflowToolStartArgs,
     envelope: &harness::EmissionEnvelope,
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     let harness::EmissionProducer::Session {
         universe_id,
         session_id,
@@ -276,6 +289,7 @@ fn scope_progress(
     let harness::EmissionBody::ScopeProgress {
         execution_id,
         completed,
+        withdrawals_settled,
     } = &envelope.body
     else {
         return None;
@@ -283,7 +297,7 @@ fn scope_progress(
     (*universe_id == start.universe_id
         && *session_id == start.invocation.session_id
         && *execution_id == start.execution_id)
-        .then_some(*completed)
+        .then_some((*completed, *withdrawals_settled))
 }
 
 /// Run the pinned program in this workflow. The program is stepped on the
@@ -296,7 +310,7 @@ fn scope_progress(
 async fn run_program(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
     descriptor: ProgramRunDescriptor,
-) -> ProgramRunTerminal {
+) -> ProgramEnd {
     let loaded = match cancellable(
         ctx,
         ctx.execute_activity(
@@ -309,13 +323,15 @@ async fn run_program(
     )
     .await
     {
-        Err(reason) => return interrupted(reason),
-        Ok(Err(_)) => return interrupted(ProgramRunInterruption::PreparationFailed),
+        Err(reason) => return ProgramEnd::Terminal(interrupted(reason)),
+        Ok(Err(_)) => {
+            return ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed));
+        }
         Ok(Ok(loaded)) => loaded,
     };
     let (source, input, context, bindings) = match loaded {
         crate::ProgramLoadActivityResult::Refused { result } => {
-            return ProgramRunTerminal::Completed { result };
+            return ProgramEnd::Terminal(ProgramRunTerminal::Completed { result });
         }
         crate::ProgramLoadActivityResult::Loaded {
             source,
@@ -341,15 +357,13 @@ async fn run_program(
     let (mut instance, mut step) = match started {
         Ok(started) => started,
         Err(error) => {
-            return conclude(
-                ctx,
-                &descriptor,
-                failed_report(
+            return ProgramEnd::Finished {
+                descriptor: Box::new(descriptor),
+                report: Box::new(failed_report(
                     program_engine::ExecutionErrorKind::Internal,
                     error.to_string(),
-                ),
-            )
-            .await;
+                )),
+            };
         }
     };
     // Completions for the next step, in the order this history received
@@ -381,19 +395,22 @@ async fn run_program(
             )
             .await;
             match admitted {
-                Err(reason) => return interrupted(reason),
+                Err(reason) => return ProgramEnd::Terminal(interrupted(reason)),
                 Ok(Err(error)) => {
-                    return interrupted(if error.as_timeout().is_some() {
+                    return ProgramEnd::Terminal(interrupted(if error.as_timeout().is_some() {
                         ProgramRunInterruption::ActivityTimedOut
                     } else {
                         ProgramRunInterruption::ActivityFailed
-                    });
+                    }));
                 }
                 Ok(Ok(result)) => ready.extend(result.rejected),
             }
         }
         if let Some(report) = finished {
-            return conclude(ctx, &descriptor, report).await;
+            return ProgramEnd::Finished {
+                descriptor: Box::new(descriptor),
+                report: Box::new(report),
+            };
         }
         if ready.is_empty() {
             ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Suspended);
@@ -403,12 +420,14 @@ async fn run_program(
             futures::pin_mut!(progressed, external_cancel);
             select_biased! {
                 _ = external_cancel => {
-                    return interrupted(ProgramRunInterruption::WorkflowCancelled);
+                    return ProgramEnd::Terminal(interrupted(
+                        ProgramRunInterruption::WorkflowCancelled,
+                    ));
                 }
                 _ = progressed => {}
             }
             if ctx.state(|state| state.holder_cancelled) {
-                return interrupted(ProgramRunInterruption::HolderCancelled);
+                return ProgramEnd::Terminal(interrupted(ProgramRunInterruption::HolderCancelled));
             }
             ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Running);
         }
@@ -430,20 +449,82 @@ async fn run_program(
                     collected += page.completions.len() as u64;
                     ready.extend(page.completions);
                 }
-                Err(_) => return interrupted(ProgramRunInterruption::ActivityFailed),
+                Err(_) => {
+                    return ProgramEnd::Terminal(interrupted(ProgramRunInterruption::ActivityFailed));
+                }
             }
         }
         step = instance.step(std::mem::take(&mut ready));
     }
 }
 
-/// Keep the finished program's output, context and report, and close the
-/// run's scope. A local activity: its arguments (the output and context the
+/// How the program part of a run ended.
+enum ProgramEnd {
+    /// The program finished: returned, threw, or failed in the engine.
+    Finished {
+        descriptor: Box<ProgramRunDescriptor>,
+        report: Box<program_engine::ExecutionReport>,
+    },
+    /// The run's terminal is already known: refused before the program ran,
+    /// or interrupted.
+    Terminal(ProgramRunTerminal),
+}
+
+/// Close the run's scope, cancelling what the program still owns and
+/// withdrawing its undetached handles, then wait until every admitted call
+/// has a recorded outcome and every withdrawn handle has settled. The wait
+/// is the one a suspended program uses, woken by the session's progress
+/// signals; it holds no worker and has no deadline. The close is a local
+/// activity, so the context it keeps is never recorded in history. Returns
+/// why the close did not go through, if it did not.
+async fn settle(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    start: &WorkflowToolStartArgs,
+    program_context: Option<serde_json::Value>,
+) -> Option<String> {
+    let closed = ctx
+        .execute_local_activity(
+            WorkflowActivities::program_close,
+            crate::ProgramCloseActivityRequest {
+                universe_id: start.universe_id,
+                session_workflow_id: start.holder_workflow_id.clone(),
+                execution_id: start.execution_id.clone(),
+                program_context,
+            },
+            conclude_options(),
+        )
+        .await;
+    match closed {
+        Ok(crate::ProgramCloseActivityResult::Closed {
+            calls,
+            recorded,
+            withdrawals,
+            withdrawals_settled,
+            context_error,
+        }) => {
+            ctx.state_mut(|state| {
+                state.recorded = state.recorded.max(recorded);
+                state.withdrawals_settled = state.withdrawals_settled.max(withdrawals_settled);
+            });
+            ctx.wait_for_state(move |state| {
+                state.recorded >= calls && state.withdrawals_settled >= withdrawals
+            })
+            .await;
+            context_error
+        }
+        Ok(crate::ProgramCloseActivityResult::NoScope) => None,
+        Err(error) => Some(format!("scope close failed: {error}")),
+    }
+}
+
+/// Keep the finished program's output and report, once everything it
+/// started has settled. A local activity: its arguments (the output the
 /// program made) are not recorded in history, only its small result.
 async fn conclude(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
     descriptor: &ProgramRunDescriptor,
     report: program_engine::ExecutionReport,
+    cleanup_error: Option<String>,
 ) -> ProgramRunTerminal {
     let concluded = ctx
         .execute_local_activity(
@@ -451,6 +532,7 @@ async fn conclude(
             crate::ProgramConcludeActivityRequest {
                 descriptor: descriptor.clone(),
                 report,
+                cleanup_error,
             },
             conclude_options(),
         )

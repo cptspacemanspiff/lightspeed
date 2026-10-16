@@ -12956,6 +12956,185 @@ mod tests {
         assert_replays_identically(&drive, &log);
     }
 
+    #[test]
+    fn a_program_scope_close_withdraws_open_handles_and_the_run_waits_for_them() {
+        let session_id = SessionId::new("program-handles");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), opened_ask_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "open"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = BTreeMap::from([(
+            "open".to_owned(),
+            crate::CodeToolBinding {
+                tool_id: test_tool_id("open"),
+                tool_name: ToolName::new("open"),
+                contract: Some(test_contract("open")),
+            },
+        )]);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+
+        // The program opens a request: its call completes at once with a
+        // handle, a promise the program owns for the run.
+        let call = scoped_call_spec(&execution_id, "1", "open");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+        ));
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
+                .unwrap();
+        let (result, _) = code_tool_workflow_effect(&request);
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: call.origin.clone(),
+                result,
+            },
+        ));
+        let handle = PromiseId::from_number(request.promise_id_base);
+        let promise = &drive.state().promises.promises[&handle];
+        assert_eq!(promise.ownership, crate::PromiseOwnership::Model);
+        assert_eq!(promise.scope, crate::PromiseScope::Run { run_id });
+
+        // The run is cancelled through the session: its execution is
+        // withdrawn and its scope stops being live.
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::CancelRun {
+                    run_id,
+                    requested_by: None,
+                },
+                40,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive.next_action(41, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+
+        // The cancelling close withdraws the open handle too, and its
+        // workflow must confirm the withdrawal: the handle stays pending.
+        let entries = code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CloseCodeToolScope {
+                execution_id: execution_id.clone(),
+                cancel: true,
+                program_context: None,
+            },
+        );
+        assert!(entries.iter().any(|entry| matches!(
+            &entry.event,
+            CoreAgentEvent::CodeTool(crate::CodeToolEvent::ScopeClosed { withdrawn, .. })
+                if withdrawn == std::slice::from_ref(&handle)
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            &entry.event,
+            CoreAgentEvent::Promise(PromiseEvent::CancelRequested { promise_id })
+                if *promise_id == handle
+        )));
+        log.extend(entries);
+        let scope = &drive.state().code_tools.scopes[&execution_id];
+        assert_eq!(crate::code_tool_scope_withdrawals(drive.state(), scope), (1, 0));
+        // Every call has its outcome, but the run has not drained: the
+        // withdrawn handle has not settled.
+        assert!(scope.calls.values().all(|call| call.status.is_terminal()));
+        assert!(crate::program_run_is_waiting(drive.state()));
+        assert!(matches!(
+            drive.next_action(42, 8).unwrap(),
+            CoreAgentAction::Idle
+        ));
+
+        // The workflow confirms the withdrawal; the run then ends.
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id: handle.clone(),
+                    resolution: crate::PromiseResolution::Cancelled,
+                },
+                50,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let scope = &drive.state().code_tools.scopes[&execution_id];
+        assert_eq!(crate::code_tool_scope_withdrawals(drive.state(), scope), (1, 1));
+        assert!(!crate::program_run_is_waiting(drive.state()));
+        let action = drive.next_action(51, 8).unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let record = drive.state().runs.completed.last().unwrap();
+        assert_eq!(
+            (record.run_id, record.status),
+            (run_id, RunStatus::Cancelled)
+        );
+        assert_replays_identically(&drive, &log);
+    }
+
+    fn opened_ask_declaration() -> crate::WorkflowToolDeclaration {
+        crate::WorkflowToolDeclaration::new(
+            WorkflowToolDefinition {
+                tool_id: crate::WorkflowToolId::new("open"),
+                revision: 1,
+                semantic_type: "test.open.v1".into(),
+                tool: test_tool_spec("open"),
+            },
+            crate::WorkflowToolTarget::Start {
+                start: crate::WorkflowStartRef {
+                    recipe_format: 1,
+                    revision: 1,
+                    recipe_ref: BlobRef::from_bytes(b"open-recipe"),
+                    recipe_fingerprint: "test-open-recipe".into(),
+                },
+            },
+            crate::WorkflowToolCompletion::Promises {
+                reply_schema_ref: None,
+                deadline_after_ms: Some(60_000),
+                max_promises: 1,
+                key_source: crate::WorkflowToolCompletionKeySource::Reply,
+            },
+        )
+    }
+
     fn started_ask_declaration() -> crate::WorkflowToolDeclaration {
         crate::WorkflowToolDeclaration::new(
             WorkflowToolDefinition {

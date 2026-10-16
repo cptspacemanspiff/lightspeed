@@ -453,6 +453,8 @@ fn code_tool_vectors() -> Value {
             bindings: BTreeMap::from([(binding_id, tool_name)]),
             contracts: BTreeMap::new(),
             calls: BTreeMap::from([(request_id, outcome.clone())]),
+            withdrawals: 1,
+            withdrawals_settled: 1,
         },
         "outcome": outcome,
         "rejection": CodeToolRejection::new(CodeToolRejectionKind::ScopeClosed, "scope is closed"),

@@ -494,8 +494,11 @@ start the instance                 → Waiting { requests } | Finished { request
 loop:
   requests  → program_admit (one local activity per step): invoke Updates
               with Ack; refusals come back as failed completions for the next step
-  finished  → program_conclude (activity): keep the context, close the scope,
-              store the report → finalize (activity) replies to the session
+  finished  → program_close (local activity): keep the context, close the
+              scope with cancel; wait for ScopeProgress until every call is
+              recorded and every withdrawn handle settled → program_conclude
+              (local activity): store the report → finalize (activity)
+              replies to the session
   otherwise wait for a ScopeProgress signal from the session, or cancellation
   program_collect (local activity) → recorded outcomes after the cursor, as JSON
   step the instance with the refusals and collected outcomes
@@ -624,13 +627,19 @@ loop:
        delivered to the engine, and reads the outcomes for the run report.
        It holds no worker and has no deadline (today's 10 s polling inside
        `program_conclude`, and its "outcome unknown", go away). Every way a
-       call can end must emit `ScopeProgress`. Checked 2026-10-16: a call
-       the session admitted but had not yet started when the cancel arrived
-       is recorded through `CompleteCodeToolCall`, whose `CallCompleted`
-       queues the wake like any completion, and cancelled waits resume
-       through `ResumeCodeToolCall` the same way. (A call started and
-       cancelled in the same step never reaches the session and needs no
-       wake.)
+       call can end must emit `ScopeProgress`. Built: the close is the
+       `program_close` local activity (it also keeps the context, which must
+       travel with the close); `admitted` is the closed scope's call count,
+       final because a closed scope admits nothing; the wait also covers the
+       handles the close withdrew (`withdrawals_settled` in the wake, sent
+       when one settles); interrupted exits close and wait the same way
+       before `program_finalize`, which no longer polls. Checked
+       2026-10-16: a call the session admitted but had not yet started when
+       the cancel arrived is recorded through `CompleteCodeToolCall`, whose
+       `CallCompleted` queues the wake like any completion, and cancelled
+       waits resume through `ResumeCodeToolCall` the same way. (A call
+       started and cancelled in the same step never reaches the session and
+       needs no wake.)
      - **Withdrawal is the default; `h.detach()` is the only way to keep
        a request.** Keeping a request open past an exit is always explicit
        in the program; it is the escape hatch for carrying a wait across

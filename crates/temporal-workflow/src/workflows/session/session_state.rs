@@ -162,26 +162,45 @@ impl AgentSessionWorkflow {
     }
 
     /// Wake the program workflow of every run-owned scope whose calls
-    /// completed in `entries`, once per scope with its newest count of
-    /// recorded outcomes. A suspended attempt resumes from that count.
+    /// completed, or whose withdrawn handles settled, in `entries`, once per
+    /// scope with its newest counts. A suspended program resumes from the
+    /// recorded outcomes; an exit waits until everything has settled.
     fn queue_scope_progress(&mut self, entries: &[CoreAgentEntry]) -> anyhow::Result<()> {
         let mut progressed = BTreeMap::new();
         for entry in entries {
-            let CoreAgentEvent::CodeTool(harness::CodeToolEvent::CallCompleted { origin, .. }) =
-                &entry.event
-            else {
-                continue;
+            let scopes: Vec<&harness::CodeToolScope> = match &entry.event {
+                CoreAgentEvent::CodeTool(harness::CodeToolEvent::CallCompleted {
+                    origin, ..
+                }) => self
+                    .core_state
+                    .code_tools
+                    .scopes
+                    .get(&origin.execution_id)
+                    .into_iter()
+                    .collect(),
+                CoreAgentEvent::Promise(
+                    harness::PromiseEvent::Resolved { promise_id, .. }
+                    | harness::PromiseEvent::Failed { promise_id, .. }
+                    | harness::PromiseEvent::Cancelled { promise_id },
+                ) => self
+                    .core_state
+                    .code_tools
+                    .scopes
+                    .values()
+                    .filter(|scope| scope.withdrawn.contains(promise_id))
+                    .collect(),
+                _ => continue,
             };
-            let Some(scope) = self.core_state.code_tools.scopes.get(&origin.execution_id) else {
-                continue;
-            };
-            if !matches!(scope.spec.owner, harness::ScopeOwner::Run { .. }) {
-                continue;
+            for scope in scopes {
+                if !matches!(scope.spec.owner, harness::ScopeOwner::Run { .. }) {
+                    continue;
+                }
+                let (_, settled) = harness::code_tool_scope_withdrawals(&self.core_state, scope);
+                progressed.insert(
+                    scope.spec.execution_id.clone(),
+                    (entry.position.seq, scope.completed.len() as u64, settled),
+                );
             }
-            progressed.insert(
-                origin.execution_id.clone(),
-                (entry.position.seq, scope.completed.len() as u64),
-            );
         }
         if progressed.is_empty() {
             return Ok(());
@@ -193,7 +212,7 @@ impl AgentSessionWorkflow {
             .session_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("initialized session is missing session id"))?;
-        for (execution_id, (log_seq, completed)) in progressed {
+        for (execution_id, (log_seq, completed, withdrawals_settled)) in progressed {
             self.pending_emissions.push(PendingEmission::immediate(
                 execution_id.clone(),
                 EmissionEnvelope::scope_progress(
@@ -202,6 +221,7 @@ impl AgentSessionWorkflow {
                     log_seq,
                     execution_id,
                     completed,
+                    withdrawals_settled,
                 ),
             ));
         }

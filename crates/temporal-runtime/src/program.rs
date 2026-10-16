@@ -1,7 +1,8 @@
 //! The session side of a program run that its workflow drives: loading the
 //! pinned program, admitting the requests each step issues to the run's
-//! scope, collecting recorded outcomes in log order, and concluding the run
-//! by keeping its output and context and closing the scope.
+//! scope, collecting recorded outcomes in log order, closing the scope as
+//! the run exits (keeping its context), and concluding the run by keeping
+//! its output and report.
 //!
 //! The program itself runs in `ProgramRunWorkflow` on a
 //! `program_engine::ProgramInstance`; nothing here holds an interpreter.
@@ -9,21 +10,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use harness::{BlobRef, storage::BlobStore};
 use program_engine::{HostCancel, HostCompletion, HostError, HostRequest};
 use serde_json::Value;
 use temporal_workflow::{
-    CancelCodeToolRequest, CodeToolCallOutcome as RecordedOutcome, CodeToolClient,
-    CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
-    MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
+    CancelCodeToolRequest, CloseCodeToolScopeRequest, CodeToolCallOutcome as RecordedOutcome,
+    CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest,
+    InvokeCodeToolRequest, MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramCloseActivityResult,
+    ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
 use tools::program::contracts::ContractError;
 
-use crate::code::{CodeRunError, close_scope, read_bounded};
+use crate::code::{CodeRunError, read_bounded};
 
 /// The contract bindings a program runs with, as stored by reference on
 /// its descriptor.
@@ -34,14 +35,14 @@ pub struct ProgramCatalog {
     pub bindings: Vec<program_engine::ToolBinding>,
 }
 
-/// One finished attempt: what the program did and the run's scope as it
-/// closed.
+/// One finished program: what it did and the run's scope once everything
+/// it started had settled.
 #[derive(Debug)]
 pub struct CodeRunReport {
     pub execution: program_engine::ExecutionReport,
-    /// Latest confirmed snapshot. It may be incomplete when cleanup failed.
+    /// The settled scope. Missing, or unsettled, only when cleanup failed.
     pub scope: Option<CodeToolScopeReport>,
-    /// A missing final receipt means unfinished effect outcomes are unknown.
+    /// Why the scope did not close, or could not be read, if it did not.
     pub cleanup_error: Option<String>,
 }
 
@@ -91,26 +92,91 @@ const PROGRAM_CONTEXT_PREVIEW_CHARS: usize = 256;
 pub struct ProgramRunner {
     client: Client,
     blobs: Arc<dyn BlobStore>,
-    cleanup_timeout: Duration,
 }
 
 impl ProgramRunner {
-    pub fn new(client: Client, blobs: Arc<dyn BlobStore>, cleanup_timeout: Duration) -> Self {
-        Self {
-            client,
-            blobs,
-            cleanup_timeout,
-        }
+    pub fn new(client: Client, blobs: Arc<dyn BlobStore>) -> Self {
+        Self { client, blobs }
     }
 
-    /// Close the run's scope and collect terminal outcomes.
-    pub async fn cleanup(
+    /// Close the run's scope as the run exits: the session cancels every
+    /// call the program still owns and withdraws its undetached handles. A
+    /// finished program's context is kept with the close. Returns at once
+    /// with what the exit must wait for; idempotent, so a lost result closes
+    /// again and keeps one context.
+    pub async fn close(
         &self,
+        session_workflow_id: &str,
+        execution_id: &str,
+        program_context: Option<Value>,
+    ) -> Result<ProgramCloseActivityResult, String> {
+        let code_tools = CodeToolClient::new(self.client.clone(), session_workflow_id.to_owned());
+        let mut context_error = None;
+        let program_context = match program_context {
+            Some(value) => match self.keep_context(&value).await {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    context_error = Some(format!("program context not stored: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let closed = code_tools
+            .close_scope(
+                CloseCodeToolScopeRequest {
+                    execution_id: execution_id.to_owned(),
+                    cancel_pending: true,
+                    program_context,
+                },
+                Default::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let scope = match closed {
+            Ok(scope) => scope,
+            Err(rejection) => {
+                // A run interrupted before it opened its scope has none.
+                return match Self::report(&code_tools, execution_id).await {
+                    Err(error) if error.kind == CodeToolRejectionKind::UnknownScope => {
+                        Ok(ProgramCloseActivityResult::NoScope)
+                    }
+                    _ => Err(rejection.to_string()),
+                };
+            }
+        };
+        Ok(ProgramCloseActivityResult::Closed {
+            calls: scope.calls.len() as u64,
+            recorded: scope
+                .calls
+                .values()
+                .filter(|call| call.status.is_terminal())
+                .count() as u64,
+            withdrawals: scope.withdrawals,
+            withdrawals_settled: scope.withdrawals_settled,
+            context_error,
+        })
+    }
+
+    /// The scope's report now, fresh from the session.
+    pub async fn report(
         code_tools: &CodeToolClient,
         execution_id: &str,
-        latest: Option<CodeToolScopeReport>,
-    ) -> (Option<CodeToolScopeReport>, Option<String>) {
-        close_scope(code_tools, execution_id, latest, None, self.cleanup_timeout).await
+    ) -> Result<CodeToolScopeReport, temporal_workflow::CodeToolRejection> {
+        code_tools
+            .report(
+                CodeToolScopeReportRequest {
+                    execution_id: execution_id.to_owned(),
+                },
+                Default::default(),
+            )
+            .await
+            .map_err(|error| {
+                temporal_workflow::CodeToolRejection::new(
+                    CodeToolRejectionKind::Unavailable,
+                    error.to_string(),
+                )
+            })?
     }
 
     /// What a workflow needs to run the program itself, with the pins
@@ -295,38 +361,25 @@ impl ProgramRunner {
         Ok(completions)
     }
 
-    /// Keep a finished program's context with the scope's close, and close
-    /// the run's scope.
+    /// What a finished program did, with its scope as it settled. The
+    /// workflow has closed the scope and waited for it; this only reads it.
     pub async fn conclude(
         &self,
         descriptor: &ProgramRunDescriptor,
         report: program_engine::ExecutionReport,
+        cleanup_error: Option<String>,
     ) -> CodeRunReport {
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
-        let mut cleanup_error = None;
-        let program_context = match (&report.error, &report.program_context) {
-            (None, Some(value)) => match self.keep_context(value).await {
-                Ok(context) => Some(context),
-                Err(error) => {
-                    cleanup_error = Some(format!("program context not stored: {error}"));
-                    None
-                }
-            },
-            _ => None,
+        let (scope, report_error) = match Self::report(&code_tools, &descriptor.execution_id).await
+        {
+            Ok(scope) => (Some(scope), None),
+            Err(error) => (None, Some(format!("scope report unavailable: {error}"))),
         };
-        let (scope, close_error) = close_scope(
-            &code_tools,
-            &descriptor.execution_id,
-            None,
-            program_context,
-            self.cleanup_timeout,
-        )
-        .await;
         CodeRunReport {
             execution: report,
             scope,
-            cleanup_error: cleanup_error.or(close_error),
+            cleanup_error: cleanup_error.or(report_error),
         }
     }
 
@@ -553,6 +606,8 @@ mod tests {
             execution_id: "wtx:test".into(),
             closed: false,
             cancel_requested: false,
+            withdrawals: 0,
+            withdrawals_settled: 0,
             bindings: [
                 ("h-read", "vfs_read_file"),
                 ("h-sleep", "time_sleep"),

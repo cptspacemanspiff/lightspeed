@@ -591,14 +591,17 @@ pub fn program_run_is_waiting(state: &CoreAgentState) -> bool {
 }
 
 /// Whether the run's scope still has calls that have not reached a terminal
-/// outcome.
+/// outcome, or handles its close withdrew that have not settled.
 fn run_scope_has_pending_calls(state: &CoreAgentState, run_id: RunId) -> bool {
     state
         .code_tools
         .scopes
         .values()
         .filter(|scope| scope.spec.owner == crate::ScopeOwner::Run { run_id })
-        .any(|scope| scope.calls.values().any(|call| !call.status.is_terminal()))
+        .any(|scope| {
+            let (withdrawn, settled) = crate::code_tool_scope_withdrawals(state, scope);
+            settled < withdrawn || scope.calls.values().any(|call| !call.status.is_terminal())
+        })
 }
 
 fn program_execute_binding(state: &CoreAgentState) -> Option<&WorkflowToolBinding> {

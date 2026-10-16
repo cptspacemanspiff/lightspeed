@@ -282,28 +282,28 @@ impl LosesFirstAdmit {
     }
 }
 
-/// A `program_conclude` that concludes the run for real and then fails its
-/// first attempt, as if the worker had lost the result after the scope
-/// closed. Records each attempt it ran.
-pub struct LosesFirstConclude {
+/// A `program_close` that closes the run's scope for real, keeping the
+/// program's context, and then fails its first attempt, as if the worker had
+/// lost the result after the scope closed. Records each attempt it ran.
+pub struct LosesFirstClose {
     activities: Arc<ProgramWorkerActivities>,
     attempts: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 #[activities]
-impl LosesFirstConclude {
-    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
-    pub async fn program_conclude(
+impl LosesFirstClose {
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CLOSE)]
+    pub async fn program_close(
         self: Arc<Self>,
         ctx: ActivityContext,
-        request: temporal_workflow::ProgramConcludeActivityRequest,
-    ) -> Result<temporal_workflow::ProgramAttemptActivityResult, ActivityError> {
+        request: temporal_workflow::ProgramCloseActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCloseActivityResult, ActivityError> {
         let attempt = ctx.info().attempt;
         self.attempts.lock().expect("attempts lock").push(attempt);
-        let result = self.activities.conclude(ctx, request).await?;
+        let result = self.activities.close(ctx, request).await?;
         if attempt == 1 {
             return Err(ActivityError::application(ApplicationFailure::new(
-                anyhow::anyhow!("concluded, but the result was lost"),
+                anyhow::anyhow!("closed, but the result was lost"),
             )));
         }
         Ok(result)
@@ -314,7 +314,7 @@ impl LosesFirstConclude {
 /// attempts it ran are recorded.
 enum LostResult {
     Admit(Arc<std::sync::Mutex<Vec<u32>>>),
-    Conclude(Arc<std::sync::Mutex<Vec<u32>>>),
+    Close(Arc<std::sync::Mutex<Vec<u32>>>),
 }
 
 /// [`with_program_workers`] whose `body` also gets the Temporal client.
@@ -331,7 +331,7 @@ async fn with_program_workers_and_client(
 }
 
 /// [`with_program_workers_and_client`] whose program worker, given `lost`,
-/// runs [`LosesFirstAdmit`] or [`LosesFirstConclude`] in place of the real
+/// runs [`LosesFirstAdmit`] or [`LosesFirstClose`] in place of the real
 /// activity.
 async fn with_program_workers_losing(
     input_timeouts: InputTimeouts,
@@ -388,15 +388,11 @@ async fn with_program_workers_losing(
                         .register_activities(activities);
                     options = match lost {
                         LostResult::Admit(attempts) => options.register_activities(LosesFirstAdmit {
-                            runner: ProgramRunner::new(
-                                client.clone(),
-                                store.clone(),
-                                Duration::from_secs(10),
-                            ),
+                            runner: ProgramRunner::new(client.clone(), store.clone()),
                             attempts,
                         }),
-                        LostResult::Conclude(attempts) => {
-                            options.register_activities(LosesFirstConclude {
+                        LostResult::Close(attempts) => {
+                            options.register_activities(LosesFirstClose {
                                 activities: Arc::new(ProgramWorkerActivities::for_universe(
                                     live_universe_id()?,
                                     api.clone(),
@@ -2547,11 +2543,11 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
-async fn a_lost_conclusion_result_concludes_again_and_keeps_one_context() -> anyhow::Result<()> {
+async fn a_lost_close_result_closes_again_and_keeps_one_context() -> anyhow::Result<()> {
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
     with_program_workers_losing(
         InputTimeouts::default(),
-        Some(LostResult::Conclude(attempts.clone())),
+        Some(LostResult::Close(attempts.clone())),
         |api, store, session_id, client| {
             Box::pin(async move {
                 let fixture = McpFixture::start().await?;
@@ -2579,9 +2575,9 @@ async fn a_lost_conclusion_result_concludes_again_and_keeps_one_context() -> any
                     .await?;
                     let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
                     assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
-                    // The second conclusion of a closed scope returned the same
-                    // output, and the context the first kept is the one the
-                    // next run reads.
+                    // The second close of the closed scope kept nothing more:
+                    // the context the first kept is the one the next run
+                    // reads.
                     assert_eq!(
                         read_json(&store, &run.output.as_ref().expect("output").content_ref)
                             .await?,
@@ -2611,7 +2607,7 @@ async fn a_lost_conclusion_result_concludes_again_and_keeps_one_context() -> any
                     assert_eq!(
                         programs::local_activity_attempts(
                             &events,
-                            temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE
+                            temporal_workflow::ACTIVITY_PROGRAM_CLOSE
                         ),
                         [2]
                     );
@@ -2633,4 +2629,241 @@ async fn a_lost_conclusion_result_concludes_again_and_keeps_one_context() -> any
     .await?;
     assert_eq!(*attempts.lock().expect("attempts lock"), [1, 2, 1, 2]);
     Ok(())
+}
+
+const LEFT_OPEN_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            await env.input.open({ ask: "Ship " + input.claim + "?", assignees: ["alice"] });
+            env.input.request({ ask: "Merge " + input.claim + "?", assignees: ["bob"] });
+            await env.time.sleep({ ms: input.wait_ms });
+            return { claim: input.claim, slept: input.wait_ms };
+        }
+    };
+"#;
+
+/// Each of the scope's recorded outcomes, sorted; panics on a call
+/// without one.
+fn recorded_statuses(scope: &harness::CodeToolScope) -> Vec<String> {
+    let mut statuses = scope
+        .calls
+        .values()
+        .map(|call| match &call.status {
+            harness::CodeToolCallStatus::Completed { result } => format!("{:?}", result.status),
+            other => panic!("call without an outcome: {:?}: {other:?}", call.spec),
+        })
+        .collect::<Vec<_>>();
+    statuses.sort();
+    statuses
+}
+
+/// The run's only program scope, from the session's state.
+fn only_program_scope(state: &harness::CoreAgentState) -> &harness::CodeToolScope {
+    let [execution_id] = <[_; 1]>::try_from(program_execution_ids(state))
+        .expect("one program execution");
+    &state.code_tools.scopes[&execution_id]
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_exit_withdraws_its_open_requests_and_the_run_waits_for_them()
+-> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(
+                    &profile_id,
+                    LEFT_OPEN_PROGRAM,
+                    &[
+                        ("input.open", None),
+                        ("input.request", None),
+                        ("promise.await", None),
+                        ("promise.cancel", None),
+                        ("time.sleep", None),
+                    ],
+                ),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // The program returns holding an opened request and a request it
+            // never awaited. Alice's answer is saved before the exit, but its
+            // workflow has not read it: the withdrawal finds it, so it stands.
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "left", "wait_ms": 4000}),
+            )
+            .await?;
+            let requests = wait_for_requests(&api, &session_id, 2).await?;
+            let opened = requests
+                .iter()
+                .find(|request| request.assignees == ["alice"])
+                .expect("alice's request");
+            store
+                .answer_input_request(
+                    &opened.request_id,
+                    &api::InputRequestAnswer {
+                        approved: true,
+                        value: None,
+                        comment: None,
+                        answered_by: api::Attribution::Local,
+                        answered_at_ms: 1,
+                    },
+                )
+                .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+
+            // Both had settled before the run ended: nothing is left open,
+            // and nothing was cancelled without its workflow's word.
+            let requests = api
+                .list_inbox_requests(api::InboxRequestListParams {
+                    session: Some(session_id.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .result
+                .requests;
+            let status = |assignee: &str| {
+                requests
+                    .iter()
+                    .find(|request| request.assignees == [assignee])
+                    .map(|request| request.status)
+            };
+            assert_eq!(
+                (status("alice"), status("bob")),
+                (
+                    Some(api::InputRequestStatus::Answered),
+                    Some(api::InputRequestStatus::Cancelled)
+                ),
+                "{requests:?}"
+            );
+            let state = programs::session_state(&store, &session_id).await?;
+            let scope = only_program_scope(&state);
+            let [handle] = <[_; 1]>::try_from(scope.withdrawn.iter().collect::<Vec<_>>())
+                .map_err(|withdrawn| anyhow::anyhow!("one withdrawn handle: {withdrawn:?}"))?;
+            assert_eq!(
+                state.promises.promises[handle].status,
+                harness::PromiseStatus::Resolved
+            );
+            // The opened request and the sleep succeeded; the request the
+            // program never awaited was withdrawn, which its workflow
+            // records as an `input_cancelled` failure.
+            assert_eq!(
+                recorded_statuses(scope),
+                ["Failed", "Succeeded", "Succeeded"],
+                "{:?}",
+                scope.calls
+            );
+            let withdrawn = scope
+                .calls
+                .values()
+                .find(|call| call.spec.tool_id.as_str() == "input.request")
+                .expect("the request's call");
+            let harness::CodeToolCallStatus::Completed { result } = &withdrawn.status else {
+                anyhow::bail!("the request has no outcome");
+            };
+            let message = store
+                .read_bytes(result.error_ref.as_ref().expect("its failure"))
+                .await?;
+            assert!(
+                String::from_utf8_lossy(&message).contains("input_cancelled"),
+                "{}",
+                String::from_utf8_lossy(&message)
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+const LEFT_RUNNING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            env.mcp[input.server].create_issue({ title: input.claim });
+            await env.time.sleep({ ms: input.wait_ms });
+            return { claim: input.claim, slept: input.wait_ms };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn a_program_exit_stops_a_running_call_and_records_its_outcome() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let fixture = McpFixture::start().await?;
+            let server = format!(
+                "prog_mcp_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let profile_id = mcp_program_profile_with(
+                &api,
+                &fixture,
+                &server,
+                &[&format!("mcp.{server}.create_issue"), "time.sleep"],
+                LEFT_RUNNING_PROGRAM,
+                api::RemoteMcpApprovalPolicy::Never,
+                None,
+            )
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            // The program returns while its call runs (a "slow" title takes a
+            // minute): the exit stops the call and the run ends with the
+            // call's own recorded outcome, long before the minute is up.
+            let started = tokio::time::Instant::now();
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "slow", "server": server, "wait_ms": 3000}),
+            )
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the running call was not stopped: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                fixture.state.lock().await.calls,
+                vec![json!({"name": "createIssue", "arguments": {"title": "slow"}})]
+            );
+            let state = programs::session_state(&store, &session_id).await?;
+            let scope = only_program_scope(&state);
+            // The call was stopped and recorded cancelled; the sleep it
+            // outlived succeeded.
+            assert_eq!(
+                recorded_statuses(scope),
+                ["Cancelled", "Succeeded"],
+                "{:?}",
+                scope.calls
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            fixture.task.abort();
+            Ok(())
+        })
+    })
+    .await
 }

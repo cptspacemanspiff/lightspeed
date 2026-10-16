@@ -884,6 +884,8 @@ mod tests {
                 execution_id: "code-output-test".into(),
                 closed: true,
                 cancel_requested: false,
+                withdrawals: 0,
+                withdrawals_settled: 0,
                 bindings: Default::default(),
                 contracts: Default::default(),
                 calls: calls
@@ -1286,6 +1288,8 @@ mod tests {
                 execution_id: "code-test".into(),
                 closed: true,
                 cancel_requested: true,
+                withdrawals: 0,
+                withdrawals_settled: 0,
                 bindings: Default::default(),
                 contracts: Default::default(),
                 calls: [(

@@ -419,49 +419,16 @@ impl CodeRunner {
         &self,
         code_tools: &CodeToolClient,
         execution_id: &str,
-        latest: Option<CodeToolScopeReport>,
+        mut latest: Option<CodeToolScopeReport>,
     ) -> (Option<CodeToolScopeReport>, Option<String>) {
-        close_scope(code_tools, execution_id, latest, None, self.cleanup_timeout).await
-    }
-}
-
-/// Close a scope, keeping a program run's context with the close, and wait
-/// up to `timeout` for its calls' terminal outcomes.
-pub(crate) async fn close_scope(
-    code_tools: &CodeToolClient,
-    execution_id: &str,
-    mut latest: Option<CodeToolScopeReport>,
-    program_context: Option<harness::ProgramContextInput>,
-    timeout: Duration,
-) -> (Option<CodeToolScopeReport>, Option<String>) {
-    let cleanup = async {
-        latest = Some(
-            code_tools
-                .close_scope(
-                    CloseCodeToolScopeRequest {
-                        execution_id: execution_id.to_owned(),
-                        cancel_pending: true,
-                        program_context: program_context.clone(),
-                    },
-                    Default::default(),
-                )
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?,
-        );
-        loop {
-            if latest.as_ref().is_some_and(|scope| {
-                scope.closed && scope.calls.values().all(|call| call.status.is_terminal())
-            }) {
-                return Ok::<_, String>(());
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            // Update replies are cached; only queries provide fresh progress.
+        let cleanup = async {
             latest = Some(
                 code_tools
-                    .report(
-                        CodeToolScopeReportRequest {
+                    .close_scope(
+                        CloseCodeToolScopeRequest {
                             execution_id: execution_id.to_owned(),
+                            cancel_pending: true,
+                            program_context: None,
                         },
                         Default::default(),
                     )
@@ -469,14 +436,37 @@ pub(crate) async fn close_scope(
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?,
             );
-        }
-    };
-    let error = match tokio::time::timeout(timeout, cleanup).await {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(_) => Some("scope cleanup deadline exceeded; pending outcomes remain unknown".into()),
-    };
-    (latest, error)
+            loop {
+                if latest.as_ref().is_some_and(|scope| {
+                    scope.closed && scope.calls.values().all(|call| call.status.is_terminal())
+                }) {
+                    return Ok::<_, String>(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Update replies are cached; only queries provide fresh progress.
+                latest = Some(
+                    code_tools
+                        .report(
+                            CodeToolScopeReportRequest {
+                                execution_id: execution_id.to_owned(),
+                            },
+                            Default::default(),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+        };
+        let error = match tokio::time::timeout(self.cleanup_timeout, cleanup).await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => {
+                Some("scope cleanup deadline exceeded; pending outcomes remain unknown".into())
+            }
+        };
+        (latest, error)
+    }
 }
 
 async fn cancellable_preparation<T>(
@@ -705,6 +695,8 @@ mod tests {
             execution_id: "code-test".into(),
             closed: false,
             cancel_requested: false,
+            withdrawals: 0,
+            withdrawals_settled: 0,
             bindings: [
                 ("binding-a".into(), ToolName::new("mcp.read")),
                 ("binding-b".into(), ToolName::new("timer_sleep")),
