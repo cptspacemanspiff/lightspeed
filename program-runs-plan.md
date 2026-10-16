@@ -674,7 +674,7 @@ loop:
        next. The workflow's input becomes `{ start, continuation }`; the
        continuation carries the descriptor (no second prepare), the
        execution number, the state's reference, the engine clock and the
-       calls used so far. The next execution's random seed derives from
+       calls and compute used so far. The next execution's random seed derives from
        the run and execution number; its clock starts where the last one
        stopped.
      - **Limits (agreed 2026-10-16).** Each bounds a run as a whole and is
@@ -1311,7 +1311,8 @@ regenerated contracts).
      decode-only codec; `program_conclude` as a local activity).
    - Remaining, in order (D7 "Long runs"): exits that settle every call,
      per-call `cancel()` and `detach()`; `ctx.state` with
-     `ctx.continueAsNew` and `ctx.complete`, a scope per execution;
+     `ctx.continueAsNew` and `ctx.complete`, a scope per execution, and
+     run-wide limits (`max_calls` per run, `max_compute`);
      `ctx.shouldContinue()` and `history_exhausted`; Temporal worker
      versioning.
 5. **Composition** (D13).
