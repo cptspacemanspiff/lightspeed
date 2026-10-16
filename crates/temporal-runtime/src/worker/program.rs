@@ -63,6 +63,15 @@ impl ProgramWorkerActivities {
         }
     }
 
+    /// What `program_conclude` does, for a worker that wraps the activity.
+    pub async fn conclude(
+        &self,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramConcludeActivityRequest,
+    ) -> Result<ProgramAttemptActivityResult, ActivityError> {
+        conclude_activity(self, ctx, request).await
+    }
+
     /// The codec that puts referenced values back, reading each universe's
     /// store the way these activities do.
     pub fn value_ref_codec(&self) -> ValueRefCodec {

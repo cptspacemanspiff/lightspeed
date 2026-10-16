@@ -282,6 +282,41 @@ impl LosesFirstAdmit {
     }
 }
 
+/// A `program_conclude` that concludes the run for real and then fails its
+/// first attempt, as if the worker had lost the result after the scope
+/// closed. Records each attempt it ran.
+pub struct LosesFirstConclude {
+    activities: Arc<ProgramWorkerActivities>,
+    attempts: Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+#[activities]
+impl LosesFirstConclude {
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
+    pub async fn program_conclude(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramConcludeActivityRequest,
+    ) -> Result<temporal_workflow::ProgramAttemptActivityResult, ActivityError> {
+        let attempt = ctx.info().attempt;
+        self.attempts.lock().expect("attempts lock").push(attempt);
+        let result = self.activities.conclude(ctx, request).await?;
+        if attempt == 1 {
+            return Err(ActivityError::application(ApplicationFailure::new(
+                anyhow::anyhow!("concluded, but the result was lost"),
+            )));
+        }
+        Ok(result)
+    }
+}
+
+/// Which program activity loses the result of its first attempt; the
+/// attempts it ran are recorded.
+enum LostResult {
+    Admit(Arc<std::sync::Mutex<Vec<u32>>>),
+    Conclude(Arc<std::sync::Mutex<Vec<u32>>>),
+}
+
 /// [`with_program_workers`] whose `body` also gets the Temporal client.
 async fn with_program_workers_and_client(
     input_timeouts: InputTimeouts,
@@ -292,14 +327,15 @@ async fn with_program_workers_and_client(
         temporalio_client::Client,
     ) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
-    with_program_workers_admitting(input_timeouts, None, body).await
+    with_program_workers_losing(input_timeouts, None, body).await
 }
 
-/// [`with_program_workers_and_client`] whose program worker, given
-/// `lost_admits`, runs [`LosesFirstAdmit`] in place of `program_admit`.
-async fn with_program_workers_admitting(
+/// [`with_program_workers_and_client`] whose program worker, given `lost`,
+/// runs [`LosesFirstAdmit`] or [`LosesFirstConclude`] in place of the real
+/// activity.
+async fn with_program_workers_losing(
     input_timeouts: InputTimeouts,
-    lost_admits: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+    lost: Option<LostResult>,
     body: impl FnOnce(
         Arc<GatewayAgentApi>,
         Arc<store_pg::PgStore>,
@@ -341,26 +377,36 @@ async fn with_program_workers_admitting(
             );
             let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone());
             let runtime = worker_runtime()?;
-            let mut worker = match lost_admits {
+            let mut worker = match lost {
                 None => program_worker(&runtime, client.clone(), program_queue, activities)?,
                 // A later registration under the same name replaces the
-                // worker's own `program_admit`.
-                Some(attempts) => temporalio_sdk::Worker::new(
-                    &runtime,
-                    program_worker_client(client.clone(), &activities),
-                    temporalio_sdk::WorkerOptions::new(program_queue)
+                // worker's own activity.
+                Some(lost) => {
+                    let worker_client = program_worker_client(client.clone(), &activities);
+                    let mut options = temporalio_sdk::WorkerOptions::new(program_queue)
                         .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
-                        .register_activities(activities)
-                        .register_activities(LosesFirstAdmit {
+                        .register_activities(activities);
+                    options = match lost {
+                        LostResult::Admit(attempts) => options.register_activities(LosesFirstAdmit {
                             runner: ProgramRunner::new(
                                 client.clone(),
                                 store.clone(),
                                 Duration::from_secs(10),
                             ),
                             attempts,
-                        })
-                        .build(),
-                )?,
+                        }),
+                        LostResult::Conclude(attempts) => {
+                            options.register_activities(LosesFirstConclude {
+                                activities: Arc::new(ProgramWorkerActivities::for_universe(
+                                    live_universe_id()?,
+                                    api.clone(),
+                                )),
+                                attempts,
+                            })
+                        }
+                    };
+                    temporalio_sdk::Worker::new(&runtime, worker_client, options.build())?
+                }
             };
             let shutdown = worker.shutdown_handle();
             let worker_run = worker.run();
@@ -1532,9 +1578,9 @@ const SLEEPING_PROGRAM: &str = r#"
 async fn a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice()
 -> anyhow::Result<()> {
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    with_program_workers_admitting(
+    with_program_workers_losing(
         InputTimeouts::default(),
-        Some(attempts.clone()),
+        Some(LostResult::Admit(attempts.clone())),
         |api, store, session_id, client| {
             Box::pin(async move {
                 let fixture = McpFixture::start().await?;
@@ -1808,9 +1854,10 @@ fn history_contains(
 const SOURCE_PROBE: &str = "source-history-probe;";
 const INPUT_PROBE: &str = "input-history-probe;";
 const CONTEXT_PROBE: &str = "context-history-probe;";
+const OUTPUT_PROBE: &str = "output-history-probe;";
 
 /// Calls the fixture's echoing tool with the claim, keeps `input.keep` as
-/// its context, and reports only sizes, so its output stays small.
+/// its context, and returns `input.echo` beside the sizes it saw.
 fn large_values_program() -> String {
     format!(
         r#"/* {} */
@@ -1821,6 +1868,7 @@ fn large_values_program() -> String {
                 return {{
                     claim: "ok",
                     slept: 0,
+                    echo: input.echo,
                     claimLength: input.claim.length,
                     createdHasClaim: JSON.stringify(created).includes(input.claim),
                     contextLength: ctx.context?.kept?.length ?? 0,
@@ -1858,19 +1906,21 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
                     .value_ref_codec();
                 let claim = INPUT_PROBE.repeat(2_000);
                 let keep = CONTEXT_PROBE.repeat(1_500);
+                let echo = OUTPUT_PROBE.repeat(2_000);
 
-                // Run 1: large source, input and tool result.
+                // Run 1: large source, input, tool result, output and kept
+                // context.
                 let run = start_program_run(
                     &api,
                     &session_id,
-                    json!({"claim": claim, "server": server, "keep": keep}),
+                    json!({"claim": claim, "server": server, "keep": keep, "echo": echo}),
                 )
                 .await?;
                 let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
                 assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
                 assert_eq!(
                     read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
-                    json!({"claim": "ok", "slept": 0, "claimLength": claim.len(),
+                    json!({"claim": "ok", "slept": 0, "echo": echo, "claimLength": claim.len(),
                            "createdHasClaim": true, "contextLength": 0})
                 );
                 let first =
@@ -1881,14 +1931,14 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
                 let run = start_program_run(
                     &api,
                     &session_id,
-                    json!({"claim": "small", "server": server, "keep": ""}),
+                    json!({"claim": "small", "server": server, "keep": "", "echo": "e"}),
                 )
                 .await?;
                 let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
                 assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
                 assert_eq!(
                     read_json(&store, &run.output.as_ref().expect("output").content_ref).await?,
-                    json!({"claim": "ok", "slept": 0, "claimLength": 5,
+                    json!({"claim": "ok", "slept": 0, "echo": "e", "claimLength": 5,
                            "createdHasClaim": true, "contextLength": keep.len()})
                 );
                 let ids =
@@ -1899,8 +1949,11 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
                     .expect("second run's workflow");
 
                 for (id, absent) in [
-                    (&first[0], [SOURCE_PROBE, INPUT_PROBE]),
-                    (&second, [SOURCE_PROBE, CONTEXT_PROBE]),
+                    (
+                        &first[0],
+                        &[SOURCE_PROBE, INPUT_PROBE, CONTEXT_PROBE, OUTPUT_PROBE][..],
+                    ),
+                    (&second, &[SOURCE_PROBE, CONTEXT_PROBE][..]),
                 ] {
                     let handle = client
                         .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(id.clone());
@@ -1951,4 +2004,94 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
         },
     )
     .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
+async fn a_lost_conclusion_result_concludes_again_and_keeps_one_context() -> anyhow::Result<()> {
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    with_program_workers_losing(
+        InputTimeouts::default(),
+        Some(LostResult::Conclude(attempts.clone())),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let fixture = McpFixture::start().await?;
+                let server = format!(
+                    "prog_mcp_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..12]
+                );
+                let profile_id = mcp_program_profile_with(
+                    &api,
+                    &fixture,
+                    &server,
+                    &[&format!("mcp.{server}.create_issue")],
+                    &large_values_program(),
+                    api::RemoteMcpApprovalPolicy::Never,
+                    None,
+                )
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                for (keep, echo, context_length) in [("kept once", "first", 0), ("", "second", 9)] {
+                    let run = start_program_run(
+                        &api,
+                        &session_id,
+                        json!({"claim": "c", "server": server, "keep": keep, "echo": echo}),
+                    )
+                    .await?;
+                    let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                    assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                    // The second conclusion of a closed scope returned the same
+                    // output, and the context the first kept is the one the
+                    // next run reads.
+                    assert_eq!(
+                        read_json(&store, &run.output.as_ref().expect("output").content_ref)
+                            .await?,
+                        json!({"claim": "ok", "slept": 0, "echo": echo, "claimLength": 1,
+                               "createdHasClaim": true, "contextLength": context_length})
+                    );
+                }
+                let state = programs::session_state(&store, &session_id).await?;
+                // One context per run, though each run's scope was closed twice.
+                assert_eq!(
+                    state
+                        .context
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.kind == harness::ContextEntryKind::ProgramState)
+                        .count(),
+                    2
+                );
+                for id in program_execution_ids(&state) {
+                    let handle =
+                        client.get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(id);
+                    let events = handle
+                        .fetch_history(Default::default())
+                        .into_events()
+                        .await?;
+                    // History keeps only the attempt whose result it recorded.
+                    assert_eq!(
+                        programs::local_activity_attempts(
+                            &events,
+                            temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE
+                        ),
+                        [2]
+                    );
+                }
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                fixture.task.abort();
+                Ok(())
+            })
+        },
+    )
+    .await?;
+    assert_eq!(*attempts.lock().expect("attempts lock"), [1, 2, 1, 2]);
+    Ok(())
 }

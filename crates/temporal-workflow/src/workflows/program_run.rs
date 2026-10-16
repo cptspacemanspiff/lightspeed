@@ -433,20 +433,21 @@ async fn run_program(
 }
 
 /// Keep the finished program's output, context and report, and close the
-/// run's scope.
+/// run's scope. A local activity: its arguments (the output and context the
+/// program made) are not recorded in history, only its small result.
 async fn conclude(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
     descriptor: &ProgramRunDescriptor,
     report: program_engine::ExecutionReport,
 ) -> ProgramRunTerminal {
     let concluded = ctx
-        .execute_activity(
+        .execute_local_activity(
             WorkflowActivities::program_conclude,
             crate::ProgramConcludeActivityRequest {
                 descriptor: descriptor.clone(),
                 report,
             },
-            finalization_options(),
+            conclude_options(),
         )
         .await;
     match concluded {
@@ -595,6 +596,23 @@ fn collect_options() -> LocalActivityOptions {
     LocalActivityOptions::builder()
         .schedule_to_close_timeout(Duration::from_secs(60))
         .start_to_close_timeout(Duration::from_secs(30))
+        .build()
+}
+
+/// The budget the server-scheduled conclusion had: closing the scope waits
+/// at most 10 s for its calls to settle.
+fn conclude_options() -> LocalActivityOptions {
+    LocalActivityOptions::builder()
+        .schedule_to_close_timeout(Duration::from_secs(60))
+        .start_to_close_timeout(Duration::from_secs(30))
+        .retry_policy(
+            temporalio_client::RetryPolicy::builder()
+                .initial_interval(Duration::from_secs(1))
+                .backoff_coefficient(2.0)
+                .maximum_interval(Duration::from_secs(5))
+                .maximum_attempts(3)
+                .build(),
+        )
         .build()
 }
 
