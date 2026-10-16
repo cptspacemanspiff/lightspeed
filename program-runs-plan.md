@@ -99,6 +99,12 @@ The activity design (attempts, hold window, suspension and wake) was built
 and then removed. D14's `env.state` became the program context (`ctx.context`
 / `ctx.setContext`). The sections below are updated to match.
 
+**Revision (2026-10-15, user), long runs.** Admission became a local
+activity (built). Long runs use the claim-check codec, an explicit
+`ctx.continueAsNew(state)`, `ctx.shouldContinue()` and a typed
+`history_exhausted` failure (D7 "Long runs"); heap checkpoints, history
+rollover and outcomes in the wake signal were considered and rejected.
+
 ### D1. A session type at the edges, the shared harness in the middle
 
 **The session kind** is fixed when the session is created and recorded in the
@@ -412,9 +418,9 @@ feature-specific transport into the session worker. The invocation's call
 context is `CallContext::Run` (D3).
 
 - **Start.** When a run on a program session is Accepted/Started, the harness
-  emits a start request for a `ProgramRunWorkflow` invocation on the existing
-  `code` task queue (`Role::Code`, `DEFAULT_CODE_TASK_QUEUE` at
-  `temporal-runtime/src/config.rs:188`) with a deterministic execution id
+  emits a start request for a `ProgramRunWorkflow` invocation on the
+  `program` task queue (`Role::Program`, `DEFAULT_PROGRAM_TASK_QUEUE` in
+  `temporal-runtime/src/config.rs`) with a deterministic execution id
   (`wtx:…`, derived from the invocation and the binding's recipe). `start_execution`
   (`worker/activities/workflow_tools.rs:28-105`, policy in
   `execution_start_options` at `:107-112`) uses `RejectDuplicate` because a
@@ -460,7 +466,7 @@ it re-implemented Temporal's own replay. The program now runs **inside**
 `ProgramRunWorkflow`, and the workflow's history is its journal. Code mode
 keeps its single-attempt activity.
 
-- **`ProgramRunWorkflow`** (`code` role) owns the run's scope for the run's
+- **`ProgramRunWorkflow`** (`program` role) owns the run's scope for the run's
   lifetime and closes it only on a real terminal or a cancel. It hosts a
   stepped program instance (D9) on the workflow thread:
 
@@ -469,8 +475,8 @@ prepare          (activity)        → descriptor
 program_load     (activity)        → source, input, context, contract bindings (pins re-checked)
 start the instance                 → Waiting { requests } | Finished { requests, report }
 loop:
-  requests  → program_admit (one activity per step): invoke Updates with Ack;
-              refusals come back as failed completions for the next step
+  requests  → program_admit (one local activity per step): invoke Updates
+              with Ack; refusals come back as failed completions for the next step
   finished  → program_conclude (activity): keep the context, close the scope,
               store the report → finalize (activity) replies to the session
   otherwise wait for a ScopeProgress signal from the session, or cancellation
@@ -479,8 +485,8 @@ loop:
 ```
 
 - **Determinism.** Every input to a step is in the workflow's history: the
-  loaded program (an activity result), admission refusals (an activity
-  result), collected outcomes (local-activity markers) and wakes (signals).
+  loaded program (an activity result), admission refusals and collected
+  outcomes (local-activity markers) and wakes (signals).
   After a cache eviction or a lost worker, Temporal re-runs the workflow
   function, which builds a fresh instance and feeds it the same inputs in
   the same order, so it issues the same requests; Temporal's command check
@@ -503,16 +509,85 @@ loop:
 - **CPU.** Steps run on the workflow thread of the worker that holds the
   workflow (the Rust SDK runs a worker's workflow code on one thread). Each
   step has a deterministic budget (D9), and heavy work belongs in tool
-  calls. Program workflows should run on their own worker role and task
-  queue (not built).
-- **History budget.** Each call costs roughly 5–7 history events, so a run
-  fits a few thousand calls under Temporal's ~51K-event limit; `max_calls`
-  (default 1024) keeps runs inside it. Collected results are stored inline
-  in history and count toward its 50 MB limit. Longer work will use
-  **`ctx.continueAsNew(state)`** (planned): an explicit JSON checkpoint,
-  taken with no calls in flight, mapped to Temporal continue-as-new; the
-  next execution calls `run` again with `ctx.continued = state`, under the
-  same run. Wide work goes to subprograms (D13), each its own workflow.
+  calls. Program workflows run on their own worker role and task queue
+  (`program`), apart from sessions and code mode.
+- **History budget.** Measured on a sequential program
+  (`each_sequential_call_adds_a_bounded_number_of_history_events`), each
+  further call costs **6 events**: the session's `ScopeProgress` signal,
+  one workflow task (3), and the `program_collect` and `program_admit`
+  markers. That is ~8K sequential calls under Temporal's ~51K-event limit;
+  calls issued together share one admission and, when they complete in one
+  session batch, one wake. `max_calls` (default 1024) keeps runs inside it
+  for now. Collected results are still inline in the collect markers and
+  count toward the 50 MB limit. See "Long runs" below.
+- **Admission is a local activity** (decided 2026-10-15). It was a
+  server-scheduled activity, which cost 3 activity events and a second
+  workflow task per step (11 events per call). A local activity runs on the
+  program worker inside the current workflow task and leaves one marker.
+  The tool calls themselves still run as the session's ordinary activities;
+  only the hand-off to the session moved. A rerun after a lost result
+  (worker died before the marker was recorded) is safe: the Update dedups by
+  request id, the argument blob is content-addressed, and the program only
+  ever sees the result history recorded. Options: 5 s per try, retries
+  bounded by 120 s total (the old activity's budget); a stalled session
+  costs extra workflow-task heartbeats and delays signals such as a holder
+  cancel until the admission returns. Live test
+  `a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice`
+  (the first attempt admits, then fails; the MCP server is called once).
+- **Long runs** (agreed 2026-10-15, not built). In order:
+  1. **Claim-check payload codec.** Results above a threshold go to the
+     content store and history keeps a ref (`temporalio-sdk` 1.0 has a
+     `PayloadCodec` hook; blobs are content-addressed and immutable, so
+     decoding on replay is deterministic). This takes result bytes out of
+     the 50 MB limit for every workflow, not only programs.
+  2. **`ctx.continueAsNew(state)`**, the only real bound. Temporal's sense
+     of the word: the program hands over explicit JSON state (the same rules
+     as `ctx.setContext`, 64 KiB) and the next execution calls `run` from
+     the top with `ctx.continued = state`, under the same run. Written
+     `return ctx.continueAsNew(state)`, so no code runs after it and a
+     `try/catch` cannot swallow it. Nothing else survives: locals,
+     closures and pending promises are gone, so the author writes the
+     program as a loop that resumes from its state. Each execution gets a
+     fresh scope (call ids restart), so both history and the session's
+     scope log stop growing; `max_calls` applies per execution, plus a
+     per-run total. It refuses while calls are in flight (open: what to do
+     with long-lived `input.open` handles, see Open questions).
+  3. **`ctx.shouldContinue()`** (true when Temporal suggests continue-as-new
+     or our event or byte threshold is near) and a typed
+     **`history_exhausted`** failure before Temporal's own cap, so a program
+     that ignores the signal fails with a clear error instead of being
+     terminated by the server.
+- **Considered for long runs and rejected** (2026-10-15):
+  - *Checkpointing the interpreter heap.* JS cannot introspect its own
+    closures or suspended frames. Between steps the JS stack is empty and
+    every suspended `async` frame is a heap object, so restoring the heap
+    would resume the program with no "goto"; but native QuickJS has no heap
+    serializer (`JS_WriteObject` skips closures, async frames, promises and
+    native functions) and its heap is absolute pointers. QuickJS compiled to
+    WebAssembly could snapshot linear memory and globals cleanly. Rejected:
+    host-side engine state (issued ids, budgets, delivered completions) must
+    stay in lockstep with the snapshot, a slightly wrong restore corrupts
+    silently instead of failing, and a snapshot only loads into the build
+    that wrote it. Replay recomputes state and fails loudly
+    (`Nondeterminism`) on any divergence.
+  - *History rollover with replay from the scope* (start a fresh Temporal
+    execution and rebuild the program by replaying every recorded call from
+    the scope; this is not continue-as-new, since no program state is
+    carried). It lifts only the event-count cap: the same data is stored
+    (the scope already holds every call), replay cost grows with the run's
+    length on every rollover (quadratic overall), the scope log in the
+    session still grows without bound, and it adds a second, rarely
+    exercised replay path. This is close to Cloudflare's design
+    (`@cloudflare/codemode` `runtime.ts`: abort-and-replay against a log in
+    the Durable Object's SQLite, re-running the code from the top on each
+    resume), which needs no continue-as-new because that log has no cap.
+  - *Outcomes carried in the `ScopeProgress` signal* instead of collected.
+    It saves one event and a query per wake, but copies the scope's
+    outcomes into a second place and needs gap detection with collection as
+    a fallback. The scope is the truth, so the wake stays a nudge followed
+    by a read, as `InputRequestWorkflow`'s `answered` signal is for the
+    inbox row. (Results are carried in a signal where the receiver's state
+    is the truth: a workflow tool's resolution to its session.)
 - **Engine upgrades.** A run replays on whichever build picks it up, so a
   prelude or engine change could alter a replay. Temporal worker
   versioning (a running workflow stays on the build that started it, and
@@ -1042,12 +1117,17 @@ regenerated contracts).
      budget; the program running inside `ProgramRunWorkflow` with load,
      admit, collect and conclude activities and the `ScopeProgress` wake.
    - Tests: conformance (shuffled delivery, then replay in several
-     groupings); a live test that kills the code worker while a program
+     groupings); a live test that kills the program worker while a program
      waits on a person, answers, and finishes on a replacement from
      history; a live timer test that replays the workflow history.
-   - Remaining: `ctx.continueAsNew`; a separate `program` worker role and
-     task queue; Temporal worker versioning; a budget for results stored
-     in history.
+   - Built after: a separate `program` worker role and task queue;
+     admission as a local activity (11 → 6 history events per sequential
+     call, with a live test for a lost admission result and one that
+     measures events per call).
+   - Remaining, in order (D7 "Long runs"): the claim-check payload codec;
+     `ctx.continueAsNew(state)` with a scope per execution;
+     `ctx.shouldContinue()` and `history_exhausted`; Temporal worker
+     versioning.
 5. **Composition** (D13).
    - Changes: the child-session workflow; `program.run`/`program.spawn`; schemas;
      program-owned fan-out budgets; `env` capability passing; the grant subset
@@ -1120,9 +1200,13 @@ with both tests.
   program move to a new version (republish, or an adapter)? MCP tools change
   upstream without notice, so their side of this is a policy (fail, or adapt)
   rather than a support window.
-- **Long runs** (D7): what per-run call cap, and what budget for results
-  stored in workflow history, before `ctx.continueAsNew` or subprograms are
-  required?
+- **Long runs** (D7): the design is agreed (codec, `ctx.continueAsNew`,
+  `ctx.shouldContinue`, `history_exhausted`). Still open: the per-execution
+  and per-run call caps; the codec's size threshold; and whether
+  `ctx.continueAsNew` may carry open `input.open` handles across (their ids
+  in the state, handed back as handles) or must refuse while any is
+  pending, which a program waiting days on an approval could never get
+  past.
 - **Isolation** (D9, D12): untrusted program code now runs in a workflow
   worker. Is a separate `program` worker role enough for now, and which
   stronger option comes first: a WebAssembly component or workerd?
