@@ -111,7 +111,9 @@ value, `ctx.state`, with two explicit exits: `ctx.continueAsNew(state)`
 starts from it). It replaces `ctx.context` / `ctx.setContext`. Every exit
 cancels the calls the program still owns and waits, as a workflow await,
 until each has a recorded outcome; `detach()` keeps a promise-backed call
-alive. Every call gets `cancel()`. Details in D7 "Long runs".
+alive. Every call gets `cancel()`. Limits bound the run: `max_calls` per
+run (default 50,000), a new deterministic `max_compute`;
+`max_wall_clock_ms` is removed. Details in D7 "Long runs".
 
 ### D1. A session type at the edges, the shared harness in the middle
 
@@ -132,7 +134,7 @@ struct PinnedProgram {
     requires: BTreeMap<LogicalToolId, ContractPin>, // D4: schema digest now, named version later
     input_schema: Option<BlobRef>,    // JSON Schema, validated at run admission
     output_schema: Option<BlobRef>,   // validated at completion
-    limits: ProgramLimits,            // calls, in-flight, wall-clock, memory
+    limits: ProgramLimits,            // calls per run, in-flight, compute per run, memory
 }
 ```
 
@@ -510,9 +512,10 @@ loop:
 - **Waiting.** A waiting program is a workflow blocked on a signal: no
   interpreter thread, no activity slot, no Update held open on the session.
   Its heap stays in the worker's sticky cache until evicted; an evicted
-  program replays its history when it next wakes. A wait is bounded only by
-  the run's deadline (`max_wall_clock_ms`, else the program-execute
-  binding's 30-day joined ceiling).
+  program replays its history when it next wakes. A wait is bounded by its
+  own deadline (an input request's, a sleep's) and the program-execute
+  binding's 30-day joined ceiling; a run has no deadline of its own (D7
+  "Long runs" item 5).
 - **Refusals in history.** Admission refusals (permissions, limits, a closed
   scope) reach the program as failed completions recorded in history, so a
   replay sees the same ones.
@@ -527,8 +530,8 @@ loop:
   one workflow task (3), and the `program_collect` and `program_admit`
   markers. That is ~8K sequential calls under Temporal's ~51K-event limit;
   calls issued together share one admission and, when they complete in one
-  session batch, one wake. `max_calls` (default 1024) keeps runs inside it
-  for now. Collected results are still inline in the collect markers and
+  session batch, one wake. Until `ctx.continueAsNew` is built, `max_calls`
+  (default 1024) keeps runs inside it. Collected results are still inline in the collect markers and
   count toward the 50 MB limit. See "Long runs" below.
 - **Admission is a local activity** (decided 2026-10-15). It was a
   server-scheduled activity, which cost 3 activity events and a second
@@ -674,11 +677,33 @@ loop:
        calls used so far. The next execution's random seed derives from
        the run and execution number; its clock starts where the last one
        stopped.
-     - Limits: `max_calls` per execution (the scope's limit); a run-wide
-       total `max_run_calls`, proposed optional with no default cap.
-       `max_wall_clock_ms` is not enforced at all since programs moved into
-       the workflow; proposed fix: a durable timer from the run's start,
-       carried across executions.
+     - **Limits (agreed 2026-10-16).** Each bounds a run as a whole and is
+       carried in the continuation:
+       - `max_calls` now counts **calls per run**, across executions,
+         default **50,000** (was 1024 per scope). An execution needs no
+         author-set bound: its history is the bound, through
+         `shouldContinue()` and `history_exhausted` (about 8,000 sequential
+         calls at 6 events each).
+       - `max_compute`, new: the run's total of the engine's QuickJS
+         interrupt checks (the per-step `StepBudget` unit), summed across
+         steps and executions. Deterministic, unlike CPU time, so replay
+         stops at the same point. It stops runaways that `max_calls`
+         misses, such as a chain of `continueAsNew` with no calls. Units
+         are roughly tens of microseconds of tight-loop work; the default
+         is about ten times what a realistic 50,000-call run measures (to
+         be measured when building).
+       - `max_in_flight` unchanged.
+       - `max_wall_clock_ms` is removed, with the unused
+         `CodeExecutionLimits.timeout_ms` and
+         `DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS` (10 min). Waiting costs
+         nothing now, and waits have their own deadlines
+         (`input_deadline_ms`, the sleep). Abandoned runs are cleaned up by
+         cancelling them through the session API, or by a policy of whoever
+         manages sessions (a bot setting, an operations job). Temporal's
+         workflow execution timeout is not used: it ends the chain without
+         settling calls or replying to the session.
+       - Pinned programs exist only on this branch, so the changed meaning
+         of `max_calls` needs no migration.
      - Signals arriving during the handover are not lost: the server
        rejects a continue-as-new completion with new events and redelivers
        them, and later signals reach the current execution by workflow id.
@@ -704,6 +729,13 @@ loop:
   - *Cleanup in JS* (the prelude cancelling its own outstanding promises):
     the program has returned and may be the reason the run failed; the
     host's scope close does it in one message.
+  - *A run deadline* (`max_wall_clock_ms` enforced as a durable timer): a
+    waiting run costs nothing, waits have their own deadlines, and cleaning
+    up abandoned runs is a session-management policy.
+  - *A CPU-time limit*: CPU time differs between machines, so replay would
+    stop at different points; `max_compute` counts deterministic work.
+  - *Two call caps* (per execution and per run): the history already
+    bounds an execution.
 - **Considered for long runs and rejected** (2026-10-15):
   - *Checkpointing the interpreter heap.* JS cannot introspect its own
     closures or suspended frames. Between steps the JS stack is empty and
@@ -851,7 +883,8 @@ process that streams messages:
 - **Budget.** QuickJS interrupt checks per step (default 2,000), counted at
   deterministic points. Exhausting it fails the program; it is terminal and
   never a replayed branch. Memory and stack limits apply as before. There
-  is no wall-clock budget inside the executor.
+  is no wall-clock budget inside the executor. The per-step counts also
+  add up to the run's `max_compute` (D7 "Long runs").
 - **Divergence.** A completion for a request the program never issued is a
   typed `Nondeterminism` failure; a duplicate is an internal error. An
   oversized result reaches the program as a `payload_too_large` failure.
@@ -1358,10 +1391,10 @@ with both tests.
   call; per-call `cancel()` and `detach()`; `ctx.shouldContinue`,
   `history_exhausted`). Settled 2026-10-16: open `input.open` handles
   cross an exit only when detached, with their ids in the state; the
-  names `ctx.state`, `ctx.continued`, `continueAsNew`, `complete`. Still
-  open, with proposals: `max_run_calls` (optional, no default cap);
-  enforcing `max_wall_clock_ms` (unenforced since programs moved into
-  the workflow; a timer from the run's start, carried across executions).
+  names `ctx.state`, `ctx.continued`, `continueAsNew`, `complete`; the
+  limits (`max_calls` per run, default 50,000; new `max_compute`;
+  `max_wall_clock_ms` removed). Still open: `max_compute`'s default,
+  measured when building.
 - **Isolation** (D9, D12): untrusted program code now runs in a workflow
   worker. Is a separate `program` worker role enough for now, and which
   stronger option comes first: a WebAssembly component or workerd?
