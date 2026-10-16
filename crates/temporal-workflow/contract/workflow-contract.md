@@ -93,6 +93,12 @@ the original call or retrieves its result; conflicting identity reuse is rejecte
 `close_code_tool_scope` accepts `CloseCodeToolScopeRequest` and closes new admission.
 `cancel_pending` requests cleanup of admitted operations, without undoing
 completed effects. Dropping an Update client wait does not cancel the operation.
+`cancel_code_tool` accepts `CancelCodeToolRequest` and cancels one call of the scope,
+or a promise its owner holds a handle to. It is admitted in order with calls,
+and resending it is safe. The target still records exactly one outcome, which
+is its result if that came first; the reply's `CodeToolCancelOutcome` status
+(`requested`, `cancelled`, `resolved` or `failed`) is read after the cancel is
+recorded and is for logging, not for deciding what happened.
 Read `code_tool_scope_report` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
@@ -107,5 +113,5 @@ is distinct from a successfully admitted tool returning a failed outcome.
 
 ## Schema inventory
 
-The schema bundle contains 76 definitions. Its public roots
-are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.
+The schema bundle contains 80 definitions. Its public roots
+are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CancelCodeToolRequest, CodeToolCancelOutcome, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.

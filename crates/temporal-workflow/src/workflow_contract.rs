@@ -43,7 +43,7 @@ pub const WORKFLOW_CONTRACT_VERSION: u32 = 2;
 pub const DELIVER_EMISSION_SIGNAL: &str = "deliver_emission";
 
 /// Root types of the schema bundle; everything else is reachable from them.
-pub const WORKFLOW_CONTRACT_ROOTS: [&str; 24] = [
+pub const WORKFLOW_CONTRACT_ROOTS: [&str; 26] = [
     "EmissionEnvelope",
     "WorkflowToolStartArgs",
     "WorkflowToolRecoveryResult",
@@ -59,6 +59,8 @@ pub const WORKFLOW_CONTRACT_ROOTS: [&str; 24] = [
     "OpenCodeToolScopeRequest",
     "InvokeCodeToolRequest",
     "CloseCodeToolScopeRequest",
+    "CancelCodeToolRequest",
+    "CodeToolCancelOutcome",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
     "ScopeRecordedOutcomesRequest",
@@ -97,6 +99,8 @@ pub fn export() -> ExportedWorkflowContract {
     let _ = generator.subschema_for::<crate::OpenCodeToolScopeRequest>();
     let _ = generator.subschema_for::<crate::InvokeCodeToolRequest>();
     let _ = generator.subschema_for::<crate::CloseCodeToolScopeRequest>();
+    let _ = generator.subschema_for::<crate::CancelCodeToolRequest>();
+    let _ = generator.subschema_for::<crate::CodeToolCancelOutcome>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReportRequest>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReport>();
     let _ = generator.subschema_for::<crate::ScopeRecordedOutcomesRequest>();
@@ -150,6 +154,7 @@ fn manifest() -> Value {
             "openCodeToolScope": crate::OPEN_CODE_TOOL_SCOPE_UPDATE,
             "invokeCodeTool": crate::INVOKE_CODE_TOOL_UPDATE,
             "closeCodeToolScope": crate::CLOSE_CODE_TOOL_SCOPE_UPDATE,
+            "cancelCodeTool": crate::CANCEL_CODE_TOOL_UPDATE,
         },
         "workflowTools": {
             "executionKind": WORKFLOW_TOOL_EXECUTION_KIND,
@@ -382,10 +387,10 @@ fn code_execution_vectors() -> Value {
 
 fn code_tool_vectors() -> Value {
     use crate::{
-        CloseCodeToolScopeRequest, CodeToolCallOutcome, CodeToolCallStatus, CodeToolRejection,
-        CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest,
-        InvokeCodeToolRequest, OpenCodeToolScopeRequest, ScopeRecordedOutcomes,
-        ScopeRecordedOutcomesRequest,
+        CancelCodeToolRequest, CloseCodeToolScopeRequest, CodeToolCallOutcome, CodeToolCallStatus,
+        CodeToolCancelOutcome, CodeToolCancelStatus, CodeToolRejection, CodeToolRejectionKind,
+        CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
+        OpenCodeToolScopeRequest, ScopeRecordedOutcomes, ScopeRecordedOutcomesRequest,
     };
 
     let invocation = WorkflowToolInvocationId::new(format!("wti:sha256:{}", "a".repeat(64)));
@@ -422,6 +427,11 @@ fn code_tool_vectors() -> Value {
             cancel_pending: true,
             program_context: None,
         },
+        "cancelRequest": CancelCodeToolRequest {
+            execution_id: execution_id.clone(),
+            target: harness::CodeToolCancelTarget::Call { request_id: request_id.clone() },
+        },
+        "cancelOutcome": CodeToolCancelOutcome { status: CodeToolCancelStatus::Requested },
         "reportRequest": CodeToolScopeReportRequest { execution_id: execution_id.clone() },
         "recordedOutcomesRequest": ScopeRecordedOutcomesRequest {
             execution_id: execution_id.clone(),
@@ -571,6 +581,12 @@ the original call or retrieves its result; conflicting identity reuse is rejecte
 `{close_scope}` accepts `CloseCodeToolScopeRequest` and closes new admission.
 `cancel_pending` requests cleanup of admitted operations, without undoing
 completed effects. Dropping an Update client wait does not cancel the operation.
+`{cancel}` accepts `CancelCodeToolRequest` and cancels one call of the scope,
+or a promise its owner holds a handle to. It is admitted in order with calls,
+and resending it is safe. The target still records exactly one outcome, which
+is its result if that came first; the reply's `CodeToolCancelOutcome` status
+(`requested`, `cancelled`, `resolved` or `failed`) is read after the cancel is
+recorded and is for logging, not for deciding what happened.
 Read `{scope_report}` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
@@ -597,6 +613,7 @@ are: {roots}.
         open_scope = crate::OPEN_CODE_TOOL_SCOPE_UPDATE,
         invoke = crate::INVOKE_CODE_TOOL_UPDATE,
         close_scope = crate::CLOSE_CODE_TOOL_SCOPE_UPDATE,
+        cancel = crate::CANCEL_CODE_TOOL_UPDATE,
         scope_report = crate::CODE_TOOL_SCOPE_REPORT_QUERY,
         recorded_outcomes = crate::SCOPE_RECORDED_OUTCOMES_QUERY,
         definition_count = definitions.len(),

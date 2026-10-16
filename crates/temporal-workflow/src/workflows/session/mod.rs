@@ -381,6 +381,14 @@ impl AgentSessionWorkflow {
         scoped_calls::close(ctx, request).await
     }
 
+    #[update(name = "cancel_code_tool")]
+    pub async fn cancel_code_tool(
+        ctx: &mut WorkflowContext<Self>,
+        request: crate::CancelCodeToolRequest,
+    ) -> crate::CodeToolCancelResult {
+        scoped_calls::cancel(ctx, request).await
+    }
+
     #[query(name = "code_tool_scope_report")]
     pub fn code_tool_scope_report(
         &self,

@@ -898,7 +898,8 @@ export type ToolAttachmentKind = "media" | "file";
  * via the `definition` "CodeToolProgressPhase".
  */
 export type CodeToolProgressPhase =
-  "scopeOpened" | "callAdmitted" | "callDeferred" | "callCompleted" | "scopeClosed";
+  | ("scopeOpened" | "callAdmitted" | "callDeferred" | "callCompleted" | "scopeClosed")
+  | "callCancelRequested";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunViewSource".

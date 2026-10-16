@@ -104,6 +104,8 @@ export const WORKFLOW_CONTRACT_MANIFEST =
     "OpenCodeToolScopeRequest",
     "InvokeCodeToolRequest",
     "CloseCodeToolScopeRequest",
+    "CancelCodeToolRequest",
+    "CodeToolCancelOutcome",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
     "ScopeRecordedOutcomesRequest",
@@ -118,6 +120,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
     "deliverEmission": "deliver_emission"
   },
   "updates": {
+    "cancelCodeTool": "cancel_code_tool",
     "closeCodeToolScope": "close_code_tool_scope",
     "invokeCodeTool": "invoke_code_tool",
     "openCodeToolScope": "open_code_tool_scope"
@@ -192,6 +195,16 @@ export const WORKFLOW_CONTRACT_MANIFEST =
       }
     },
     "codeTools": {
+      "cancelOutcome": {
+        "status": "requested"
+      },
+      "cancelRequest": {
+        "execution_id": "execution:vector",
+        "target": {
+          "kind": "call",
+          "request_id": "request:vector"
+        }
+      },
       "closeRequest": {
         "cancel_pending": true,
         "execution_id": "execution:vector"

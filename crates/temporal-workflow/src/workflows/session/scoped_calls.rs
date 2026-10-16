@@ -32,6 +32,7 @@ enum Request {
     Open(crate::OpenCodeToolScopeRequest),
     Invoke(crate::InvokeCodeToolRequest),
     Close(crate::CloseCodeToolScopeRequest),
+    Cancel(crate::CancelCodeToolRequest),
 }
 
 fn rejected(kind: Rejection, message: impl Into<String>) -> CodeToolRejection {
@@ -141,6 +142,61 @@ pub(super) async fn close(
     ctx.state_mut(|state| state.code_tools.waiters -= 1);
     admitted?;
     ctx.state(|state| report(state, &execution_id))
+}
+
+pub(super) async fn cancel(
+    ctx: &mut WorkflowContext<AgentSessionWorkflow>,
+    request: crate::CancelCodeToolRequest,
+) -> crate::CodeToolCancelResult {
+    let ticket = ctx.state_mut(|state| enqueue(state, Request::Cancel(request.clone())))?;
+    let admitted = await_admission(ctx, ticket).await;
+    ctx.state_mut(|state| state.code_tools.waiters -= 1);
+    admitted?;
+    ctx.state(|state| cancel_status(state, &request))
+}
+
+/// Where a cancel's target stands now that the cancel is recorded, read from
+/// the session's own state, so the reply never predates the record.
+fn cancel_status(
+    state: &AgentSessionWorkflow,
+    request: &crate::CancelCodeToolRequest,
+) -> crate::CodeToolCancelResult {
+    use crate::CodeToolCancelStatus as Status;
+    let status = match &request.target {
+        harness::CodeToolCancelTarget::Call { request_id } => {
+            let origin = CodeToolOrigin {
+                execution_id: request.execution_id.clone(),
+                request_id: request_id.clone(),
+            };
+            let call = harness::code_tool_call(&state.core_state, &origin)
+                .ok_or_else(|| rejected(Rejection::UnknownScope, "unknown code tool request"))?;
+            match &call.status {
+                CodeToolCallStatus::Completed { result } => match result.status {
+                    ToolCallStatus::Succeeded => Status::Resolved,
+                    ToolCallStatus::Cancelled => Status::Cancelled,
+                    _ => Status::Failed,
+                },
+                CodeToolCallStatus::Pending | CodeToolCallStatus::Waiting { .. } => {
+                    Status::Requested
+                }
+            }
+        }
+        harness::CodeToolCancelTarget::Promise { promise_id } => {
+            let promise = state
+                .core_state
+                .promises
+                .promises
+                .get(promise_id)
+                .ok_or_else(|| rejected(Rejection::InvalidRequest, "unknown promise"))?;
+            match promise.status {
+                harness::PromiseStatus::Pending => Status::Requested,
+                harness::PromiseStatus::Resolved => Status::Resolved,
+                harness::PromiseStatus::Failed => Status::Failed,
+                harness::PromiseStatus::Cancelled => Status::Cancelled,
+            }
+        }
+    };
+    Ok(crate::CodeToolCancelOutcome { status })
 }
 
 pub(super) fn recorded_outcomes(
@@ -259,6 +315,16 @@ pub(super) async fn process_pending(
                     Ok(command) => apply(ctx, command).await?,
                     Err(error) => Err(error),
                 }
+            }
+            Request::Cancel(request) => {
+                apply(
+                    ctx,
+                    CoreAgentCommand::CancelCodeTool {
+                        execution_id: request.execution_id,
+                        target: request.target,
+                    },
+                )
+                .await?
             }
             Request::Close(request) => {
                 apply(
@@ -929,13 +995,9 @@ fn run_owned(state: &AgentSessionWorkflow, origin: &CodeToolOrigin) -> bool {
         .get(&origin.execution_id)
         .is_some_and(|scope| matches!(scope.spec.owner, harness::ScopeOwner::Run { .. }))
 }
-fn scope_cancelled(state: &AgentSessionWorkflow, origin: &CodeToolOrigin) -> bool {
-    state
-        .core_state
-        .code_tools
-        .scopes
-        .get(&origin.execution_id)
-        .is_some_and(|scope| scope.cancel_requested)
+/// A call is cancelled by its own cancel or by its scope's.
+fn call_cancelled(state: &AgentSessionWorkflow, origin: &CodeToolOrigin) -> bool {
+    harness::code_tool_call_cancel_requested(&state.core_state, origin)
 }
 fn queue_completion(
     ctx: &WorkflowContext<AgentSessionWorkflow>,
@@ -972,7 +1034,7 @@ pub(super) async fn run_dispatch_loop(
             ctx.state_mut(|state| {
                 state.code_tools.inflight.insert(key(&origin), exclusive);
             });
-            if ctx.state(|state| scope_cancelled(state, &origin)) {
+            if ctx.state(|state| call_cancelled(state, &origin)) {
                 queue_completion(
                     &ctx,
                     origin.clone(),
@@ -1042,7 +1104,7 @@ pub(super) async fn run_dispatch_loop(
             });
         }
         for task in &mut inflight {
-            if !task.cancel_sent && ctx.state(|state| scope_cancelled(state, &task.origin)) {
+            if !task.cancel_sent && ctx.state(|state| call_cancelled(state, &task.origin)) {
                 task.future.cancel();
                 task.cancel_sent = true;
             }
@@ -1057,7 +1119,7 @@ pub(super) async fn run_dispatch_loop(
                 next_dispatch(state).is_some()
                     || uncanceled
                         .iter()
-                        .any(|origin| scope_cancelled(state, origin))
+                        .any(|origin| call_cancelled(state, origin))
             });
             let next = futures::future::poll_fn(|cx| {
                 for (index, task) in inflight.iter_mut().enumerate() {
@@ -1077,7 +1139,7 @@ pub(super) async fn run_dispatch_loop(
             continue;
         };
         let mut task = inflight.remove(index);
-        let cancel = ctx.state(|state| scope_cancelled(state, &task.origin));
+        let cancel = ctx.state(|state| call_cancelled(state, &task.origin));
         let outcome = match outcome {
             TaskOutcome::Invoke(Ok(crate::CodeToolInvokeActivityResult::EnvironmentNotReady {
                 environment_id,
@@ -1289,6 +1351,7 @@ mod tests {
                 calls,
                 completed: Vec::new(),
                 program_context: None,
+                cancel_requested_calls: Default::default(),
             },
         );
         state
