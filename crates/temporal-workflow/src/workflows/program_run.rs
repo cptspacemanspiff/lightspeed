@@ -117,9 +117,7 @@ impl ProgramRunWorkflow {
         // outcomes not delivered to the program. Then the run concludes.
         ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Finalizing);
         let program_context = match &end {
-            ProgramEnd::Finished { report, .. } if report.error.is_none() => {
-                report.program_context.clone()
-            }
+            ProgramEnd::Finished { report, .. } if report.error.is_none() => report.state.clone(),
             _ => None,
         };
         let close_error = settle(ctx, &start, program_context).await;
@@ -349,7 +347,7 @@ async fn run_program(
                 input,
                 started_at_ms: descriptor.started_at_ms,
                 random_seed: program_random_seed(&descriptor.execution_id),
-                context,
+                state: context,
             },
         },
         program_engine::StepBudget::default(),
@@ -558,7 +556,7 @@ fn failed_report(
 ) -> program_engine::ExecutionReport {
     program_engine::ExecutionReport {
         return_value: None,
-        program_context: None,
+        state: None,
         error: Some(program_engine::ExecutionError { kind, message }),
         pending_request_ids: Vec::new(),
         metrics: Default::default(),

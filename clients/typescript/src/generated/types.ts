@@ -6250,9 +6250,9 @@ export interface ProgramApprovals {
  */
 export interface ProgramLimitsInput {
   /**
-   * How many runs' program contexts (`ctx.setContext`) stay in the
-   * session's active context; older ones leave it as runs complete. The
-   * session log keeps them all. 10 when omitted.
+   * How many runs' program contexts (the state `ctx.complete` hands
+   * over) stay in the session's active context; older ones leave it as
+   * runs complete. The session log keeps them all. 10 when omitted.
    */
   contextRetained?: number | null;
   /**

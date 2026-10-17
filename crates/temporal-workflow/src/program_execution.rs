@@ -59,7 +59,7 @@ pub struct ProgramRunDescriptor {
     /// clock before its first completion.
     pub started_at_ms: u64,
     /// The session's newest program context when the run started: the
-    /// program's `ctx.context`. Absent before any run has kept one.
+    /// program's `ctx.state`. Absent before any run has handed one over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_ref: Option<BlobRef>,
 }
@@ -161,7 +161,8 @@ pub struct ProgramCloseActivityRequest {
     pub universe_id: uuid::Uuid,
     pub session_workflow_id: String,
     pub execution_id: String,
-    /// The context a program that returned kept, stored with the close.
+    /// The state a program handed over through `ctx.complete`, stored with
+    /// the close as the session's program context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_context: Option<serde_json::Value>,
 }

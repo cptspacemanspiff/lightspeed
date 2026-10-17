@@ -290,7 +290,11 @@ impl ProgramInstance {
             } else {
                 return_value
             },
-            program_context: state.program_context.take(),
+            state: if failure.is_some() {
+                None
+            } else {
+                state.state.take()
+            },
             error: failure,
             pending_request_ids: state.pending.iter().cloned().collect(),
             // Timings are left out: a replayed run must report the same.

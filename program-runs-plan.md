@@ -605,6 +605,12 @@ loop:
      files (`vfs.*`) or CAS (`blob.put`, e.g. linked chunks), with a
      reference in the state; this is Temporal's own advice for
      continue-as-new input.
+     Built (`ctx.state`, `ctx.continued`, `ctx.complete`; `continueAsNew`
+     comes with executions): `complete` checks its state (JSON, 64 KiB)
+     and copies both values when called, so a bad state is an ordinary
+     exception; the state is kept only when `run` returns the token, and a
+     run that fails afterwards (including an oversized result) hands
+     nothing over. `ctx.continued` is `false` until executions exist.
   3. **Exits settle every call.** One rule for every exit (`complete`,
      `continueAsNew`, a plain `return`, `throw`): every call the program
      still owns is cancelled, and the exit waits until each has a recorded

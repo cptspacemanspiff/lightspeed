@@ -914,7 +914,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
             "contextRetained": {
-              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
               "format": "uint32",
               "maximum": 1000,
               "minimum": 1,
@@ -4837,7 +4837,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
             "contextRetained": {
-              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
               "format": "uint32",
               "maximum": 1000,
               "minimum": 1,
@@ -7249,7 +7249,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
             "contextRetained": {
-              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
               "format": "uint32",
               "maximum": 1000,
               "minimum": 1,
@@ -8602,7 +8602,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
           "properties": {
             "contextRetained": {
-              "description": "How many runs' program contexts (`ctx.setContext`) stay in the\nsession's active context; older ones leave it as runs complete. The\nsession log keeps them all. 10 when omitted.",
+              "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
               "format": "uint32",
               "maximum": 1000,
               "minimum": 1,
