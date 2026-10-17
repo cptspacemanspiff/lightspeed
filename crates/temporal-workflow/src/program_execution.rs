@@ -208,12 +208,68 @@ pub enum ProgramLoadActivityResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<serde_json::Value>,
         bindings: Vec<program_engine::ToolBinding>,
+        /// The program worker's history limits, recorded with the load so a
+        /// replay uses the values the execution first ran with.
+        #[serde(default)]
+        history: ProgramHistoryLimits,
     },
     /// A pinned contract changed or was revoked: the run fails with this
     /// stored outcome before the program starts.
     Refused {
         result: ProgramAttemptActivityResult,
     },
+}
+
+/// `ctx.shouldContinue()` turns true from this many history events on,
+/// unless Temporal suggested continuing as new earlier (by default at 4,096
+/// events or 4 MB). A backstop for a server whose suggestion is off.
+pub const DEFAULT_PROGRAM_CONTINUE_EVENTS: u32 = 10 * 1024;
+/// A run fails with `history_exhausted` from this many history events on:
+/// 80% of Temporal's default cap of 51,200, leaving room for the run to
+/// settle its calls.
+pub const DEFAULT_PROGRAM_EXHAUSTED_EVENTS: u32 = 40 * 1024;
+
+/// How far an execution's history may grow, in events: from
+/// `continue_events` the program is told to continue as new, and from
+/// `exhausted_events` the run fails with `history_exhausted` instead of
+/// growing on toward Temporal's cap, where the server would terminate it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramHistoryLimits {
+    pub continue_events: u32,
+    pub exhausted_events: u32,
+}
+
+impl Default for ProgramHistoryLimits {
+    fn default() -> Self {
+        Self {
+            continue_events: DEFAULT_PROGRAM_CONTINUE_EVENTS,
+            exhausted_events: DEFAULT_PROGRAM_EXHAUSTED_EVENTS,
+        }
+    }
+}
+
+impl ProgramHistoryLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.continue_events == 0 || self.continue_events >= self.exhausted_events {
+            return Err(format!(
+                "a program's history must reach its continue threshold ({}) before it is exhausted ({})",
+                self.continue_events, self.exhausted_events
+            ));
+        }
+        Ok(())
+    }
+
+    /// What `ctx.shouldContinue()` reports with `history_length` events so
+    /// far, when Temporal has or has not `suggested` continuing as new.
+    pub fn should_continue(&self, history_length: u32, suggested: bool) -> bool {
+        suggested || history_length >= self.continue_events
+    }
+
+    /// Whether a run with `history_length` events so far has exhausted its
+    /// history.
+    pub fn exhausted(&self, history_length: u32) -> bool {
+        history_length >= self.exhausted_events
+    }
 }
 
 /// Admit the requests one step of the program issued to the run's scope.
@@ -409,4 +465,44 @@ pub struct ProgramRunSnapshot {
     pub terminal: Option<ProgramRunTerminal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<harness::PromiseResolution>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_limits_tell_a_program_to_continue_then_exhaust_its_run() {
+        let limits = ProgramHistoryLimits::default();
+        assert!(limits.validate().is_ok());
+        assert!(!limits.should_continue(100, false));
+        // Temporal's suggestion comes first; the threshold is the backstop.
+        assert!(limits.should_continue(100, true));
+        assert!(limits.should_continue(DEFAULT_PROGRAM_CONTINUE_EVENTS, false));
+        assert!(!limits.exhausted(DEFAULT_PROGRAM_EXHAUSTED_EVENTS - 1));
+        assert!(limits.exhausted(DEFAULT_PROGRAM_EXHAUSTED_EVENTS));
+        for (continue_events, exhausted_events) in [(0, 10), (10, 10), (20, 10)] {
+            let limits = ProgramHistoryLimits {
+                continue_events,
+                exhausted_events,
+            };
+            assert!(limits.validate().is_err(), "{limits:?}");
+        }
+    }
+
+    #[test]
+    fn a_load_recorded_without_history_limits_replays_with_the_defaults() {
+        let recorded = serde_json::json!({
+            "kind": "loaded",
+            "source": "export default {}",
+            "input": {},
+            "bindings": [],
+        });
+        let ProgramLoadActivityResult::Loaded { history, .. } =
+            serde_json::from_value(recorded).unwrap()
+        else {
+            panic!("a loaded program");
+        };
+        assert_eq!(history, ProgramHistoryLimits::default());
+    }
 }

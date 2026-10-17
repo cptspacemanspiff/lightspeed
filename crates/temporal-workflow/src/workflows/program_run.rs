@@ -459,7 +459,7 @@ async fn run_program(
         }
         Ok(Ok(loaded)) => loaded,
     };
-    let (source, input, context, bindings) = match loaded {
+    let (source, input, context, bindings, history) = match loaded {
         crate::ProgramLoadActivityResult::Refused { result } => {
             return ProgramEnd::Terminal(ProgramRunTerminal::Completed { result });
         }
@@ -468,8 +468,13 @@ async fn run_program(
             input,
             context,
             bindings,
-        } => (source, input, context, bindings),
+            history,
+        } => (source, input, context, bindings, history),
     };
+    // Read from this history at each step, so a replay gives the program
+    // the same answers.
+    let should_continue =
+        || history.should_continue(ctx.history_length(), ctx.continue_as_new_suggested());
     let started = program_engine::ProgramInstance::start(
         program_engine::ExecutionInput {
             source,
@@ -484,6 +489,7 @@ async fn run_program(
                 clock_ms: descriptor.clock_ms,
                 calls_used: descriptor.calls_used,
                 compute_used: descriptor.compute_used,
+                should_continue: should_continue(),
             },
         },
         program_engine::StepBudget::default(),
@@ -590,6 +596,18 @@ async fn run_program(
                 }
             }
         }
+        if history.exhausted(ctx.history_length()) {
+            step = instance.fail(program_engine::ExecutionError {
+                kind: program_engine::ExecutionErrorKind::HistoryExhausted,
+                message: format!(
+                    "the run's history reached {} events, close to Temporal's limit: the program \
+                     did not continue as new when ctx.shouldContinue() said to",
+                    ctx.history_length()
+                ),
+            });
+            continue;
+        }
+        instance.set_should_continue(should_continue());
         step = instance.step(std::mem::take(&mut ready));
     }
 }

@@ -34,6 +34,7 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             clock_ms: None,
             calls_used: 0,
             compute_used: 0,
+            should_continue: false,
         },
     }
 }
@@ -258,6 +259,80 @@ fn continue_as_new_hands_its_state_to_the_next_execution_which_keeps_the_clock()
             "now": 5_000,
             "after": 5_000,
         }))
+    );
+}
+
+/// Fetches until `ctx.shouldContinue()` says to stop, noting what it said
+/// at each point.
+const CHECKS_SHOULD_CONTINUE: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const seen = [ctx.shouldContinue()];
+            while (!ctx.shouldContinue()) {
+                await env.web.fetch({ url: "https://example.test" });
+                seen.push(ctx.shouldContinue());
+            }
+            return ctx.continueAsNew({ seen });
+        }
+    };
+"#;
+
+#[test]
+fn should_continue_reports_what_the_host_set_for_each_step() {
+    let (mut instance, step) = ProgramInstance::start(
+        program_input(CHECKS_SHOULD_CONTINUE, &["web.fetch"], SEED),
+        StepBudget::default(),
+    )
+    .unwrap();
+    let (requests, _) = waiting(step);
+    assert_eq!(requests.len(), 1);
+    let step = instance.step(vec![completed("call-1", Ok(Value::Null))]);
+    let (requests, _) = waiting(step);
+    assert_eq!(requests[0].request_id, "call-2");
+    instance.set_should_continue(true);
+    let step = instance.step(vec![completed("call-2", Ok(Value::Null))]);
+    let (_, report) = finished(step);
+    assert_eq!(report.error, None);
+    assert_eq!(report.exit, Some(ProgramExit::ContinueAsNew));
+    assert_eq!(report.state, Some(json!({"seen": [false, false, true]})));
+
+    // An execution can start with it set: this one continues at once.
+    let mut input = program_input(CHECKS_SHOULD_CONTINUE, &["web.fetch"], SEED);
+    input.program.should_continue = true;
+    let (_, step) = ProgramInstance::start(input, StepBudget::default()).unwrap();
+    let (_, report) = finished(step);
+    assert_eq!(report.state, Some(json!({"seen": [true]})));
+}
+
+#[test]
+fn a_host_can_fail_a_waiting_program_and_keep_what_it_used() {
+    let (mut instance, step) = ProgramInstance::start(
+        program_input(CHECKS_SHOULD_CONTINUE, &["web.fetch"], SEED),
+        StepBudget::default(),
+    )
+    .unwrap();
+    waiting(step);
+    waiting(instance.step(vec![completed("call-1", Ok(Value::Null))]));
+    let (cancels, report) = finished(instance.fail(ExecutionError {
+        kind: ExecutionErrorKind::HistoryExhausted,
+        message: "history is nearly full".into(),
+    }));
+    assert!(cancels.is_empty());
+    assert_eq!(
+        terminal_error(&report),
+        &ExecutionErrorKind::HistoryExhausted
+    );
+    assert_eq!(
+        (report.return_value, report.exit, report.state),
+        (None, None, None)
+    );
+    assert_eq!(report.metrics.tool_calls, 2);
+    assert_eq!(report.pending_request_ids, ["call-2"]);
+    // A finished program keeps its report.
+    let (_, again) = finished(instance.step(Vec::new()));
+    assert_eq!(
+        terminal_error(&again),
+        &ExecutionErrorKind::HistoryExhausted
     );
 }
 

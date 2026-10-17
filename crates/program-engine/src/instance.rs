@@ -146,6 +146,7 @@ impl ProgramInstance {
             .program
             .clock_ms
             .unwrap_or(input.program.started_at_ms);
+        let should_continue = input.program.should_continue;
         let mut instance = Self {
             controls: None,
             context,
@@ -153,6 +154,7 @@ impl ProgramInstance {
             input,
             state: Rc::new(RefCell::new(State {
                 clock_ms,
+                should_continue,
                 ..State::default()
             })),
             outbox: Rc::new(RefCell::new(Vec::new())),
@@ -210,6 +212,27 @@ impl ProgramInstance {
     /// Whether the program has finished.
     pub fn is_finished(&self) -> bool {
         self.finished.is_some()
+    }
+
+    /// Set what `ctx.shouldContinue()` reports from the next step on. The
+    /// host derives it from its own history, so a replay sets the same
+    /// value before the same step.
+    pub fn set_should_continue(&mut self, should_continue: bool) {
+        self.state.borrow_mut().should_continue = should_continue;
+    }
+
+    /// Stop the program between steps with `failure`, as if it had failed
+    /// where it waits: its report keeps the calls and compute it used and
+    /// the requests still outstanding. A finished program keeps its report.
+    pub fn fail(&mut self, failure: ExecutionError) -> Step {
+        if let Some(report) = &self.finished {
+            return Step::Finished {
+                requests: Vec::new(),
+                cancels: Vec::new(),
+                report: report.clone(),
+            };
+        }
+        self.finish(Err(failure))
     }
 
     fn advance(&mut self, completions: Vec<HostCompletion>) -> Step {

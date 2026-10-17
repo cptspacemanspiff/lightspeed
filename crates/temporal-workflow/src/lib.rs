@@ -60,15 +60,15 @@ pub use input_request::{
     InputRequestStep, InputRequestStepActivityRequest, InputRequestStepResult, next_wake_at_ms,
 };
 pub use program_execution::{
-    PROGRAM_RUN_WORKFLOW_TYPE, ProgramAdmitActivityRequest,
-    ProgramAdmitActivityResult, ProgramAttemptActivityResult,
+    DEFAULT_PROGRAM_CONTINUE_EVENTS, DEFAULT_PROGRAM_EXHAUSTED_EVENTS, PROGRAM_RUN_WORKFLOW_TYPE,
+    ProgramAdmitActivityRequest, ProgramAdmitActivityResult, ProgramAttemptActivityResult,
     ProgramAttemptOutcome, ProgramCheckpointActivityRequest, ProgramCheckpointActivityResult,
-    ProgramCloseActivityRequest, ProgramCloseActivityResult, ProgramContinuation,
-    ProgramCollectActivityRequest, ProgramCollectActivityResult, ProgramConcludeActivityRequest, ProgramFinalizeActivityRequest, ProgramLoadActivityRequest,
-    ProgramLoadActivityResult,
-    ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
-    ProgramExecutionLimits, ProgramRunInput,
-    ProgramRunInterruption, ProgramRunPhase, ProgramRunSnapshot, ProgramRunTerminal,
+    ProgramCloseActivityRequest, ProgramCloseActivityResult, ProgramCollectActivityRequest,
+    ProgramCollectActivityResult, ProgramConcludeActivityRequest, ProgramContinuation,
+    ProgramExecutionLimits, ProgramFinalizeActivityRequest, ProgramHistoryLimits,
+    ProgramLoadActivityRequest, ProgramLoadActivityResult, ProgramPrepareActivityRequest,
+    ProgramPrepareActivityResult, ProgramRunDescriptor, ProgramRunInput, ProgramRunInterruption,
+    ProgramRunPhase, ProgramRunSnapshot, ProgramRunTerminal,
 };
 pub use rehydrate::{
     ReducedSession, RehydrateError, accumulate_session_entry, reduce_session_entries,

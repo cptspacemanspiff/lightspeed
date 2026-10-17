@@ -32,7 +32,7 @@ pub use bots::BotWorkerActivities;
 pub use channels::ChannelWorkerActivities;
 pub use code::CodeWorkerActivities;
 pub use fake::{FAKE_TRANSIENT_RETRY_AFTER, FakeLlm, FakeRuntimeCounters, FakeTools};
-pub use program::ProgramWorkerActivities;
+pub use program::{ProgramWorkerActivities, history_limits_from_env};
 pub use reaper::{
     CasBlobSweeper, CasSweepStats, PromiseReaper, ReaperStats, SessionRetentionReaper,
     SessionRetentionReaperStats,
