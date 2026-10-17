@@ -1,4 +1,4 @@
-(function (send, cancelHost, keep, catalogJson, programJson) {
+(function (send, cancelHost, keep, shouldContinueHost, catalogJson, programJson) {
     "use strict";
     // Capture intrinsics before user code can replace globals or prototypes.
     const parse = JSON.parse;
@@ -549,6 +549,12 @@
     function continueAsNew(state) {
         return exitWith("continueAsNew", undefined, state);
     }
+    // Whether the run should go on in a new execution: its history is
+    // getting long. The host fixes the answer for each step from its
+    // history, so a replay sees the same.
+    function shouldContinue() {
+        return shouldContinueHost() === true;
+    }
     function prepare() {
         programEnv = buildEnv();
         // The state the last completed run, or this run's previous
@@ -559,6 +565,7 @@
             continued: program.continued === true,
             complete: freeze(complete),
             continueAsNew: freeze(continueAsNew),
+            shouldContinue: freeze(shouldContinue),
         });
         harden();
     }

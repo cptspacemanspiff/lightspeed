@@ -33,6 +33,8 @@ pub(crate) struct State {
     /// The program's clock: where it started, then the latest completion
     /// time delivered.
     pub(crate) clock_ms: u64,
+    /// What `ctx.shouldContinue()` reports during the current step.
+    pub(crate) should_continue: bool,
 }
 
 pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
@@ -293,6 +295,13 @@ pub(crate) fn prepare_context<'js>(
         },
     )
     .map_err(|failure| js_error(&ctx, failure))?;
+    // `shouldContinue()`: whether the host says the run should continue as
+    // new, fixed for the step.
+    let should_continue_state = state.clone();
+    let should_continue = Function::new(ctx.clone(), move || -> bool {
+        should_continue_state.borrow().should_continue
+    })
+    .map_err(|failure| js_error(&ctx, failure))?;
     let prelude: Function = ctx
         .eval(PRELUDE)
         .map_err(|failure| js_error(&ctx, failure))?;
@@ -301,7 +310,7 @@ pub(crate) fn prepare_context<'js>(
     let program = serde_json::to_string(&input.program)
         .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()))?;
     let controls: Object = prelude
-        .call((send, cancel, keep, catalog, program))
+        .call((send, cancel, keep, should_continue, catalog, program))
         .map_err(|failure| js_error(&ctx, failure))?;
     let deliver: Function = controls
         .get("deliver")

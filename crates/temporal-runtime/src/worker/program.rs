@@ -16,8 +16,9 @@ use serde_json::Value;
 use temporal_workflow::{
     CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport, OpenCodeToolScopeRequest,
     ProgramAttemptActivityResult, ProgramAttemptOutcome, ProgramExecutionLimits,
-    ProgramFinalizeActivityRequest, ProgramPrepareActivityRequest, ProgramPrepareActivityResult,
-    ProgramRunDescriptor, ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
+    ProgramFinalizeActivityRequest, ProgramHistoryLimits, ProgramPrepareActivityRequest,
+    ProgramPrepareActivityResult, ProgramRunDescriptor, ProgramRunInterruption, ProgramRunTerminal,
+    WorkflowToolStartArgs,
 };
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::error::ApplicationFailure;
@@ -34,6 +35,40 @@ use crate::{
 };
 
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
+const PROGRAM_CONTINUE_EVENTS_ENV: &str = "LIGHTSPEED_PROGRAM_CONTINUE_EVENTS";
+const PROGRAM_EXHAUSTED_EVENTS_ENV: &str = "LIGHTSPEED_PROGRAM_EXHAUSTED_EVENTS";
+
+/// The program history limits with every override the environment sets.
+pub fn history_limits_from_env() -> Result<ProgramHistoryLimits, String> {
+    history_limits_from_lookup(|name| std::env::var(name).ok())
+}
+
+/// The default history limits with every override `lookup` supplies; an
+/// empty value keeps the default.
+pub fn history_limits_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<ProgramHistoryLimits, String> {
+    let read = |name: &str, default: u32| -> Result<u32, String> {
+        match lookup(name).filter(|value| !value.trim().is_empty()) {
+            None => Ok(default),
+            Some(value) => value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|events| *events > 0)
+                .ok_or_else(|| format!("{name} must be a positive number of history events")),
+        }
+    };
+    let defaults = ProgramHistoryLimits::default();
+    let limits = ProgramHistoryLimits {
+        continue_events: read(PROGRAM_CONTINUE_EVENTS_ENV, defaults.continue_events)?,
+        exhausted_events: read(PROGRAM_EXHAUSTED_EVENTS_ENV, defaults.exhausted_events)?,
+    };
+    limits.validate().map_err(|error| {
+        format!("{PROGRAM_CONTINUE_EVENTS_ENV} and {PROGRAM_EXHAUSTED_EVENTS_ENV}: {error}")
+    })?;
+    Ok(limits)
+}
 const SCHEMA_MAX_BYTES: u64 = 1024 * 1024;
 const REPORT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -48,19 +83,28 @@ enum PreparationError {
 /// The `program` worker role's activities.
 pub struct ProgramWorkerActivities {
     universes: WorkerUniverses,
+    history: ProgramHistoryLimits,
 }
 
 impl ProgramWorkerActivities {
     pub fn for_universe(universe_id: uuid::Uuid, api: Arc<GatewayAgentApi>) -> Self {
         Self {
             universes: WorkerUniverses::Fixed { universe_id, api },
+            history: ProgramHistoryLimits::default(),
         }
     }
 
     pub fn with_runtime(runtime: Arc<UniverseRuntime>) -> Self {
         Self {
             universes: WorkerUniverses::Runtime(runtime),
+            history: ProgramHistoryLimits::default(),
         }
+    }
+
+    /// How far each program execution's history may grow.
+    pub fn with_history_limits(mut self, history: ProgramHistoryLimits) -> Self {
+        self.history = history;
+        self
     }
 
     /// What `program_close` does, for a worker that wraps the activity.
@@ -487,6 +531,7 @@ async fn load_activity(
                 input: loaded.input,
                 context: loaded.context,
                 bindings: loaded.bindings,
+                history: activities.history,
             }),
             // A pinned contract that changed or was revoked fails the run
             // with its typed kind, before the program starts.
@@ -1078,5 +1123,52 @@ mod tests {
                 harness::DEFAULT_PROGRAM_MAX_COMPUTE
             )
         );
+    }
+
+    #[test]
+    fn history_limits_come_from_the_environment_or_default() {
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        assert_eq!(
+            history_limits_from_lookup(lookup(&[])).unwrap(),
+            ProgramHistoryLimits::default()
+        );
+        assert_eq!(
+            history_limits_from_lookup(lookup(&[
+                (PROGRAM_CONTINUE_EVENTS_ENV, " 60 "),
+                (PROGRAM_EXHAUSTED_EVENTS_ENV, "200"),
+            ]))
+            .unwrap(),
+            ProgramHistoryLimits {
+                continue_events: 60,
+                exhausted_events: 200,
+            }
+        );
+        // An empty value keeps the default.
+        assert_eq!(
+            history_limits_from_lookup(lookup(&[(PROGRAM_CONTINUE_EVENTS_ENV, "")]))
+                .unwrap()
+                .continue_events,
+            ProgramHistoryLimits::default().continue_events
+        );
+        for invalid in [
+            &[(PROGRAM_CONTINUE_EVENTS_ENV, "0")][..],
+            &[(PROGRAM_EXHAUSTED_EVENTS_ENV, "many")],
+            &[
+                (PROGRAM_CONTINUE_EVENTS_ENV, "300"),
+                (PROGRAM_EXHAUSTED_EVENTS_ENV, "200"),
+            ],
+        ] {
+            assert!(
+                history_limits_from_lookup(lookup(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 }

@@ -71,6 +71,11 @@ pub struct ProgramExecution {
     /// `max_compute`, which bounds the run.
     #[serde(skip)]
     pub compute_used: u64,
+    /// Whether the program should continue as new during its first step
+    /// (`ctx.shouldContinue()`). The host sets it for each later step with
+    /// [`ProgramInstance::set_should_continue`].
+    #[serde(skip)]
+    pub should_continue: bool,
 }
 
 /// How a program that returned one of `ctx`'s exit tokens ends its
@@ -156,6 +161,10 @@ pub enum ExecutionErrorKind {
     /// A program diverged from its recorded execution: a replayed
     /// completion named a request the program did not issue.
     Nondeterminism,
+    /// The host stopped the program because its execution's history is
+    /// nearly full: it did not continue as new when `ctx.shouldContinue()`
+    /// said to.
+    HistoryExhausted,
     Internal,
 }
 

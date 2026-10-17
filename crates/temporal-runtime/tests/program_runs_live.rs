@@ -29,7 +29,7 @@ use temporal_runtime::{
         program_worker_client, worker_runtime,
     },
 };
-use temporal_workflow::{ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD};
+use temporal_workflow::{ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_LOAD, ProgramHistoryLimits};
 use temporalio_common::error::ApplicationFailure;
 use temporalio_macros::activities;
 use temporalio_sdk::{
@@ -327,7 +327,20 @@ async fn with_program_workers_and_client(
         temporalio_client::Client,
     ) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
-    with_program_workers_losing(input_timeouts, None, body).await
+    with_program_workers_losing(input_timeouts, ProgramHistoryLimits::default(), None, body).await
+}
+
+/// [`with_program_workers_and_client`] whose program worker uses `history`.
+async fn with_program_workers_history(
+    history: ProgramHistoryLimits,
+    body: impl FnOnce(
+        Arc<GatewayAgentApi>,
+        Arc<store_pg::PgStore>,
+        SessionId,
+        temporalio_client::Client,
+    ) -> ProgramTestBody,
+) -> anyhow::Result<()> {
+    with_program_workers_losing(InputTimeouts::default(), history, None, body).await
 }
 
 /// [`with_program_workers_and_client`] whose program worker, given `lost`,
@@ -335,6 +348,7 @@ async fn with_program_workers_and_client(
 /// activity.
 async fn with_program_workers_losing(
     input_timeouts: InputTimeouts,
+    history: ProgramHistoryLimits,
     lost: Option<LostResult>,
     body: impl FnOnce(
         Arc<GatewayAgentApi>,
@@ -375,7 +389,8 @@ async fn with_program_workers_losing(
                     .with_input_timeouts(input_timeouts)
                     .build(),
             );
-            let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone());
+            let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone())
+                .with_history_limits(history);
             let runtime = worker_runtime()?;
             let mut worker = match lost {
                 None => program_worker(&runtime, client.clone(), program_queue, activities)?,
@@ -393,10 +408,13 @@ async fn with_program_workers_losing(
                         }),
                         LostResult::Close(attempts) => {
                             options.register_activities(LosesFirstClose {
-                                activities: Arc::new(ProgramWorkerActivities::for_universe(
-                                    live_universe_id()?,
-                                    api.clone(),
-                                )),
+                                activities: Arc::new(
+                                    ProgramWorkerActivities::for_universe(
+                                        live_universe_id()?,
+                                        api.clone(),
+                                    )
+                                    .with_history_limits(history),
+                                ),
                                 attempts,
                             })
                         }
@@ -1341,6 +1359,7 @@ async fn a_program_cancels_its_own_call_and_a_lost_cancel_is_sent_again() -> any
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
     with_program_workers_losing(
         InputTimeouts::default(),
+        ProgramHistoryLimits::default(),
         Some(LostResult::Admit(attempts.clone())),
         |api, store, session_id, _| {
             Box::pin(async move {
@@ -2119,6 +2138,7 @@ async fn a_lost_admission_result_is_admitted_again_without_calling_the_tool_twic
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
     with_program_workers_losing(
         InputTimeouts::default(),
+        ProgramHistoryLimits::default(),
         Some(LostResult::Admit(attempts.clone())),
         |api, store, session_id, client| {
             Box::pin(async move {
@@ -2550,6 +2570,7 @@ async fn a_lost_close_result_closes_again_and_keeps_one_context() -> anyhow::Res
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
     with_program_workers_losing(
         InputTimeouts::default(),
+        ProgramHistoryLimits::default(),
         Some(LostResult::Close(attempts.clone())),
         |api, store, session_id, client| {
             Box::pin(async move {
@@ -3348,6 +3369,173 @@ async fn a_runs_calls_and_compute_are_bounded_across_its_executions() -> anyhow:
             // No calls, only work: the executions add up to the run's compute.
             let error = failure(json!({"claim": "spin", "calls": 0, "spin": true})).await?;
             assert!(error.contains("compute budget"), "{error}");
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Small history limits, so a run reaches them in a few calls.
+const SHORT_HISTORY: ProgramHistoryLimits = ProgramHistoryLimits {
+    continue_events: 60,
+    exhausted_events: 200,
+};
+
+/// Sleeps until it has made `input.calls` calls, continuing as new whenever
+/// `ctx.shouldContinue()` says to, and counts each execution's calls.
+const SHOULD_CONTINUE_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const s = ctx.continued ? ctx.state : { done: 0, executions: [] };
+            let calls = 0;
+            while (s.done < input.calls) {
+                if (ctx.shouldContinue()) {
+                    return ctx.continueAsNew({ done: s.done, executions: [...s.executions, calls] });
+                }
+                await env.time.sleep({ ms: 0 });
+                s.done++;
+                calls++;
+            }
+            return { claim: input.claim, slept: s.done, executions: [...s.executions, calls] };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_continues_as_new_when_its_history_grows_long() -> anyhow::Result<()> {
+    with_program_workers_history(SHORT_HISTORY, |api, store, session_id, _| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(
+                    &profile_id,
+                    SHOULD_CONTINUE_PROGRAM,
+                    &[("time.sleep", None)],
+                ),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run =
+                start_program_run(&api, &session_id, json!({"claim": "long", "calls": 30})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["slept"], json!(30), "{output}");
+            // Each execution went on until its history passed the threshold
+            // of 60 events, then handed over: none got far past it.
+            let executions: Vec<u64> = serde_json::from_value(output["executions"].clone())?;
+            assert!(executions.len() >= 3, "{output}");
+            assert_eq!(executions.iter().sum::<u64>(), 30, "{output}");
+            assert!(
+                executions[..executions.len() - 1]
+                    .iter()
+                    .all(|calls| (1..=10).contains(calls)),
+                "{output}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Opens a request nobody answers, then sleeps without ever asking
+/// `ctx.shouldContinue()`.
+const IGNORING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            await env.input.open({ ask: "Ship " + input.claim + "?", assignees: ["alice"] });
+            for (let i = 0; i < input.calls; i++) await env.time.sleep({ ms: 0 });
+            return { claim: input.claim, slept: input.calls };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_that_ignores_should_continue_fails_with_history_exhausted() -> anyhow::Result<()>
+{
+    with_program_workers_history(SHORT_HISTORY, |api, store, session_id, _| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(
+                    &profile_id,
+                    IGNORING_PROGRAM,
+                    &[
+                        ("input.open", None),
+                        ("promise.await", None),
+                        ("promise.cancel", None),
+                        ("time.sleep", None),
+                    ],
+                ),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "endless", "calls": 1000}),
+            )
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Failed, "{run:?}");
+            let failure = run_failure(&store, &session_id).await?;
+            let document = read_json(
+                &store,
+                failure
+                    .message_ref
+                    .as_ref()
+                    .expect("failure document")
+                    .as_str(),
+            )
+            .await?;
+            let report = read_json(
+                &store,
+                document["attempt_report_ref"]
+                    .as_str()
+                    .expect("attempt report"),
+            )
+            .await?;
+            let error = &report["execution"]["error"];
+            assert_eq!(error["kind"], json!("history_exhausted"), "{report}");
+            let calls = report["execution"]["metrics"]["tool_calls"]
+                .as_u64()
+                .expect("call count");
+            assert!((2..1000).contains(&calls), "{report}");
+
+            // The run settled its scope as any exit does: every call has an
+            // outcome, and the open request was withdrawn and settled.
+            let state = programs::session_state(&store, &session_id).await?;
+            let scope = only_program_scope(&state);
+            assert!(scope.closed);
+            assert_eq!(recorded_statuses(scope).len(), scope.calls.len());
+            assert_eq!(
+                harness::code_tool_scope_withdrawals(&state, scope),
+                (1, 1),
+                "{scope:?}"
+            );
 
             let _ = api
                 .close_session(api::SessionCloseParams {

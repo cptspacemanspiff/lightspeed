@@ -678,7 +678,10 @@ async fn run_roles(args: RunArgs) -> anyhow::Result<()> {
                 &runtime,
                 client.clone(),
                 task_queues.program.clone(),
-                worker::ProgramWorkerActivities::with_runtime(universes.clone()),
+                worker::ProgramWorkerActivities::with_runtime(universes.clone())
+                    .with_history_limits(
+                        worker::history_limits_from_env().map_err(anyhow::Error::msg)?,
+                    ),
             )?,
         ));
     }
