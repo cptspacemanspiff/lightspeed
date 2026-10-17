@@ -120,6 +120,14 @@ request; a cancelled input request or approval settles only when its
 workflow confirms it, because the inbox row, not the session, decides an
 answer racing a withdrawal.
 
+**Revision (2026-10-17, user), composition.** D13's open questions are
+settled in D13: `program.run` and `agent.run` stay separate tools; the
+`features.subagents` grant gains a `programs` list beside `agents` and a
+`maxPerRun` limit counted across the whole tree for one run of the root,
+which replaces the lifetime `maxDescendants` as the default cap; a child's
+`env` is recorded as contract names and digests; named programs come first
+and inline programs later.
+
 ### D1. A session type at the edges, the shared harness in the middle
 
 **The session kind** is fixed when the session is created and recorded in the
@@ -1151,12 +1159,20 @@ notes below still apply to the sidecar.
   revision and `source_ref` are recorded in the call arguments, so parent
   replay is stable without reading past revisions. Explicit `name@rev` pinning
   arrives with revision history in Phase 7 (D2).
+  Programs and agents stay separate tools rather than one `session.run`
+  (decided 2026-10-17): their inputs and results differ, and each contract
+  says exactly what comes back. Programs call agents through `agent.run` and
+  `agent.spawn` contracts over the existing sub-agent tools; models get
+  `program_run`/`program_spawn` beside `agent_run`/`agent_spawn`. The first
+  version takes named program profiles only; inline programs come later.
 - **Capability passing.** The Worker Loader lets a parent decide a child's
   `env` (`worker-loader.h` `WorkerCode.env`), so attenuation is structural: a
   child can only hold what the parent put there. `env` in `program.run` and
   `agent.run` is the same idea at the session boundary: a list of the parent's
-  own binding handles the child may use, recorded in the call arguments as the
-  canonical contract ids they resolve to. The child's effective grants are its
+  own binding handles the child may use, recorded in the call arguments at
+  admission as the contract names and digests they resolve to (decided
+  2026-10-17), so replay and continue-as-new see the same grant without the
+  parent's scope. The child's effective grants are its
   profile's grants intersected with that list; an omitted `env` means the full
   profile grant. Because the handles come from the parent's scope, a parent
   cannot name a capability it does not hold, so the common case of the subset
@@ -1170,7 +1186,9 @@ notes below still apply to the sidecar.
   waits for `RunTerminal`, closes the child, then resolves the parent promise,
   and handles cancel and deadline. A program child differs only in profile kind
   and run source. One delegation tree means one set of depth, descendant and
-  concurrency limits.
+  concurrency limits. The `features.subagents` grant gains a `programs` list
+  beside `agents`; both kinds of child share the tree and its limits, with no
+  separate counters per kind for now.
 - **Grants.** A child's grants must be a subset of its parent's. This check does
   not exist today: `delegated_session_authority`
   (`gateway/service/authorization.rs:178-195`) only requires that the child's
@@ -1194,8 +1212,22 @@ notes below still apply to the sidecar.
   than 100 child calls in one run. For run-owned scopes the emission cap comes
   from `ProgramLimits`, bounded by the `FeaturesConfig.program` ceiling, rather
   than the constant, and program profiles set their own delegation limits
-  within the parent's attenuated grant. Whether program children get a
-  separate counter in the delegation tree stays an open question.
+  within the parent's attenuated grant.
+- **Per-run delegation limit** (decided 2026-10-17). `maxDescendants` counts
+  every session ever created under the root, grandchildren and closed
+  sessions included (`store-pg/src/session.rs` `origin_counts_in_tx`), so a
+  long-lived session behind a bot runs out after a few events and never
+  recovers; a chat session that delegates every turn does too. A new
+  `maxPerRun` (default 16) counts the sessions created across the whole tree
+  during one run of the root: each child records the root run it was created
+  under, and like the other limits the count is root-wide, so a branch's
+  narrower limit still counts the whole tree. `maxDescendants` keeps its
+  lifetime meaning but becomes optional with no default, for agents and
+  programs alike. Agent profiles that omitted it lose the lifetime cap of 16
+  and gain the per-run one; that change ships as its own commit with the
+  docs. Separate counters per child kind and an operator-wide ceiling on
+  these limits (any profile may set them arbitrarily high today) are left
+  for later.
 - **Typed boundaries.** Input and output schemas make subprograms typed functions.
   Agent children called from programs can be given an output schema too. A
   child's failure is a failed call outcome carrying the child's report ref,
@@ -1452,8 +1484,8 @@ regenerated contracts).
      versioning.
 5. **Composition** (D13).
    - Changes: the child-session workflow; `program.run`/`program.spawn`; schemas;
-     program-owned fan-out budgets; `env` capability passing; the grant subset
-     check for program children.
+     program-owned fan-out budgets; `maxPerRun`; `env` capability passing;
+     the grant subset check for program children.
    - Tests: a live test of bot → program → {program, agent}.
 6. **Observability** (D11).
    - Changes: notes and spans; annotations; program events; projections; web.
@@ -1538,15 +1570,12 @@ with both tests.
 - **Profiles** (D2): should a program profile extend `ProfileDocument` or be a
   sibling document type in the same store? The need for revision history leans
   toward a sibling, pending the maintainer's view.
-- **Tool naming** (D13): should `program.run` and `agent.run` merge into
-  `session.run`, with the child kind taken from the profile?
-- **Budgets** (D13): what are the per-program call, emission and wall-time
-  ceilings, and do program children need separate counters in the delegation
-  tree?
+- **Budgets** (D13): the default and ceiling of a program run's
+  workflow-call cap (replacing the fixed 32 per tool), settled when building
+  it; later, whether child kinds need separate counters and whether
+  operators need a ceiling on delegation limits.
 - **Sub-agent grant subsetting** (D13): when, and with what migration, does the
   subset check extend to agent children?
-- **Env handles** (D13): is a child's `env` recorded as canonical contract ids,
-  or as the parent's binding handles resolved again at child admission?
 - **Input backends** (D14): after the web inbox, which come first: chat
   channels, email, or a GitHub review request? Does a backend answer by
   calling a public API method, or by its own workflow-tool emission?
