@@ -24,6 +24,7 @@ use temporal_runtime::{
     gateway::GatewayAgentApi,
     pg_store_from_env,
     program::ProgramRunner,
+    subagents::AgentApiSubagentRuntime,
     worker::{
         ActivityState, ProgramWorkerActivities, SessionTools, WorkerActivities, program_worker,
         program_worker_client, worker_runtime,
@@ -40,20 +41,111 @@ use tools::human_input::{
     INPUT_DEFAULT_DEADLINE_ENV, INPUT_MIN_DEADLINE_ENV, INPUT_MIN_REMIND_AFTER_ENV, InputTimeouts,
 };
 
-/// A program session never plans a model turn, so any generation is a bug.
-struct NoModel;
+/// The model of the child agents programs start. A brief `CHECK <word>` is
+/// answered `checked <word>`; one containing `FAIL` fails the child's run. A
+/// program session never plans a model turn, so a request without a brief
+/// is a bug.
+struct ChildAgentModel {
+    blobs: Arc<dyn BlobStore>,
+}
+
+impl ChildAgentModel {
+    async fn brief(&self, request: &LlmGenerationRequest) -> Result<String, CoreAgentIoError> {
+        let entry = request
+            .request
+            .context
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.kind
+                    == harness::ContextEntryKind::Message {
+                        role: harness::ContextMessageRole::User,
+                    }
+            })
+            .ok_or_else(|| CoreAgentIoError::Failed {
+                message: format!(
+                    "program sessions must not generate; run {} turn {}",
+                    request.run_id, request.turn_id
+                ),
+            })?;
+        self.blobs
+            .read_text(&entry.content.content_ref)
+            .await
+            .map_err(|error| CoreAgentIoError::Failed {
+                message: error.to_string(),
+            })
+    }
+
+    async fn put(&self, bytes: Vec<u8>) -> Result<BlobRef, CoreAgentIoError> {
+        self.blobs
+            .put_bytes(bytes)
+            .await
+            .map_err(|error| CoreAgentIoError::Failed {
+                message: error.to_string(),
+            })
+    }
+}
 
 #[async_trait]
-impl CoreAgentLlm for NoModel {
+impl CoreAgentLlm for ChildAgentModel {
     async fn generate(
         &self,
         request: LlmGenerationRequest,
     ) -> Result<LlmGenerationResult, CoreAgentIoError> {
-        Err(CoreAgentIoError::Failed {
-            message: format!(
-                "program sessions must not generate; run {} turn {}",
-                request.run_id, request.turn_id
-            ),
+        let brief = self.brief(&request).await?;
+        let facts = harness::LlmGenerationFacts {
+            duration_ms: None,
+            provider_response_id: None,
+            finish: harness::LlmFinish::Stop,
+            usage: None,
+            tool_calls: Vec::new(),
+            approval_requests: Vec::new(),
+            context_token_estimate: None,
+        };
+        if brief.contains("FAIL") {
+            return Ok(LlmGenerationResult {
+                run_id: request.run_id,
+                turn_id: request.turn_id,
+                status: harness::LlmGenerationStatus::Failed,
+                failure_ref: Some(self.put(b"child gave up".to_vec()).await?),
+                context_entries: Vec::new(),
+                facts,
+            });
+        }
+        let word = brief
+            .split("CHECK ")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_alphanumeric()).next())
+            .unwrap_or("nothing");
+        let output_ref = self
+            .put(
+                serde_json::to_vec(&json!([{ "type": "text", "text": format!("checked {word}") }]))
+                    .expect("text blocks"),
+            )
+            .await?;
+        Ok(LlmGenerationResult {
+            run_id: request.run_id,
+            turn_id: request.turn_id,
+            status: harness::LlmGenerationStatus::Succeeded,
+            failure_ref: None,
+            context_entries: vec![harness::ContextEntryInput {
+                kind: harness::ContextEntryKind::Message {
+                    role: harness::ContextMessageRole::Assistant,
+                },
+                content: harness::ContentRef {
+                    content_ref: output_ref,
+                    media_type: Some("application/json".to_owned()),
+                    provider_kind: Some(
+                        harness::ANTHROPIC_MESSAGES_TEXT_BLOCKS_PROVIDER_KIND.to_owned(),
+                    ),
+                },
+                preview: Some(format!("checked {word}")),
+                origin: None,
+                provenance_ref: None,
+                token_estimate: None,
+            }],
+            facts,
         })
     }
 }
@@ -365,17 +457,28 @@ async fn with_program_workers_losing(
     let activity_queue = program_queue.clone();
     let activity_store = store.clone();
     run_with_live_worker_builder(
-        move |client, _| async move {
+        move |client, queue| async move {
             let tools = Arc::new(SessionTools::from_pg_store(activity_store.clone()));
+            // The child agents a program starts run on this worker too.
+            let subagent_api = Arc::new(
+                GatewayAgentApi::builder(client.clone(), activity_store.clone())
+                    .with_task_queue(queue)
+                    .with_program_task_queue(activity_queue.clone())
+                    .with_input_timeouts(input_timeouts)
+                    .build(),
+            );
             Ok(WorkerActivities::for_universe(
                 activity_store.config().universe_id,
                 ActivityState::from_pg_store(
                     activity_store.clone(),
-                    Arc::new(NoModel),
+                    Arc::new(ChildAgentModel {
+                        blobs: activity_store.clone(),
+                    }),
                     tools.clone(),
                 )
                 .with_hosted_tools(tools)
                 .with_workflow_tool_executions(client)
+                .with_subagent_runtime(Arc::new(AgentApiSubagentRuntime::new(subagent_api)))
                 .with_program_task_queue(activity_queue)
                 .with_input_timeouts(input_timeouts)
                 .with_native_mcp_from_pg_store(activity_store)?,
@@ -3545,6 +3648,141 @@ async fn a_program_that_ignores_should_continue_fails_with_history_exhausted() -
                 .await;
             api.delete_profile(api::ProfileDeleteParams { profile_id })
                 .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+const DELEGATING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const agent = input.agent;
+            const both = await Promise.all(["one", "two"].map(word =>
+                env.agent.run({ agent, input: "CHECK " + word, label: word })));
+            const spawned = await env.agent.spawn({ agent, input: "CHECK three" });
+            const third = await spawned.result();
+            let failed = null;
+            try { await env.agent.run({ agent, input: "FAIL please" }); }
+            catch (error) { failed = [error.kind, error.message, error.value.status]; }
+            let refused = null;
+            try { await env.agent.run({ agent, input: "CHECK five" }); }
+            catch (error) { refused = error.kind; }
+            const results = both.concat([third]);
+            return {
+                claim: input.claim,
+                slept: 0,
+                outputs: results.map(result => result.output),
+                statuses: results.map(result => result.status),
+                spawned: typeof spawned.id === "string",
+                failed,
+                refused,
+            };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let child_id = api::ProfileId::new(format!(
+                "live_program_child_{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            api.create_profile(api::ProfileCreateParams {
+                profile: api::AgentProfileInput {
+                    profile_id: child_id.clone(),
+                    display_name: Some("Live child".to_owned()),
+                    description: Some("Answers CHECK briefs".to_owned()),
+                    document: api::ProfileDocument {
+                        program: None,
+                        metadata: Default::default(),
+                        config: Some(api::SessionConfig::default()),
+                        instructions: Some(api::ProfileInstructions::Text {
+                            text: "You are a scripted child agent.".to_owned(),
+                        }),
+                        retention: None,
+                    },
+                },
+            })
+            .await?;
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            let mut profile = program_profile(
+                &profile_id,
+                DELEGATING_PROGRAM,
+                &[
+                    ("agent.run", None),
+                    ("agent.spawn", None),
+                    ("promise.await", None),
+                ],
+            );
+            // Four children in all: the fifth is refused.
+            profile.document.config = Some(api::SessionConfig {
+                features: Some(api::FeaturesConfig {
+                    subagents: Some(api::SubagentsFeature {
+                        version: api::CURRENT_FEATURE_VERSION,
+                        agents: vec![api::SubagentAgentRef {
+                            profile_id: child_id.clone(),
+                        }],
+                        max_depth: 2,
+                        max_descendants: 4,
+                        max_concurrent: 4,
+                        deadline_ms: 120_000,
+                    }),
+                    ..api::FeaturesConfig::default()
+                }),
+                ..api::SessionConfig::default()
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "delegated", "agent": child_id.as_str()}),
+            )
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output = run.output.as_ref().expect("program output");
+            assert_eq!(
+                read_json(&store, &output.content_ref).await?,
+                json!({
+                    "claim": "delegated",
+                    "slept": 0,
+                    "outputs": ["checked one", "checked two", "checked three"],
+                    "statuses": ["completed", "completed", "completed"],
+                    "spawned": true,
+                    "failed": ["agent_failed", "child gave up", "failed"],
+                    "refused": "agent_rejected",
+                })
+            );
+            assert_eq!(
+                scoped_call_tools(&store, &session_id).await?,
+                [
+                    "subagent.run",
+                    "subagent.run",
+                    "subagent.spawn",
+                    "concurrency.await",
+                    "subagent.run",
+                    "subagent.run",
+                ]
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [profile_id, child_id] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
             Ok(())
         })
     })

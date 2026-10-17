@@ -165,6 +165,36 @@
                 }));
                 continue;
             }
+            if (binding.name === "agent.run") {
+                place(env, binding.name, freeze(function (args) {
+                    let issued;
+                    try {
+                        issued = invoke(id, args);
+                    } catch (error) {
+                        return NativePromise.reject(error);
+                    }
+                    const ran = issued.promise.then(undefined, function (error) {
+                        throw agentCallFailure(error);
+                    });
+                    return withCancel(ran, issued.request);
+                }));
+                continue;
+            }
+            if (binding.name === "agent.spawn") {
+                place(env, binding.name, freeze(function (args) {
+                    let issued;
+                    try {
+                        issued = invoke(id, args);
+                    } catch (error) {
+                        return NativePromise.reject(error);
+                    }
+                    const spawned = issued.promise.then(function (spawned) {
+                        return agentHandle(spawned.executionId, spawned.promise);
+                    });
+                    return withCancel(spawned, issued.request);
+                }));
+                continue;
+            }
             place(env, binding.name, freeze(function (args) {
                 return call(id, args);
             }));
@@ -311,6 +341,90 @@
                     else if (then === "cancel") await handle.cancel();
                     return (await outcome).value;
                 }
+            },
+        };
+        const methods = keys(handle);
+        for (let i = 0; i < methods.length; i++) {
+            if (typeof handle[methods[i]] === "function") freeze(handle[methods[i]]);
+        }
+        return freeze(handle);
+    }
+
+    // A child agent that did not complete fails its call with its result
+    // envelope; one that could not start, with `{ error }`. The program sees
+    // `agent_failed`, `agent_cancelled` (cancelled from elsewhere),
+    // `deadline_exceeded` or `agent_rejected` as the error's kind, and the
+    // document as its value.
+    function agentError(document) {
+        if (document === null || typeof document !== "object") return null;
+        let kind;
+        let message;
+        if (typeof document.status === "string") {
+            kind = "agent_failed";
+            if (document.status === "cancelled") kind = "agent_cancelled";
+            else if (document.status === "deadline") kind = "deadline_exceeded";
+            message = typeof document.error === "string"
+                ? document.error
+                : "agent " + document.agent + " " + document.status;
+        } else if (typeof document.error === "string") {
+            kind = "agent_rejected";
+            message = document.error;
+        } else {
+            return null;
+        }
+        const error = new NativeError(message);
+        define(error, "kind", { value: kind, enumerable: true });
+        define(error, "value", { value: document, enumerable: true });
+        return error;
+    }
+    function agentCallFailure(error) {
+        if (error === null || typeof error !== "object" || error.kind !== "tool_failed") return error;
+        let document;
+        try {
+            document = parse(error.message);
+        } catch (_) {
+            return error;
+        }
+        const failure = agentError(document);
+        return failure === null ? error : failure;
+    }
+    // A spawned child agent: `result` awaits its result envelope, `cancel`
+    // closes it and waits until it has settled, and `detach` keeps it
+    // running past the run's exits (no later run can take it back yet).
+    function agentHandle(id, promise) {
+        let settled = null;
+        const result = function () {
+            // One await per handle: every caller shares its outcome.
+            if (settled === null) {
+                settled = contractCall("promise.await", { promises: [promise] }).then(function (awaited) {
+                    const outcome = awaited.results[0];
+                    if (outcome.status === "resolved") return outcome.output;
+                    let failure = agentError(outcome.error);
+                    if (failure === null) {
+                        let kind = "agent_failed";
+                        let message = "agent " + outcome.status;
+                        if (outcome.status === "cancelled") kind = "agent_cancelled";
+                        // The session failed the promise at its hard deadline.
+                        else if (outcome.error === undefined) kind = "deadline_exceeded";
+                        else if (typeof outcome.error === "string") message = outcome.error;
+                        failure = new NativeError(message);
+                        define(failure, "kind", { value: kind, enumerable: true });
+                    }
+                    throw failure;
+                });
+            }
+            return settled;
+        };
+        const handle = {
+            id,
+            result: async function () { return await result(); },
+            cancel: async function () {
+                cancelHost("promise", promise);
+                return await settledStatus(result(), "agent_cancelled");
+            },
+            detach: async function () {
+                await contractCall("promise.detach", { promises: [promise] });
+                return freeze({ id });
             },
         };
         const methods = keys(handle);

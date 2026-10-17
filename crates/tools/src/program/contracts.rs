@@ -30,8 +30,7 @@ macro_rules! contracts {
 
 /// Every contract, one tool each. Built-in tools keep their logical ids; the
 /// promise controls take the `promise` family. Of the workflow-backed tools
-/// only `input.request` and `input.open` have contracts yet (jobs and
-/// sub-agents do not).
+/// the input and sub-agent tools have contracts yet (jobs do not).
 const CONTRACTS: &[ContractDefinition] = contracts! {
     "blob.info" => "blob.info",
     "blob.read" => "blob.read",
@@ -71,6 +70,8 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "input.remind" => crate::human_input::INPUT_REMIND_TOOL_ID,
     "input.reassign" => crate::human_input::INPUT_REASSIGN_TOOL_ID,
     "input.handle" => crate::human_input::INPUT_HANDLE_TOOL_ID,
+    "agent.run" => crate::subagents::AGENT_RUN_TOOL_ID,
+    "agent.spawn" => crate::subagents::AGENT_SPAWN_TOOL_ID,
 };
 
 /// Every contract a program can require, in name order.
@@ -331,10 +332,12 @@ impl ContractError {
 }
 
 /// Contracts that are no use without another: an open input request is
-/// answered by awaiting its promise, and so is one taken back.
+/// answered by awaiting its promise, and so is one taken back or a spawned
+/// child agent.
 const COMPANIONS: &[(&str, &str)] = &[
     ("input.open", "promise.await"),
     ("input.handle", "promise.await"),
+    ("agent.spawn", "promise.await"),
 ];
 
 /// Pin a program's required contracts against what a session offers. A
@@ -619,6 +622,43 @@ mod tests {
             "contract_incomplete"
         );
         pin_requirements(&available, [("input.open", None), ("promise.await", None)]).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_contracts_bind_with_the_subagents_grant_and_declare_their_results() {
+        let mut tools = register_toolset(&config(true))
+            .unwrap()
+            .tools
+            .into_values()
+            .collect::<Vec<_>>();
+        let blobs = InMemoryBlobStore::new();
+        let without = bind_toolset(&blobs, &tools).await.unwrap();
+        assert!(!names(&without).contains(&"agent.run"));
+        tools.push(crate::subagents::SubagentToolKind::Run.tool_spec());
+        tools.push(crate::subagents::SubagentToolKind::Spawn.tool_spec());
+        let available = bind_toolset(&blobs, &tools).await.unwrap();
+        for name in ["agent.run", "agent.spawn"] {
+            let contract = available
+                .iter()
+                .find(|contract| contract.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert!(contract.tool_name.as_str().starts_with("agent_"));
+        }
+        // Both declare what comes back, so a pinned digest covers it.
+        for kind in [
+            crate::subagents::SubagentToolKind::Run,
+            crate::subagents::SubagentToolKind::Spawn,
+        ] {
+            let definition = crate::subagents::subagent_tool_definition(kind).unwrap();
+            assert!(definition.output_schema.is_some(), "{kind:?}");
+        }
+        assert_eq!(
+            pin_requirements(&available, [("agent.spawn", None)])
+                .unwrap_err()
+                .kind(),
+            "contract_incomplete"
+        );
+        pin_requirements(&available, [("agent.spawn", None), ("promise.await", None)]).unwrap();
     }
 
     fn mcp_tool(server: &str, remote_name: &str, input: serde_json::Value) -> McpToolShape {

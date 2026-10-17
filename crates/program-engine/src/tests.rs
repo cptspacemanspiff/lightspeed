@@ -767,6 +767,141 @@ fn a_detached_request_is_taken_back_by_its_id() {
     );
 }
 
+fn agent_envelope(status: &str, output: Option<&str>, error: Option<&str>) -> Value {
+    let mut envelope = json!({"agent": "checker", "session_id": "child-1", "status": status});
+    if let Some(output) = output {
+        envelope["output"] = json!(output);
+    }
+    if let Some(error) = error {
+        envelope["error"] = json!(error);
+    }
+    envelope
+}
+
+fn tool_failure(message: String) -> HostError {
+    HostError {
+        kind: "tool_failed".into(),
+        message,
+        value: None,
+    }
+}
+
+#[test]
+fn a_child_agent_that_does_not_complete_fails_by_its_status() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const outcomes = [];
+                for (const brief of ["done", "broken", "late", "refused", "garbled"]) {
+                    try {
+                        const result = await env.agent.run({ agent: "checker", input: brief });
+                        outcomes.push(["ok", result.output]);
+                    } catch (error) {
+                        outcomes.push([error.kind, error.message, error.value == null ? null : error.value.status ?? "none"]);
+                    }
+                }
+                return outcomes;
+            }
+        };
+    "#;
+    let (requests, report) = run_program(program_input(source, &["agent.run"], SEED), |request| {
+        let outcome = match request.arguments["input"].as_str().expect("brief") {
+            "done" => Ok(agent_envelope("completed", Some("all good"), None)),
+            "broken" => Err(tool_failure(
+                agent_envelope("failed", None, Some("model refused")).to_string(),
+            )),
+            "late" => Err(tool_failure(
+                agent_envelope("deadline", None, None).to_string(),
+            )),
+            "refused" => Err(tool_failure(
+                json!({"error": "maxDescendants reached"}).to_string(),
+            )),
+            _ => Err(tool_failure("not a document".to_owned())),
+        };
+        (outcome, None)
+    });
+    assert_eq!(report.error, None);
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].binding_id, "opaque-agent.run");
+    assert_eq!(
+        report.return_value,
+        Some(json!([
+            ["ok", "all good"],
+            ["agent_failed", "model refused", "failed"],
+            ["deadline_exceeded", "agent checker deadline", "deadline"],
+            ["agent_rejected", "maxDescendants reached", "none"],
+            ["tool_failed", "not a document", null],
+        ]))
+    );
+}
+
+#[test]
+fn a_spawned_child_agent_is_a_handle_over_its_promise() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const child = await env.agent.spawn({ agent: "checker", input: "look" });
+                const result = await child.result();
+                const again = await child.result();
+                const kept = await child.detach();
+                const late = await env.agent.spawn({ agent: "checker", input: "slow" });
+                let failure = null;
+                try { await late.result(); } catch (error) { failure = [error.kind, error.message]; }
+                return { id: child.id, frozen: Object.isFrozen(child), output: result.output, same: result === again, kept, failure };
+            }
+        };
+    "#;
+    let contracts = ["agent.spawn", "promise.await", "promise.detach"];
+    let mut awaits = 0;
+    let (requests, report) = run_program(program_input(source, &contracts, SEED), |request| {
+        let outcome = match request.binding_id.as_str() {
+            "opaque-agent.spawn" => opened(),
+            "opaque-promise.await" => {
+                awaits += 1;
+                if awaits == 1 {
+                    json!({"outcome": "completed", "results": [{"promise_id": "promise_3",
+                        "status": "resolved", "output": agent_envelope("completed", Some("seen"), None)}]})
+                } else {
+                    json!({"outcome": "completed", "results": [{"promise_id": "promise_3",
+                        "status": "failed", "error": agent_envelope("failed", None, Some("crashed"))}]})
+                }
+            }
+            "opaque-promise.detach" => {
+                json!({"promises": [{"promise_id": "promise_3", "status": "detached"}]})
+            }
+            other => panic!("unexpected call {other}"),
+        };
+        (Ok(outcome), None)
+    });
+    assert_eq!(report.error, None);
+    let calls = requests
+        .iter()
+        .map(|request| request.binding_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            "opaque-agent.spawn",
+            // A handle awaits its promise once, however often it is asked.
+            "opaque-promise.await",
+            "opaque-promise.detach",
+            "opaque-agent.spawn",
+            "opaque-promise.await",
+        ]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "id": "wtx:sha256:abc",
+            "frozen": true,
+            "output": "seen",
+            "same": true,
+            "kept": {"id": "wtx:sha256:abc"},
+            "failure": ["agent_failed", "crashed"],
+        }))
+    );
+}
+
 #[test]
 fn with_reminders_nudges_on_an_interval_then_reassigns() {
     let source = r#"
