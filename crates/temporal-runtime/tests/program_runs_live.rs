@@ -3284,3 +3284,81 @@ async fn continue_as_new_withdraws_undetached_requests_and_carries_detached_ones
     })
     .await
 }
+
+/// Makes `input.calls` calls per execution, continuing as new between them,
+/// or with `input.spin` set, only spins before continuing.
+const BUDGETED_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const s = ctx.continued ? ctx.state : { executions: 0, calls: 0 };
+            if (input.spin) {
+                let x = 0;
+                for (let i = 0; i < 4000000; i++) x = (x + i) % 1000003;
+            }
+            for (let i = 0; i < input.calls; i++) await env.time.sleep({ ms: 0 });
+            return ctx.continueAsNew({ executions: s.executions + 1, calls: s.calls + input.calls });
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_runs_calls_and_compute_are_bounded_across_its_executions() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            let mut profile =
+                program_profile(&profile_id, BUDGETED_PROGRAM, &[("time.sleep", None)]);
+            profile.document.program.as_mut().unwrap().limits = Some(api::ProgramLimitsInput {
+                max_calls: Some(10),
+                max_in_flight: Some(4),
+                max_compute: Some(2_000),
+                ..Default::default()
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let failure = |input: Value| {
+                let api = api.clone();
+                let store = store.clone();
+                let session_id = session_id.clone();
+                async move {
+                    let run = start_program_run(&api, &session_id, input).await?;
+                    let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                    anyhow::ensure!(run.status == api::RunStatus::Failed, "{run:?}");
+                    let failure = run_failure(&store, &session_id).await?;
+                    let report = read_json(
+                        &store,
+                        failure
+                            .message_ref
+                            .as_ref()
+                            .expect("failure report")
+                            .as_str(),
+                    )
+                    .await?;
+                    Ok::<_, anyhow::Error>(report["error"].as_str().unwrap_or_default().to_owned())
+                }
+            };
+
+            // Four calls an execution: the third execution's third call is
+            // the run's eleventh, over its budget of ten.
+            let error = failure(json!({"claim": "calls", "calls": 4})).await?;
+            assert!(error.contains("tool call budget exhausted"), "{error}");
+            // No calls, only work: the executions add up to the run's compute.
+            let error = failure(json!({"claim": "spin", "calls": 0, "spin": true})).await?;
+            assert!(error.contains("compute budget"), "{error}");
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}

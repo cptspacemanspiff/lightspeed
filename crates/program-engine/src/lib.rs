@@ -63,6 +63,14 @@ pub struct ProgramExecution {
     /// previous execution's stopped. `started_at_ms` otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock_ms: Option<u64>,
+    /// Calls the run's earlier executions made: they count toward
+    /// `max_tool_calls`, which bounds the run.
+    #[serde(skip)]
+    pub calls_used: u32,
+    /// Compute the run's earlier executions used: it counts toward
+    /// `max_compute`, which bounds the run.
+    #[serde(skip)]
+    pub compute_used: u64,
 }
 
 /// How a program that returned one of `ctx`'s exit tokens ends its
@@ -92,8 +100,13 @@ pub struct ExecutionLimits {
     pub max_request_bytes: u64,
     pub max_result_bytes: u64,
     pub max_output_bytes: u64,
+    /// Calls the whole run may make, across its executions.
     pub max_tool_calls: u32,
     pub max_outstanding_tool_calls: u32,
+    /// Work the whole run may do, across its executions, in QuickJS
+    /// interrupt checks (the unit of [`StepBudget`]). Deterministic, unlike
+    /// CPU time, so a replay stops at the same point.
+    pub max_compute: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -159,6 +172,10 @@ pub struct ExecutionMetrics {
     pub elapsed_micros: u64,
     pub tool_calls: u32,
     pub pending_jobs: u64,
+    /// QuickJS interrupt checks this execution used: its share of the run's
+    /// `max_compute`.
+    #[serde(default)]
+    pub compute: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

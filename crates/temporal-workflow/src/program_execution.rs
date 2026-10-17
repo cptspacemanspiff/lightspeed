@@ -5,13 +5,65 @@
 use harness::BlobRef;
 use serde::{Deserialize, Serialize};
 
-use crate::{CodeExecutionLimits, CodeExecutionValidationError};
+use crate::CodeExecutionValidationError;
 
 /// The stable workflow type the program-execute binding's recipe starts.
 pub const PROGRAM_RUN_WORKFLOW_TYPE: &str = "ProgramRunWorkflow";
 
-/// How long one attempt may run when the program has no wall-clock limit.
-pub const DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
+/// The budgets a program run executes under: its interpreter's, and the
+/// run's calls and compute across all of its executions. A run has no
+/// wall-clock budget.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramExecutionLimits {
+    pub max_memory_bytes: u64,
+    pub max_stack_bytes: u64,
+    pub max_source_bytes: u64,
+    pub max_catalog_bytes: u64,
+    /// Serialized JSON bytes in one tool request.
+    pub max_request_bytes: u64,
+    /// Serialized JSON bytes in one completion the program receives.
+    pub max_result_bytes: u64,
+    /// Serialized JSON bytes of the program's output.
+    pub max_output_bytes: u64,
+    /// Calls the run may make.
+    pub max_tool_calls: u32,
+    /// Calls the program may have outstanding at once.
+    pub max_outstanding_tool_calls: u32,
+    /// QuickJS interrupt checks the run may use.
+    pub max_compute: u64,
+}
+
+impl ProgramExecutionLimits {
+    pub fn validate(&self) -> Result<(), CodeExecutionValidationError> {
+        for (field, value) in [
+            ("max_memory_bytes", self.max_memory_bytes),
+            ("max_stack_bytes", self.max_stack_bytes),
+            ("max_source_bytes", self.max_source_bytes),
+            ("max_catalog_bytes", self.max_catalog_bytes),
+            ("max_request_bytes", self.max_request_bytes),
+            ("max_result_bytes", self.max_result_bytes),
+            ("max_output_bytes", self.max_output_bytes),
+            ("max_tool_calls", u64::from(self.max_tool_calls)),
+            (
+                "max_outstanding_tool_calls",
+                u64::from(self.max_outstanding_tool_calls),
+            ),
+            ("max_compute", self.max_compute),
+        ] {
+            if value == 0 {
+                return Err(CodeExecutionValidationError::ZeroLimit { field });
+            }
+        }
+        if self.max_outstanding_tool_calls > self.max_tool_calls {
+            return Err(CodeExecutionValidationError::OutstandingCallsExceedTotal {
+                outstanding: self.max_outstanding_tool_calls,
+                total: self.max_tool_calls,
+            });
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramPrepareActivityRequest {
@@ -76,7 +128,7 @@ pub struct ProgramRunDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema_ref: Option<BlobRef>,
     pub semantics_version: u32,
-    pub limits: CodeExecutionLimits,
+    pub limits: ProgramExecutionLimits,
     /// The contracts the program was pinned to; every attempt re-checks
     /// them against the scope before it starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -94,10 +146,16 @@ pub struct ProgramRunDescriptor {
     /// execution's stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_ms: Option<u64>,
+    /// Calls the run's earlier executions made, toward `max_tool_calls`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub calls_used: u32,
+    /// Compute the run's earlier executions used, toward `max_compute`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub compute_used: u64,
 }
 
-fn is_zero(value: &u32) -> bool {
-    *value == 0
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 impl ProgramRunDescriptor {
