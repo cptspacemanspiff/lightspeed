@@ -28,7 +28,7 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             input: json!({"claim": "x"}),
             started_at_ms: 1_000,
             random_seed: seed,
-            context: None,
+            state: None,
         },
     }
 }
@@ -124,25 +124,24 @@ fn programs_run_a_module_handler_with_contract_namespaces() {
 }
 
 #[test]
-fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
+fn a_program_reads_its_state_and_hands_the_next_one_over_by_returning_complete() {
     let source = r#"
         export default {
             async run(input, env, ctx) {
-                const before = ctx.context;
+                const before = ctx.state;
                 const next = { round: before.round + 1 };
-                ctx.setContext({ round: 0 });
-                ctx.setContext(next);
-                next.round = 99;
                 const errors = [];
                 for (const value of [undefined, () => 1, "x".repeat(70000)]) {
-                    try { ctx.setContext(value); } catch (error) { errors.push(error.name); }
+                    try { ctx.complete(null, value); } catch (error) { errors.push(error.name); }
                 }
-                return { before, errors, frozen: Object.isFrozen(ctx) };
+                const done = ctx.complete({ before, errors, continued: ctx.continued }, next);
+                next.round = 99;
+                return done;
             }
         };
     "#;
     let mut input = program_input(source, &[], SEED);
-    input.program.context = Some(json!({"round": 1}));
+    input.program.state = Some(json!({"round": 1}));
     let (_, report) = run_program(input, |_| unreachable!());
     assert_eq!(report.error, None);
     assert_eq!(
@@ -150,17 +149,53 @@ fn a_program_reads_its_context_and_keeps_the_last_value_it_sets() {
         Some(json!({
             "before": {"round": 1},
             "errors": ["TypeError", "TypeError", "RangeError"],
-            "frozen": true,
+            "continued": false,
         }))
     );
-    assert_eq!(report.program_context, Some(json!({"round": 2})));
+    assert_eq!(report.state, Some(json!({"round": 2})));
 
+    // A plain return hands nothing over; a run without state reads none.
     let source = r#"
-        export default { async run(input, env, ctx) { return ctx.context === undefined; } };
+        export default {
+            async run(input, env, ctx) { return [ctx.state === undefined, Object.isFrozen(ctx)]; }
+        };
     "#;
     let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
-    assert_eq!(report.return_value, Some(json!(true)));
-    assert_eq!(report.program_context, None);
+    assert_eq!(report.return_value, Some(json!([true, true])));
+    assert_eq!(report.state, None);
+}
+
+#[test]
+fn complete_takes_effect_only_when_run_returns_it_once() {
+    for (source, message) in [
+        (
+            "export default { async run(i, e, ctx) { ctx.complete(1, {}); return 1; } };",
+            "ctx.complete() was called but run did not return its result",
+        ),
+        (
+            "export default { async run(i, e, ctx) { ctx.complete(1, {}); return ctx.complete(2, {}); } };",
+            "ctx.complete() was called more than once",
+        ),
+        (
+            "export default { async run(i, e, ctx) { const done = ctx.complete(1, {}); throw new Error('later'); } };",
+            "later",
+        ),
+    ] {
+        let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
+        let error = report.error.expect("the run fails");
+        assert_eq!(error.kind, ExecutionErrorKind::Javascript);
+        assert!(error.message.contains(message), "{}", error.message);
+        assert_eq!(report.state, None);
+        assert_eq!(report.return_value, None);
+    }
+
+    // A result is optional; the state is not.
+    let source =
+        "export default { async run(i, e, ctx) { return ctx.complete(undefined, null); } };";
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
+    assert_eq!(report.error, None);
+    assert_eq!(report.return_value, None);
+    assert_eq!(report.state, Some(Value::Null));
 }
 
 #[test]

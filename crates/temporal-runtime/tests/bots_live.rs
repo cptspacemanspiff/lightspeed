@@ -445,10 +445,10 @@ fn program_profile_input(profile_id: &ProfileId, version: u32) -> AgentProfileIn
                     text: format!(
                         "export default {{ async run(input, env, ctx) {{ \
                          const notes = input.events.map(e => e.event.data.note); \
-                         const seen = ctx.context?.notes ?? []; \
-                         ctx.setContext({{ notes: [...seen, ...notes] }}); \
-                         return {{ {verdict}version: {version}, seqs: input.events.map(e => e.seq), \
-                         kinds: input.events.map(e => e.event.kind), notes, seen }}; }} }};"
+                         const seen = ctx.state?.notes ?? []; \
+                         return ctx.complete({{ {verdict}version: {version}, seqs: input.events.map(e => e.seq), \
+                         kinds: input.events.map(e => e.event.kind), notes, seen }}, \
+                         {{ notes: [...seen, ...notes] }}); }} }};"
                     ),
                 },
                 semantics_version: 1,

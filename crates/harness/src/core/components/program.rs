@@ -365,8 +365,8 @@ impl ProgramContextInput {
     }
 }
 
-/// The newest program context in the active context: what the session's
-/// next run reads as `ctx.context`.
+/// The newest program context in the active context: the state the
+/// session's next run reads as `ctx.state`.
 pub fn program_context(state: &CoreAgentState) -> Option<&ContextEntry> {
     state
         .context

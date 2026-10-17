@@ -565,20 +565,21 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
 const REMEMBERING_PROGRAM: &str = r#"
     export default {
         async run(input, env, ctx) {
-            const before = ctx.context ?? null;
-            ctx.setContext({
+            const before = ctx.state ?? null;
+            if (input.claim === "plain") return { claim: input.claim, slept: 0, before };
+            const done = ctx.complete({ claim: input.claim, slept: 0, before }, {
                 round: (before?.round ?? 0) + 1,
                 claims: [...(before?.claims ?? []), input.claim],
             });
-            if (input.claim === "throw") throw new Error("after setting its context");
-            return { claim: input.claim, slept: 0, before };
+            if (input.claim === "throw") throw new Error("after completing");
+            return done;
         }
     };
 "#;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
-async fn a_program_reads_the_context_its_last_completed_run_kept() -> anyhow::Result<()> {
+async fn a_program_reads_the_state_its_last_completed_run_handed_over() -> anyhow::Result<()> {
     with_program_workers(InputTimeouts::default(), |api, store, session_id| {
         Box::pin(async move {
             let profile_id =
@@ -593,11 +594,12 @@ async fn a_program_reads_the_context_its_last_completed_run_kept() -> anyhow::Re
             start_program_session(&api, &session_id, &profile_id).await?;
 
             let mut befores = Vec::new();
-            for claim in ["a", "b", "throw", "c"] {
+            for claim in ["a", "b", "throw", "plain", "c"] {
                 let run = start_program_run(&api, &session_id, json!({ "claim": claim })).await?;
                 let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
                 if claim == "throw" {
-                    // A failed run keeps nothing, though it set a context.
+                    // A failed run hands nothing over, though it called
+                    // `complete`.
                     assert_eq!(run.status, api::RunStatus::Failed, "{run:?}");
                     continue;
                 }
@@ -610,6 +612,8 @@ async fn a_program_reads_the_context_its_last_completed_run_kept() -> anyhow::Re
                 [
                     Value::Null,
                     json!({"round": 1, "claims": ["a"]}),
+                    // A plain return hands nothing over either.
+                    json!({"round": 2, "claims": ["a", "b"]}),
                     json!({"round": 2, "claims": ["a", "b"]}),
                 ]
             );
@@ -2391,23 +2395,22 @@ const INPUT_PROBE: &str = "input-history-probe;";
 const CONTEXT_PROBE: &str = "context-history-probe;";
 const OUTPUT_PROBE: &str = "output-history-probe;";
 
-/// Calls the fixture's echoing tool with the claim, keeps `input.keep` as
-/// its context, and returns `input.echo` beside the sizes it saw.
+/// Calls the fixture's echoing tool with the claim, hands `input.keep` over
+/// as its state, and returns `input.echo` beside the sizes it saw.
 fn large_values_program() -> String {
     format!(
         r#"/* {} */
         export default {{
             async run(input, env, ctx) {{
                 const created = await env.mcp[input.server].create_issue({{ title: input.claim }});
-                ctx.setContext({{ kept: input.keep }});
-                return {{
+                return ctx.complete({{
                     claim: "ok",
                     slept: 0,
                     echo: input.echo,
                     claimLength: input.claim.length,
                     createdHasClaim: JSON.stringify(created).includes(input.claim),
-                    contextLength: ctx.context?.kept?.length ?? 0,
-                }};
+                    contextLength: ctx.state?.kept?.length ?? 0,
+                }}, {{ kept: input.keep }});
             }}
         }};"#,
         SOURCE_PROBE.repeat(1_000)
@@ -2871,10 +2874,9 @@ const DETACHING_PROGRAM: &str = r#"
             if (input.claim === "keep") {
                 const ask = await env.input.open({ ask: "Ship it?", assignees: ["alice"] });
                 await ask.detach();
-                ctx.setContext({ id: ask.id });
-                return { claim: input.claim, slept: 0 };
+                return ctx.complete({ claim: input.claim, slept: 0 }, { id: ask.id });
             }
-            const ask = await env.input.handle(ctx.context.id);
+            const ask = await env.input.handle(ctx.state.id);
             if (input.claim === "drop") return { claim: input.claim, slept: 0 };
             return { claim: input.claim, slept: 0, answer: await ask.answer() };
         }

@@ -225,11 +225,7 @@ impl ProgramRunner {
         let context = match &descriptor.context_ref {
             Some(context_ref) => Some(
                 serde_json::from_slice::<Value>(
-                    &read(
-                        context_ref,
-                        program_engine::MAX_PROGRAM_CONTEXT_BYTES as u64,
-                    )
-                    .await?,
+                    &read(context_ref, program_engine::MAX_PROGRAM_STATE_BYTES as u64).await?,
                 )
                 .map_err(|error| {
                     CodeRunError::Preparation(format!("program context is not JSON: {error}"))

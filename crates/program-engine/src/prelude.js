@@ -525,16 +525,31 @@
     // the original prototype, so `instanceof Function` still holds.
     let programEnv = null;
     let programCtx = null;
+    // `ctx.complete(result, state)` ends the run with `result` and hands
+    // `state` to the next run, both copied when it is called. It returns a
+    // token that takes effect only when `run` returns it, so a `catch`
+    // cannot swallow it; calling it without returning the token, or twice,
+    // fails the run.
+    const exitToken = freeze(create(null));
+    let exit = null;
+    let exits = 0;
+    function complete(result, state) {
+        const value = result === undefined ? undefined : parse(serialize(result));
+        const stateJson = serialize(state);
+        keep(stateJson, false);
+        exits++;
+        exit = { value, stateJson };
+        return exitToken;
+    }
     function prepare() {
         programEnv = buildEnv();
-        // The newest program context, a fresh copy for this run; a later
-        // run reads what this one passes to setContext, which is copied
-        // when it is called.
-        const context = hasOwn(program, "context") ? program.context : undefined;
+        // The state the last completed run handed over, a fresh copy for
+        // this run.
         programCtx = freeze({
             startedAt: program.started_at_ms,
-            context,
-            setContext: freeze(function (value) { keep(serialize(value)); }),
+            state: hasOwn(program, "state") ? program.state : undefined,
+            continued: false,
+            complete: freeze(complete),
         });
         harden();
     }
@@ -571,7 +586,14 @@
                 if (handler === null || typeof handler !== "object" || typeof handler.run !== "function") {
                     throw new NativeTypeError("A program's default export must be an object with a run(input, env, ctx) method");
                 }
-                return await handler.run(input, env, ctx);
+                const returned = await handler.run(input, env, ctx);
+                if (exit === null) return returned;
+                if (returned !== exitToken) {
+                    throw new NativeError("ctx.complete() was called but run did not return its result");
+                }
+                if (exits > 1) throw new NativeError("ctx.complete() was called more than once");
+                keep(exit.stateJson, true);
+                return exit.value;
             })();
             return NativePromise.race([main, failure]);
         },

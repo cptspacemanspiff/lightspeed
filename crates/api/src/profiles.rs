@@ -308,9 +308,9 @@ pub struct ProgramLimitsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub input_deadline_ms: Option<u64>,
-    /// How many runs' program contexts (`ctx.setContext`) stay in the
-    /// session's active context; older ones leave it as runs complete. The
-    /// session log keeps them all. 10 when omitted.
+    /// How many runs' program contexts (the state `ctx.complete` hands
+    /// over) stay in the session's active context; older ones leave it as
+    /// runs complete. The session log keeps them all. 10 when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 1000))]
     pub context_retained: Option<u32>,
