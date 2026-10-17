@@ -767,7 +767,7 @@ loop:
        - `max_calls` now counts **calls per run**, across executions,
          default **50,000** (was 1024 per scope). An execution needs no
          author-set bound: its history is the bound, through
-         `shouldContinue()` and `history_exhausted` (about 8,000 sequential
+         `shouldContinue()` and `history_exhausted` (about 6,800 sequential
          calls at 6 events each).
        - `max_compute`, new: the run's total of the engine's QuickJS
          interrupt checks (the per-step `StepBudget` unit), summed across
@@ -827,6 +827,19 @@ loop:
      **`history_exhausted`** failure before Temporal's own cap, so a program
      that ignores the signal fails with a clear error instead of being
      terminated by the server.
+     - **Built** (item 6 step 4). `ctx.shouldContinue()` is true when
+       Temporal suggests continuing as new (by default at 4,096 events or
+       4 MB) or the execution's history reaches 10,240 events; the workflow
+       reads both from its history before each step, so a replay gets the
+       same answer. From 40,960 events (80% of Temporal's 51,200) the run
+       fails with `history_exhausted` and settles its calls like any exit.
+       The program worker supplies both thresholds with the load
+       (`LIGHTSPEED_PROGRAM_CONTINUE_EVENTS`, `..._EXHAUSTED_EVENTS`).
+       Events only: the Rust SDK does not give workflow code the history's
+       size in bytes, so bytes reach the program only through Temporal's
+       4 MB suggestion; a program that ignores it and keeps values just
+       under the 16 KiB inline limit can still reach the 50 MB cap first
+       (accepted, 2026-10-17).
 - **Considered for long runs and rejected** (2026-10-16, in addition to the
   list below):
   - *Separate memory and continuation channels* (`setContext` plus
