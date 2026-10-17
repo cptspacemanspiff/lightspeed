@@ -172,6 +172,21 @@ it up for the `program` role.
 | --- | --- | --- |
 | `LIGHTSPEED_PROGRAM_INLINE_VALUE_BYTES` | `16384` (16 KiB) | Largest value, in serialized bytes, kept inline in a program workflow's history; larger values are kept as references. Read by `program` workers. An invalid value logs a warning and keeps the default. |
 
+A program workflow's history also has a length limit: by default Temporal
+terminates a workflow at 51,200 events. A program checks `ctx.shouldContinue()`
+and continues as new when it says to. It says so when Temporal suggests it (by
+default at 4,096 events or 4 MB), or from the event count below. A run that
+grows on to the exhaustion count fails with `history_exhausted`, settling its
+calls, before Temporal's limit. Each execution reads these values when it
+loads and keeps them when it replays. An empty value keeps the default; an
+invalid value, or a continue count not below the exhaustion count, stops the
+`program` worker at startup. Lower them only for tests.
+
+| Variable | Requirement/default | Purpose |
+| --- | --- | --- |
+| `LIGHTSPEED_PROGRAM_CONTINUE_EVENTS` | `10240` | History events from which `ctx.shouldContinue()` returns true even without Temporal's suggestion. Read by `program` workers. |
+| `LIGHTSPEED_PROGRAM_EXHAUSTED_EVENTS` | `40960` | History events at which a run that has not continued as new fails with `history_exhausted`. Keep it below Temporal's `limit.historyCount.error` (51,200 by default). Read by `program` workers. |
+
 ### Split environment routing
 
 | Variable | Requirement/default | Purpose |
