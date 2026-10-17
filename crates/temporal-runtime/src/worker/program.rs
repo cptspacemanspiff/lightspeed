@@ -14,11 +14,10 @@ use harness::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use temporal_workflow::{
-    CodeExecutionLimits, CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport,
-    DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, OpenCodeToolScopeRequest, ProgramAttemptActivityResult,
-    ProgramAttemptOutcome, ProgramFinalizeActivityRequest, ProgramPrepareActivityRequest,
-    ProgramPrepareActivityResult, ProgramRunDescriptor, ProgramRunInterruption, ProgramRunTerminal,
-    WorkflowToolStartArgs,
+    CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport, OpenCodeToolScopeRequest,
+    ProgramAttemptActivityResult, ProgramAttemptOutcome, ProgramExecutionLimits,
+    ProgramFinalizeActivityRequest, ProgramPrepareActivityRequest, ProgramPrepareActivityResult,
+    ProgramRunDescriptor, ProgramRunInterruption, ProgramRunTerminal, WorkflowToolStartArgs,
 };
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::error::ApplicationFailure;
@@ -255,21 +254,24 @@ async fn pinned_program(
     Ok((program.clone(), started_at_ms, context_ref))
 }
 
+/// The run's budgets: the interpreter's are code mode's defaults; calls and
+/// compute are the pinned program's, for the whole run.
 fn execution_limits(
     program: &harness::PinnedProgram,
-) -> Result<CodeExecutionLimits, PreparationError> {
+) -> Result<ProgramExecutionLimits, PreparationError> {
     let defaults = harness::CodeModeLimits::default();
-    let mut limits: CodeExecutionLimits = serde_json::from_value(
-        serde_json::to_value(defaults)
-            .map_err(|error| PreparationError::Invalid(error.to_string()))?,
-    )
-    .map_err(|error| PreparationError::Invalid(error.to_string()))?;
-    limits.timeout_ms = program
-        .limits
-        .max_wall_clock_ms
-        .unwrap_or(DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS);
-    limits.max_tool_calls = program.limits.max_calls;
-    limits.max_outstanding_tool_calls = program.limits.max_in_flight;
+    let limits = ProgramExecutionLimits {
+        max_memory_bytes: defaults.max_memory_bytes,
+        max_stack_bytes: defaults.max_stack_bytes,
+        max_source_bytes: defaults.max_source_bytes,
+        max_catalog_bytes: defaults.max_catalog_bytes,
+        max_request_bytes: defaults.max_request_bytes,
+        max_result_bytes: defaults.max_result_bytes,
+        max_output_bytes: defaults.max_output_bytes,
+        max_tool_calls: program.limits.max_calls,
+        max_outstanding_tool_calls: program.limits.max_in_flight,
+        max_compute: program.limits.max_compute,
+    };
     limits
         .validate()
         .map_err(|error| PreparationError::Invalid(error.to_string()))?;
@@ -282,7 +284,7 @@ fn scope_request(
     execution_id: &str,
     execution: u32,
     run_id: harness::RunId,
-    limits: &CodeExecutionLimits,
+    limits: &ProgramExecutionLimits,
 ) -> OpenCodeToolScopeRequest {
     OpenCodeToolScopeRequest {
         execution_id: harness::program_scope_id(execution_id, execution),
@@ -345,6 +347,8 @@ async fn prepare(
         context_ref,
         execution: 0,
         clock_ms: None,
+        calls_used: 0,
+        compute_used: 0,
     })
 }
 
@@ -680,6 +684,7 @@ async fn checkpoint_activity(
             .map_err(retryable)?;
         let state_ref = put_json(store.as_ref(), &state).await.map_err(retryable)?;
         let clock_ms = request.report.clock_ms;
+        let metrics = request.report.metrics.clone();
         let report_ref = store_report(
             store.as_ref(),
             &ProgramRunReport {
@@ -715,6 +720,8 @@ async fn checkpoint_activity(
         next.execution = execution;
         next.context_ref = Some(state_ref);
         next.clock_ms = Some(clock_ms);
+        next.calls_used = descriptor.calls_used.saturating_add(metrics.tool_calls);
+        next.compute_used = descriptor.compute_used.saturating_add(metrics.compute);
         // A pinned contract that changed since keeps the old bindings here:
         // the next execution's load refuses the run with the change.
         if let Ok(catalog) = program_catalog(&opened, &next.requires) {
@@ -1043,7 +1050,7 @@ mod tests {
             limits: harness::ProgramLimits {
                 max_calls: 300,
                 max_in_flight: 20,
-                max_wall_clock_ms: Some(5_000),
+                max_compute: 9_000,
                 input_deadline_ms: None,
                 context_retained: 10,
             },
@@ -1053,19 +1060,23 @@ mod tests {
         let limits = execution_limits(&program).unwrap();
         assert_eq!(
             (
-                limits.timeout_ms,
                 limits.max_tool_calls,
-                limits.max_outstanding_tool_calls
+                limits.max_outstanding_tool_calls,
+                limits.max_compute
             ),
-            (5_000, 300, 20)
+            (300, 20, 9_000)
         );
-        let unbounded = harness::PinnedProgram {
+        let defaults = harness::PinnedProgram {
             limits: harness::ProgramLimits::default(),
             ..program
         };
+        let limits = execution_limits(&defaults).unwrap();
         assert_eq!(
-            execution_limits(&unbounded).unwrap().timeout_ms,
-            DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS
+            (limits.max_tool_calls, limits.max_compute),
+            (
+                harness::DEFAULT_PROGRAM_MAX_CALLS,
+                harness::DEFAULT_PROGRAM_MAX_COMPUTE
+            )
         );
     }
 }

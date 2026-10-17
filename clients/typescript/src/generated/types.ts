@@ -6243,7 +6243,9 @@ export interface ProgramApprovals {
   remindAfterMs?: number | null;
 }
 /**
- * Per-run budgets of a program; omitted fields take the runtime defaults.
+ * Per-run budgets of a program, each across all of a run's executions;
+ * omitted fields take the runtime defaults. A run has no wall-clock limit:
+ * cancel an abandoned run through the session.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ProgramLimitsInput".
@@ -6261,9 +6263,21 @@ export interface ProgramLimitsInput {
    * deployment's default (7 days unless overridden) when omitted.
    */
   inputDeadlineMs?: number | null;
+  /**
+   * Tool calls a run may make. 50,000 when omitted.
+   */
   maxCalls?: number | null;
+  /**
+   * Work a run's program may do, in QuickJS interrupt checks: a count
+   * that is the same on every replay, not CPU time. A tight loop uses
+   * one about every 20 to 150 microseconds; native work such as JSON
+   * parsing barely counts. 250,000 when omitted.
+   */
+  maxCompute?: number | null;
+  /**
+   * Tool calls a run may have outstanding at once. 64 when omitted.
+   */
   maxInFlight?: number | null;
-  maxWallClockMs?: number | null;
 }
 /**
  * One tool contract a program calls.

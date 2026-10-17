@@ -500,7 +500,12 @@ async fn admit_open(
         .as_ref()
         .is_some_and(|allowed| allowed.len() > 4096)
         || request.max_calls == 0
-        || request.max_calls > harness::MAX_CODE_TOOL_CALLS_PER_SCOPE
+        || request.max_calls
+            > if request.run_id.is_some() {
+                harness::MAX_PROGRAM_CALLS
+            } else {
+                harness::MAX_CODE_TOOL_CALLS_PER_SCOPE
+            }
         || request.max_in_flight == 0
         || request.max_in_flight > harness::MAX_CODE_TOOL_IN_FLIGHT
         || request.max_in_flight > request.max_calls

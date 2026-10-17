@@ -482,6 +482,8 @@ async fn run_program(
                 state: context,
                 continued: descriptor.execution > 0,
                 clock_ms: descriptor.clock_ms,
+                calls_used: descriptor.calls_used,
+                compute_used: descriptor.compute_used,
             },
         },
         program_engine::StepBudget::default(),
@@ -717,7 +719,7 @@ async fn cancellable<T>(
     }
 }
 
-fn engine_limits(limits: &crate::CodeExecutionLimits) -> program_engine::ExecutionLimits {
+fn engine_limits(limits: &crate::ProgramExecutionLimits) -> program_engine::ExecutionLimits {
     program_engine::ExecutionLimits {
         max_memory_bytes: limits.max_memory_bytes,
         max_stack_bytes: limits.max_stack_bytes,
@@ -728,6 +730,7 @@ fn engine_limits(limits: &crate::CodeExecutionLimits) -> program_engine::Executi
         max_output_bytes: limits.max_output_bytes,
         max_tool_calls: limits.max_tool_calls,
         max_outstanding_tool_calls: limits.max_outstanding_tool_calls,
+        max_compute: limits.max_compute,
     }
 }
 

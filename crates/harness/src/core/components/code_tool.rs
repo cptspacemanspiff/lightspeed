@@ -744,7 +744,7 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
     validate_live_owner(state, scope)?;
     let limits = scope.policy.limits;
     if limits.max_calls == 0
-        || limits.max_calls > MAX_CODE_TOOL_CALLS_PER_SCOPE
+        || limits.max_calls > max_calls_per_scope(&scope.owner)
         || limits.max_in_flight == 0
         || limits.max_in_flight > MAX_CODE_TOOL_IN_FLIGHT
         || limits.max_in_flight > limits.max_calls
@@ -793,6 +793,15 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
         return Err(invalid("code tool scope count exceeds the per-run limit"));
     }
     validate_owner_free(state, scope)
+}
+
+/// The most calls a scope may admit. A program run's scope may admit what
+/// the run may make; its program counts the run's calls across executions.
+pub fn max_calls_per_scope(owner: &ScopeOwner) -> u32 {
+    match owner {
+        ScopeOwner::ModelInvocation { .. } => MAX_CODE_TOOL_CALLS_PER_SCOPE,
+        ScopeOwner::Run { .. } => crate::MAX_PROGRAM_CALLS,
+    }
 }
 
 /// The scope of the previous execution of the program run whose later

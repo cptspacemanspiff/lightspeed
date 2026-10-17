@@ -264,14 +264,18 @@ pub enum ProgramEngineKind {
     Js,
 }
 
-/// Per-run budgets for a program. Calls are admitted tool calls in the run's
-/// scope; the wall clock bounds one run across all of its attempts.
+/// Per-run budgets for a program, each across all of the run's executions.
+/// A run has no wall-clock limit: waiting costs nothing, waits have their
+/// own deadlines, and abandoned runs are cancelled through the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramLimits {
+    /// Tool calls the run may make.
     pub max_calls: u32,
     pub max_in_flight: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_wall_clock_ms: Option<u64>,
+    /// Work the run's program may do, in QuickJS interrupt checks: a
+    /// deterministic count, so a replay stops at the same point.
+    #[serde(default = "default_max_compute")]
+    pub max_compute: u64,
     /// How long a human-input request waits when the call sets no deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_deadline_ms: Option<u64>,
@@ -283,17 +287,30 @@ pub struct ProgramLimits {
 
 pub const DEFAULT_PROGRAM_CONTEXT_RETAINED: u32 = 10;
 pub const MAX_PROGRAM_CONTEXT_RETAINED: u32 = 1000;
+/// Calls a program run may make by default. One execution's history holds
+/// far fewer; a longer run continues as new.
+pub const DEFAULT_PROGRAM_MAX_CALLS: u32 = 50_000;
+/// The most calls any program run may be allowed.
+pub const MAX_PROGRAM_CALLS: u32 = 1_000_000;
+/// A program run's compute by default: about ten times what a 50,000-call
+/// run that maps, sorts and serializes a few hundred rows per call uses
+/// (about 24,000 interrupt checks).
+pub const DEFAULT_PROGRAM_MAX_COMPUTE: u64 = 250_000;
 
 fn default_context_retained() -> u32 {
     DEFAULT_PROGRAM_CONTEXT_RETAINED
 }
 
+fn default_max_compute() -> u64 {
+    DEFAULT_PROGRAM_MAX_COMPUTE
+}
+
 impl Default for ProgramLimits {
     fn default() -> Self {
         Self {
-            max_calls: 1024,
+            max_calls: DEFAULT_PROGRAM_MAX_CALLS,
             max_in_flight: 64,
-            max_wall_clock_ms: None,
+            max_compute: DEFAULT_PROGRAM_MAX_COMPUTE,
             input_deadline_ms: None,
             context_retained: DEFAULT_PROGRAM_CONTEXT_RETAINED,
         }
@@ -303,9 +320,10 @@ impl Default for ProgramLimits {
 impl ProgramLimits {
     pub fn validate(&self) -> Result<(), DomainError> {
         if self.max_calls == 0
+            || self.max_calls > MAX_PROGRAM_CALLS
             || self.max_in_flight == 0
             || self.max_in_flight > self.max_calls
-            || self.max_wall_clock_ms == Some(0)
+            || self.max_compute == 0
             || self.input_deadline_ms == Some(0)
             || self.context_retained == 0
             || self.context_retained > MAX_PROGRAM_CONTEXT_RETAINED
@@ -848,15 +866,6 @@ fn start_proposals(
                 .collect(),
         ),
     };
-    let deadline_ms = state
-        .lifecycle
-        .driver
-        .program()
-        .and_then(|program| program.limits.max_wall_clock_ms)
-        .and_then(|wall_clock| {
-            run.started_at_ms
-                .map(|started_at| started_at.saturating_add(wall_clock))
-        });
     let promise = crate::Promise {
         promise_id,
         source: super::workflow_tool::completion_promise_source(
@@ -869,7 +878,7 @@ fn start_proposals(
         status: PromiseStatus::Pending,
         payload_ref: None,
         error_ref: None,
-        deadline_ms,
+        deadline_ms: None,
     };
     let execution_id =
         crate::workflow_tool_execution_id(&invocation.invocation_id, &start.recipe_fingerprint);

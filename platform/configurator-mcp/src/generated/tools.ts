@@ -911,7 +911,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "description": "Per-run budgets of a program, each across all of a run's executions;\nomitted fields take the runtime defaults. A run has no wall-clock limit:\ncancel an abandoned run through the session.",
           "properties": {
             "contextRetained": {
               "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
@@ -933,7 +933,18 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxCalls": {
+              "description": "Tool calls a run may make. 50,000 when omitted.",
               "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCompute": {
+              "description": "Work a run's program may do, in QuickJS interrupt checks: a count\nthat is the same on every replay, not CPU time. A tight loop uses\none about every 20 to 150 microseconds; native work such as JSON\nparsing barely counts. 250,000 when omitted.",
+              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -941,15 +952,8 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxInFlight": {
+              "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
               "format": "uint32",
-              "minimum": 1,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "maxWallClockMs": {
-              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -4834,7 +4838,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "description": "Per-run budgets of a program, each across all of a run's executions;\nomitted fields take the runtime defaults. A run has no wall-clock limit:\ncancel an abandoned run through the session.",
           "properties": {
             "contextRetained": {
               "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
@@ -4856,7 +4860,18 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxCalls": {
+              "description": "Tool calls a run may make. 50,000 when omitted.",
               "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCompute": {
+              "description": "Work a run's program may do, in QuickJS interrupt checks: a count\nthat is the same on every replay, not CPU time. A tight loop uses\none about every 20 to 150 microseconds; native work such as JSON\nparsing barely counts. 250,000 when omitted.",
+              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -4864,15 +4879,8 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxInFlight": {
+              "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
               "format": "uint32",
-              "minimum": 1,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "maxWallClockMs": {
-              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -7246,7 +7254,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "description": "Per-run budgets of a program, each across all of a run's executions;\nomitted fields take the runtime defaults. A run has no wall-clock limit:\ncancel an abandoned run through the session.",
           "properties": {
             "contextRetained": {
               "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
@@ -7268,7 +7276,18 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxCalls": {
+              "description": "Tool calls a run may make. 50,000 when omitted.",
               "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCompute": {
+              "description": "Work a run's program may do, in QuickJS interrupt checks: a count\nthat is the same on every replay, not CPU time. A tight loop uses\none about every 20 to 150 microseconds; native work such as JSON\nparsing barely counts. 250,000 when omitted.",
+              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -7276,15 +7295,8 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxInFlight": {
+              "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
               "format": "uint32",
-              "minimum": 1,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "maxWallClockMs": {
-              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -8599,7 +8611,7 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           "additionalProperties": {
             "not": {}
           },
-          "description": "Per-run budgets of a program; omitted fields take the runtime defaults.",
+          "description": "Per-run budgets of a program, each across all of a run's executions;\nomitted fields take the runtime defaults. A run has no wall-clock limit:\ncancel an abandoned run through the session.",
           "properties": {
             "contextRetained": {
               "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
@@ -8621,7 +8633,18 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxCalls": {
+              "description": "Tool calls a run may make. 50,000 when omitted.",
               "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCompute": {
+              "description": "Work a run's program may do, in QuickJS interrupt checks: a count\nthat is the same on every replay, not CPU time. A tight loop uses\none about every 20 to 150 microseconds; native work such as JSON\nparsing barely counts. 250,000 when omitted.",
+              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",
@@ -8629,15 +8652,8 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               ]
             },
             "maxInFlight": {
+              "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
               "format": "uint32",
-              "minimum": 1,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "maxWallClockMs": {
-              "format": "uint64",
               "minimum": 1,
               "type": [
                 "integer",

@@ -85,6 +85,10 @@ pub struct ProgramInstance {
     budget: StepBudget,
     remaining: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
+    /// Interrupt checks this execution has used, and whether they ran out
+    /// the run's compute.
+    compute: Rc<Cell<u64>>,
+    out_of_compute: Rc<Cell<bool>>,
     finished: Option<ExecutionReport>,
 }
 
@@ -104,11 +108,25 @@ impl ProgramInstance {
         let fatal = Rc::new(Cell::new(false));
         let remaining = Rc::new(Cell::new(budget.interrupts_per_step));
         let exhausted = Rc::new(Cell::new(false));
+        let compute = Rc::new(Cell::new(0u64));
+        let out_of_compute = Rc::new(Cell::new(false));
         let handler_fatal = fatal.clone();
         let handler_remaining = remaining.clone();
         let handler_exhausted = exhausted.clone();
+        let handler_compute = compute.clone();
+        let handler_out_of_compute = out_of_compute.clone();
+        let compute_left = input
+            .limits
+            .max_compute
+            .saturating_sub(input.program.compute_used);
         runtime.set_interrupt_handler(Some(Box::new(move || {
-            if handler_fatal.get() || handler_exhausted.get() {
+            if handler_fatal.get() || handler_exhausted.get() || handler_out_of_compute.get() {
+                return true;
+            }
+            let used = handler_compute.get() + 1;
+            handler_compute.set(used);
+            if used > compute_left {
+                handler_out_of_compute.set(true);
                 return true;
             }
             match handler_remaining.get() {
@@ -142,6 +160,8 @@ impl ProgramInstance {
             budget,
             remaining,
             exhausted,
+            compute,
+            out_of_compute,
             finished: None,
         };
         let prepared = instance.context.with(|ctx| {
@@ -280,12 +300,19 @@ impl ProgramInstance {
         for completion in std::mem::take(&mut state.local) {
             state.pending.remove(&completion.request_id);
         }
-        let budget_failure = self.exhausted.get().then(|| {
-            error(
+        let budget_failure = if self.out_of_compute.get() {
+            Some(error(
                 ExecutionErrorKind::LimitExceeded,
-                "program exceeded its step budget",
-            )
-        });
+                "program run exceeded its compute budget",
+            ))
+        } else {
+            self.exhausted.get().then(|| {
+                error(
+                    ExecutionErrorKind::LimitExceeded,
+                    "program exceeded its step budget",
+                )
+            })
+        };
         let (return_value, failure) = match result {
             Ok(value) => (value, None),
             Err(failure) => (None, Some(failure)),
@@ -315,6 +342,7 @@ impl ProgramInstance {
                 elapsed_micros: 0,
                 tool_calls: state.calls,
                 pending_jobs: state.jobs,
+                compute: self.compute.get(),
             },
         };
         drop(state);

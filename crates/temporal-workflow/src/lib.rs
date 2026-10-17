@@ -60,14 +60,14 @@ pub use input_request::{
     InputRequestStep, InputRequestStepActivityRequest, InputRequestStepResult, next_wake_at_ms,
 };
 pub use program_execution::{
-    DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, PROGRAM_RUN_WORKFLOW_TYPE, ProgramAdmitActivityRequest,
+    PROGRAM_RUN_WORKFLOW_TYPE, ProgramAdmitActivityRequest,
     ProgramAdmitActivityResult, ProgramAttemptActivityResult,
     ProgramAttemptOutcome, ProgramCheckpointActivityRequest, ProgramCheckpointActivityResult,
     ProgramCloseActivityRequest, ProgramCloseActivityResult, ProgramContinuation,
     ProgramCollectActivityRequest, ProgramCollectActivityResult, ProgramConcludeActivityRequest, ProgramFinalizeActivityRequest, ProgramLoadActivityRequest,
     ProgramLoadActivityResult,
     ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
-    ProgramRunInput,
+    ProgramExecutionLimits, ProgramRunInput,
     ProgramRunInterruption, ProgramRunPhase, ProgramRunSnapshot, ProgramRunTerminal,
 };
 pub use rehydrate::{

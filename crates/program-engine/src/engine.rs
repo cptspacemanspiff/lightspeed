@@ -50,6 +50,7 @@ pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
             "max_outstanding_tool_calls",
             u64::from(limits.max_outstanding_tool_calls),
         ),
+        ("max_compute", limits.max_compute),
     ] {
         if value == 0 || usize::try_from(value).is_err() {
             return Err(StartError::InvalidInput(format!(
@@ -152,6 +153,7 @@ pub(crate) fn prepare_context<'js>(
     let cancel_outbox = outbox.clone();
     let send_fatal = fatal.clone();
     let send_limits = input.limits.clone();
+    let calls_used = input.program.calls_used;
     let allowed: HashMap<_, _> = input
         .bindings
         .iter()
@@ -168,7 +170,7 @@ pub(crate) fn prepare_context<'js>(
                     ExecutionErrorKind::LimitExceeded,
                     "tool arguments exceed request byte limit",
                 ))
-            } else if state.calls >= send_limits.max_tool_calls {
+            } else if calls_used.saturating_add(state.calls) >= send_limits.max_tool_calls {
                 Some(error(
                     ExecutionErrorKind::LimitExceeded,
                     "tool call budget exhausted",

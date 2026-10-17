@@ -23,6 +23,7 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             max_output_bytes: 16 * 1024,
             max_tool_calls: 32,
             max_outstanding_tool_calls: 8,
+            max_compute: 1_000_000,
         },
         program: ProgramExecution {
             input: json!({"claim": "x"}),
@@ -31,6 +32,8 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             state: None,
             continued: false,
             clock_ms: None,
+            calls_used: 0,
+            compute_used: 0,
         },
     }
 }
@@ -1271,4 +1274,64 @@ fn clearing_a_timer_cancels_its_sleep() {
     );
     assert_eq!(report.return_value, Some(json!(false)));
     assert_eq!(report.pending_request_ids, ["call-1"]);
+}
+
+#[test]
+fn a_run_counts_calls_and_compute_across_its_executions() {
+    // Calls the run's earlier executions made count toward its call budget.
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                const done = [];
+                try {
+                    for (;;) done.push(await env.web.fetch({ url: "x" }));
+                } catch (error) {
+                    return { made: done.length, message: error.message };
+                }
+            }
+        };
+    "#;
+    let mut input = program_input(source, &["web.fetch"], SEED);
+    input.program.calls_used = 30;
+    let (_, report) = run_program(input, |_| (Ok(Value::Null), None));
+    assert_eq!(report.metrics.tool_calls, 2);
+    assert!(
+        report
+            .error
+            .as_ref()
+            .is_some_and(|error| error.kind == ExecutionErrorKind::LimitExceeded),
+        "{report:?}"
+    );
+
+    // Compute is counted in interrupt checks, the same on every run, and the
+    // run's budget includes what earlier executions used.
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                let x = 0;
+                for (let call = 0; call < 3; call++) {
+                    for (let i = 0; i < 200000; i++) x = (x + i) % 1000003;
+                    await env.web.fetch({ url: "x" });
+                }
+                return x;
+            }
+        };
+    "#;
+    let measure = |compute_used: u64, max_compute: u64| {
+        let mut input = program_input(source, &["web.fetch"], SEED);
+        input.program.compute_used = compute_used;
+        input.limits.max_compute = max_compute;
+        run_program(input, |_| (Ok(Value::Null), None)).1
+    };
+    let full = measure(0, 1_000_000);
+    assert_eq!(full.error, None);
+    let used = full.metrics.compute;
+    assert!(used > 0);
+    assert_eq!(measure(0, 1_000_000).metrics.compute, used);
+    assert_eq!(measure(1_000_000 - used, 1_000_000).error, None);
+    let over = measure(1_000_000 - used + 1, 1_000_000);
+    let error = over.error.expect("the run's compute runs out");
+    assert_eq!(error.kind, ExecutionErrorKind::LimitExceeded);
+    assert!(error.message.contains("compute"), "{}", error.message);
+    assert_eq!(over.return_value, None);
 }
