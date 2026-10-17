@@ -39,7 +39,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 /// when one is configured, the outbound registration loop when a gateway
 /// URL is configured, or both.
 pub async fn run(runtime: DaemonRuntime) -> anyhow::Result<()> {
-    let listen = runtime.config().listen;
+    let listen = runtime.config().listen.clone();
     let registration = runtime.config().registration.clone();
     match (listen, registration) {
         (Some(listen), None) => run_listener(runtime, listen).await,
@@ -58,28 +58,113 @@ pub async fn run(runtime: DaemonRuntime) -> anyhow::Result<()> {
     }
 }
 
-async fn run_listener(runtime: DaemonRuntime, listen: std::net::SocketAddr) -> anyhow::Result<()> {
+async fn run_listener(runtime: DaemonRuntime, listen: ListenAddr) -> anyhow::Result<()> {
+    match listen {
+        ListenAddr::Tcp(addr) => run_tcp_listener(runtime, addr).await,
+        #[cfg(unix)]
+        ListenAddr::Unix(path) => run_unix_listener(runtime, path).await,
+    }
+}
+
+async fn run_tcp_listener(
+    runtime: DaemonRuntime,
+    listen: std::net::SocketAddr,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .context("bind environment daemon listener")?;
     tracing_line(&format!("listener ready on {listen}"));
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let runtime = runtime.clone();
-        tokio::spawn(async move {
-            let websocket = accept_async(stream).await;
-            match websocket {
-                Ok(socket) => {
-                    if let Err(error) = run_data_connection(&runtime, socket).await {
-                        eprintln!("lightspeed-envd connection {peer} failed: {error:#}");
-                    }
-                }
-                Err(error) => {
-                    eprintln!("lightspeed-envd websocket handshake {peer} failed: {error}")
+        match listener.accept().await {
+            Ok((stream, peer)) => serve_accepted(runtime.clone(), stream, peer.to_string()),
+            Err(error) => accept_failed(error).await,
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_unix_listener(runtime: DaemonRuntime, path: std::path::PathBuf) -> anyhow::Result<()> {
+    let listener = bind_unix_listener(&path)?;
+    let label = ListenAddr::Unix(path).to_string();
+    tracing_line(&format!("listener ready on {label}"));
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => serve_accepted(runtime.clone(), stream, label.clone()),
+            Err(error) => accept_failed(error).await,
+        }
+    }
+}
+
+/// Accept errors are transient or specific to one connection (descriptor
+/// exhaustion, a peer that hung up mid-accept), so the listener keeps serving.
+/// The pause stops a persistent error from spinning the loop.
+async fn accept_failed(error: std::io::Error) {
+    tracing_line(&format!("accept failed: {error}"));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+/// Bind a Unix-socket listener only this daemon's user can connect to. A
+/// socket node left by an earlier run is replaced; a live listener or any
+/// other kind of file at the path is not.
+#[cfg(unix)]
+fn bind_unix_listener(path: &std::path::Path) -> anyhow::Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    remove_stale_socket(path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let listener = tokio::net::UnixListener::bind(path)
+        .with_context(|| format!("bind environment daemon listener {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restrict {}", path.display()))?;
+    Ok(listener)
+}
+
+/// Remove a socket node whose listener is gone. Only a refused connection
+/// proves that; any other probe failure (such as a socket this user may not
+/// connect to) leaves the node alone.
+#[cfg(unix)]
+fn remove_stale_socket(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {}
+        Ok(_) => anyhow::bail!("refusing to replace non-socket {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", path.display()));
+        }
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => anyhow::bail!("another listener is serving {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path)
+                .with_context(|| format!("remove stale socket {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot tell whether {} is in use", path.display()))
+        }
+    }
+}
+
+fn serve_accepted<S>(runtime: DaemonRuntime, stream: S, peer: String)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        match accept_async(stream).await {
+            Ok(socket) => {
+                if let Err(error) = run_data_connection(&runtime, socket).await {
+                    eprintln!("lightspeed-envd connection {peer} failed: {error:#}");
                 }
             }
-        });
-    }
+            Err(error) => {
+                eprintln!("lightspeed-envd websocket handshake {peer} failed: {error}")
+            }
+        }
+    });
 }
 
 /// Serve the data protocol on one accepted or dialed socket. Outbound data
@@ -124,6 +209,7 @@ where
 
 use crate::{
     DaemonRuntime,
+    config::ListenAddr,
     rpc::{
         decode_params, encode_result, error_response, invalid_request, method_not_found,
         parse_request, success_response,
@@ -349,6 +435,104 @@ async fn handle_data(
 
 pub(crate) fn tracing_line(message: &str) {
     eprintln!("lightspeed-envd {message}");
+}
+
+#[cfg(all(test, unix))]
+mod unix_listener_tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use environment_protocol::{data::handshake::InitializeParams, shared::EnvironmentScope};
+    use tokio_tungstenite::client_async;
+
+    use super::*;
+    use crate::config::DaemonConfig;
+
+    fn runtime(root: &std::path::Path, socket: &std::path::Path) -> DaemonRuntime {
+        DaemonRuntime::new(DaemonConfig {
+            listen: Some(ListenAddr::Unix(socket.to_path_buf())),
+            cwd: root.to_path_buf(),
+            fs_root: root.to_path_buf(),
+            state_dir: root.join("state"),
+            read_only_fs: false,
+            registration: None,
+            scrubbed_env: vec![],
+        })
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serves_the_data_protocol_on_a_private_unix_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // The parent does not exist yet: guest tmpfs paths start empty.
+        let socket = root.join("run").join("envd.sock");
+        let server = tokio::spawn(run(runtime(&root, &socket)));
+        while !socket.exists() {
+            tokio::task::yield_now().await;
+        }
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut client, _) = client_async("ws://envd/", stream).await.unwrap();
+        let params = InitializeParams {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            client_name: "unix-listener-test".to_owned(),
+            scope: EnvironmentScope::Default,
+            resume_connection_id: None,
+        };
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": DATA_INITIALIZE_METHOD,
+            "params": params,
+        });
+        client
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        let Some(Ok(Message::Text(reply))) = client.next().await else {
+            panic!("expected an initialize response");
+        };
+        let reply: Value = serde_json::from_str(reply.as_str()).unwrap();
+        assert_eq!(reply["id"], 1);
+        assert_eq!(reply["result"]["protocolVersion"], CURRENT_PROTOCOL_VERSION);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_sockets_are_replaced_but_live_ones_and_files_are_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("envd.sock");
+
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists(), "a dropped listener leaves its node behind");
+        let listener = bind_unix_listener(&socket).expect("stale socket replaced");
+
+        assert!(bind_unix_listener(&socket).is_err(), "live listener kept");
+        drop(listener);
+
+        let file = temp.path().join("not-a-socket");
+        std::fs::write(&file, b"data").unwrap();
+        assert!(bind_unix_listener(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"data");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_live_socket_that_cannot_be_probed_is_left_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("envd.sock");
+        let _live = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // Without write permission, connect fails with EACCES rather than
+        // ECONNREFUSED (root bypasses this and sees the live listener).
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert!(bind_unix_listener(&socket).is_err());
+        assert!(
+            std::fs::symlink_metadata(&socket).is_ok(),
+            "live socket kept"
+        );
+    }
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
