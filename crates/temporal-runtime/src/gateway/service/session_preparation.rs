@@ -106,9 +106,14 @@ impl SessionPreparationService {
         let toolset = register_toolset(&config)
             .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;
         let mut tools = toolset.tools.into_values().collect::<Vec<_>>();
-        // Every program session binds the input workflow tools.
+        // Every program session binds the input workflow tools, and one with
+        // the sub-agents grant the sub-agent tools.
         tools.push(tools::human_input::input_request_tool_spec());
         tools.push(tools::human_input::input_open_tool_spec());
+        if session_config.features.subagents.is_some() {
+            tools.push(tools::subagents::SubagentToolKind::Run.tool_spec());
+            tools.push(tools::subagents::SubagentToolKind::Spawn.tool_spec());
+        }
         let mut contracts = tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
             .await
             .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))?;
@@ -254,35 +259,17 @@ impl SessionPreparationService {
         // The binding carries the hard ceiling; the grant's `deadlineMs` is
         // pinned per call and enforced inside the execution, so the
         // immutable binding never has to change with the grant.
-        let definitions = [
-            (
-                tools::subagents::SubagentToolKind::Run,
-                WorkflowToolCompletion::Joined {
-                    reply_schema_ref: Some(reply_schema_ref.clone()),
-                    deadline_after_ms: harness::SUBAGENT_DEADLINE_CEILING_MS,
-                },
-            ),
-            (
-                tools::subagents::SubagentToolKind::Spawn,
-                WorkflowToolCompletion::Promises {
-                    reply_schema_ref: Some(reply_schema_ref.clone()),
-                    deadline_after_ms: Some(harness::SUBAGENT_DEADLINE_CEILING_MS),
-                    max_promises: 1,
-                    key_source: WorkflowToolCompletionKeySource::Reply,
-                },
-            ),
+        let kinds = [
+            tools::subagents::SubagentToolKind::Run,
+            tools::subagents::SubagentToolKind::Spawn,
         ];
-        let mut declarations = Vec::with_capacity(definitions.len());
-        for (kind, completion) in definitions {
-            let tool = tools::definitions::register(
-                match kind {
-                    tools::subagents::SubagentToolKind::Run => "subagent.run",
-                    tools::subagents::SubagentToolKind::Spawn => "subagent.spawn",
-                },
-                Default::default(),
-                harness::ToolParallelism::ParallelSafe,
-                Default::default(),
+        let mut declarations = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let completion = kind.completion(
+                Some(reply_schema_ref.clone()),
+                harness::SUBAGENT_DEADLINE_CEILING_MS,
             );
+            let tool = kind.tool_spec();
             declarations.push(WorkflowToolDeclaration::new(
                 WorkflowToolDefinition {
                     tool_id: WorkflowToolId::new(kind.workflow_tool_id()),

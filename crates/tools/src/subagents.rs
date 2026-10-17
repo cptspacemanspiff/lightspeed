@@ -18,6 +18,8 @@ use crate::error::{ToolError, ToolResult};
 
 pub const AGENT_RUN_TOOL_NAME: &str = "agent_run";
 pub const AGENT_SPAWN_TOOL_NAME: &str = "agent_spawn";
+pub const AGENT_RUN_TOOL_ID: &str = "subagent.run";
+pub const AGENT_SPAWN_TOOL_ID: &str = "subagent.spawn";
 pub const AGENT_RUN_WORKFLOW_TOOL_ID: &str = "subagent-run";
 pub const AGENT_SPAWN_WORKFLOW_TOOL_ID: &str = "subagent-spawn";
 pub const AGENT_RUN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subagent.run.v1";
@@ -37,6 +39,44 @@ impl SubagentToolKind {
         match self {
             Self::Run => AGENT_RUN_TOOL_NAME,
             Self::Spawn => AGENT_SPAWN_TOOL_NAME,
+        }
+    }
+
+    /// The session tool behind the binding, as programs call it.
+    pub fn tool_id(self) -> &'static str {
+        match self {
+            Self::Run => AGENT_RUN_TOOL_ID,
+            Self::Spawn => AGENT_SPAWN_TOOL_ID,
+        }
+    }
+
+    pub fn tool_spec(self) -> harness::ToolSpec {
+        crate::definitions::register(
+            self.tool_id(),
+            Default::default(),
+            harness::ToolParallelism::ParallelSafe,
+            Default::default(),
+        )
+    }
+
+    /// The completion of the binding: `agent_run` joins the child's result,
+    /// `agent_spawn` returns its promise under the reply key.
+    pub fn completion(
+        self,
+        reply_schema_ref: Option<BlobRef>,
+        deadline_after_ms: u64,
+    ) -> harness::WorkflowToolCompletion {
+        match self {
+            Self::Run => harness::WorkflowToolCompletion::Joined {
+                reply_schema_ref,
+                deadline_after_ms,
+            },
+            Self::Spawn => harness::WorkflowToolCompletion::Promises {
+                reply_schema_ref,
+                deadline_after_ms: Some(deadline_after_ms),
+                max_promises: 1,
+                key_source: harness::WorkflowToolCompletionKeySource::Reply,
+            },
         }
     }
 
@@ -285,8 +325,15 @@ pub fn subagent_tool_definition(
                 SubagentResultEnvelope,
             >())
         }
-        // The generic workflow completion contract determines the acknowledgement.
-        SubagentToolKind::Spawn => definition,
+        // The generic workflow completion contract determines the
+        // acknowledgement; declaring it here puts it in a program's contract.
+        SubagentToolKind::Spawn => match crate::workflow_tool::acknowledgement_result_schema(
+            &kind.completion(None, 1),
+            true,
+        ) {
+            Some(schema) => definition.with_output_schema(schema),
+            None => definition,
+        },
     })
 }
 
