@@ -791,6 +791,20 @@ loop:
          promise (`program.rs`, `deadline_ms`), which goes with it.
        - Pinned programs exist only on this branch, so the changed meaning
          of `max_calls` needs no migration.
+       - **Built** (item 6 step 3). `max_calls` defaults to 50,000 (at most
+         1,000,000) and the program counts it across executions
+         (`calls_used` on the descriptor); a program scope may admit up to the
+         run's budget. `max_compute` defaults to 250,000, measured 2026-10-16
+         (release build, 50,000 calls each): a bare await loop 296, light
+         per-call work 886, mapping, sorting and serializing about 200 rows
+         per call 24,316; a tight JS loop runs about 144 µs per check, while
+         native JSON and sort barely count. Programs have their own
+         `ProgramExecutionLimits`: code mode still uses
+         `CodeExecutionLimits.timeout_ms`, so it stays there. The
+         80,000-call live test was not added: a scoped call costs about
+         370 ms end to end in local dev (about 330 ms with 64 in flight), so
+         80,000 calls would take about 7 hours. Budgets across executions
+         are tested with small limits instead.
      - Signals arriving during the handover are not lost: the server
        rejects a continue-as-new completion with new events and redelivers
        them, and later signals reach the current execution by workflow id.
