@@ -212,9 +212,11 @@ impl AgentSessionWorkflow {
             .session_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("initialized session is missing session id"))?;
+        // A run's progress goes to its program workflow, whichever
+        // execution's scope it is about; the workflow reads the scope id.
         for (execution_id, (log_seq, completed, withdrawals_settled)) in progressed {
             self.pending_emissions.push(PendingEmission::immediate(
-                execution_id.clone(),
+                harness::program_scope_execution(&execution_id).0.to_owned(),
                 EmissionEnvelope::scope_progress(
                     universe_id,
                     session_id.clone(),

@@ -116,7 +116,8 @@
     // `env`, one namespace per contract family, and the host owns every
     // source of nondeterminism: the clock, randomness and timers.
     const program = parse(programJson);
-    let now = program.started_at_ms;
+    // A continued execution's clock starts where the previous one stopped.
+    let now = hasOwn(program, "clock_ms") ? program.clock_ms : program.started_at_ms;
     function advance(at) {
         if (typeof at === "number" && at > now) now = at;
     }
@@ -525,31 +526,39 @@
     // the original prototype, so `instanceof Function` still holds.
     let programEnv = null;
     let programCtx = null;
-    // `ctx.complete(result, state)` ends the run with `result` and hands
-    // `state` to the next run, both copied when it is called. It returns a
-    // token that takes effect only when `run` returns it, so a `catch`
-    // cannot swallow it; calling it without returning the token, or twice,
-    // fails the run.
+    // The two exits. `ctx.complete(result, state)` ends the run with
+    // `result` and hands `state` to the next run; `ctx.continueAsNew(state)`
+    // goes on with the same run in a new execution that starts from `state`.
+    // Values are copied when called. Each returns a token that takes effect
+    // only when `run` returns it, so a `catch` cannot swallow it; calling
+    // one without returning the token, or more than once, fails the run.
     const exitToken = freeze(create(null));
     let exit = null;
     let exits = 0;
+    function exitWith(kind, value, state) {
+        const stateJson = serialize(state);
+        keep(stateJson, null);
+        exits++;
+        exit = { kind, value, stateJson };
+        return exitToken;
+    }
     function complete(result, state) {
         const value = result === undefined ? undefined : parse(serialize(result));
-        const stateJson = serialize(state);
-        keep(stateJson, false);
-        exits++;
-        exit = { value, stateJson };
-        return exitToken;
+        return exitWith("complete", value, state);
+    }
+    function continueAsNew(state) {
+        return exitWith("continueAsNew", undefined, state);
     }
     function prepare() {
         programEnv = buildEnv();
-        // The state the last completed run handed over, a fresh copy for
-        // this run.
+        // The state the last completed run, or this run's previous
+        // execution, handed over: a fresh copy for this execution.
         programCtx = freeze({
             startedAt: program.started_at_ms,
             state: hasOwn(program, "state") ? program.state : undefined,
-            continued: false,
+            continued: program.continued === true,
             complete: freeze(complete),
+            continueAsNew: freeze(continueAsNew),
         });
         harden();
     }
@@ -588,11 +597,12 @@
                 }
                 const returned = await handler.run(input, env, ctx);
                 if (exit === null) return returned;
+                const name = "ctx." + exit.kind + "()";
                 if (returned !== exitToken) {
-                    throw new NativeError("ctx.complete() was called but run did not return its result");
+                    throw new NativeError(name + " was called but run did not return its result");
                 }
-                if (exits > 1) throw new NativeError("ctx.complete() was called more than once");
-                keep(exit.stateJson, true);
+                if (exits > 1) throw new NativeError("ctx.complete() or ctx.continueAsNew() was called more than once");
+                keep(exit.stateJson, exit.kind);
                 return exit.value;
             })();
             return NativePromise.race([main, failure]);

@@ -29,6 +29,8 @@ fn program_input(source: &str, bindings: &[&str], seed: [u32; 4]) -> ExecutionIn
             started_at_ms: 1_000,
             random_seed: seed,
             state: None,
+            continued: false,
+            clock_ms: None,
         },
     }
 }
@@ -153,6 +155,7 @@ fn a_program_reads_its_state_and_hands_the_next_one_over_by_returning_complete()
         }))
     );
     assert_eq!(report.state, Some(json!({"round": 2})));
+    assert_eq!(report.exit, Some(ProgramExit::Complete));
 
     // A plain return hands nothing over; a run without state reads none.
     let source = r#"
@@ -174,7 +177,7 @@ fn complete_takes_effect_only_when_run_returns_it_once() {
         ),
         (
             "export default { async run(i, e, ctx) { ctx.complete(1, {}); return ctx.complete(2, {}); } };",
-            "ctx.complete() was called more than once",
+            "ctx.complete() or ctx.continueAsNew() was called more than once",
         ),
         (
             "export default { async run(i, e, ctx) { const done = ctx.complete(1, {}); throw new Error('later'); } };",
@@ -189,6 +192,17 @@ fn complete_takes_effect_only_when_run_returns_it_once() {
         assert_eq!(report.return_value, None);
     }
 
+    let source = "export default { async run(i, e, ctx) { ctx.continueAsNew({}); return ctx.complete(1, {}); } };";
+    let (_, report) = run_program(program_input(source, &[], SEED), |_| unreachable!());
+    assert!(
+        report
+            .error
+            .unwrap()
+            .message
+            .contains("called more than once")
+    );
+    assert_eq!((report.exit, report.state), (None, None));
+
     // A result is optional; the state is not.
     let source =
         "export default { async run(i, e, ctx) { return ctx.complete(undefined, null); } };";
@@ -196,6 +210,52 @@ fn complete_takes_effect_only_when_run_returns_it_once() {
     assert_eq!(report.error, None);
     assert_eq!(report.return_value, None);
     assert_eq!(report.state, Some(Value::Null));
+}
+
+#[test]
+fn continue_as_new_hands_its_state_to_the_next_execution_which_keeps_the_clock() {
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                const seen = { continued: ctx.continued, state: ctx.state ?? null, now: Date.now() };
+                await env.web.fetch({ url: "https://example.test" });
+                if (ctx.continued) return { ...seen, after: Date.now() };
+                return ctx.continueAsNew({ i: 1, seen });
+            }
+        };
+    "#;
+    let complete_at = |at| move |_: &HostRequest| (Ok(Value::Null), Some(at));
+    let (_, first) = run_program(
+        program_input(source, &["web.fetch"], SEED),
+        complete_at(5_000),
+    );
+    assert_eq!(first.error, None);
+    assert_eq!(first.exit, Some(ProgramExit::ContinueAsNew));
+    assert_eq!(first.return_value, None);
+    assert_eq!(first.clock_ms, 5_000);
+    assert_eq!(
+        first.state,
+        Some(json!({"i": 1, "seen": {"continued": false, "state": null, "now": 1_000}}))
+    );
+
+    let mut input = program_input(source, &["web.fetch"], SEED);
+    input.program.state = first.state.clone();
+    input.program.continued = true;
+    input.program.clock_ms = Some(first.clock_ms);
+    // A completion stamped before the carried clock does not move it back.
+    let (_, second) = run_program(input, complete_at(4_000));
+    assert_eq!(second.error, None);
+    assert_eq!((second.exit, second.state), (None, None));
+    assert_eq!(second.clock_ms, 5_000);
+    assert_eq!(
+        second.return_value,
+        Some(json!({
+            "continued": true,
+            "state": {"i": 1, "seen": {"continued": false, "state": null, "now": 1_000}},
+            "now": 5_000,
+            "after": 5_000,
+        }))
+    );
 }
 
 #[test]

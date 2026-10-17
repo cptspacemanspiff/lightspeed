@@ -124,12 +124,19 @@ impl ProgramInstance {
         })));
         let context =
             Context::full(&runtime).map_err(|failure| StartError::Engine(failure.to_string()))?;
+        let clock_ms = input
+            .program
+            .clock_ms
+            .unwrap_or(input.program.started_at_ms);
         let mut instance = Self {
             controls: None,
             context,
             _runtime: runtime,
             input,
-            state: Rc::new(RefCell::new(State::default())),
+            state: Rc::new(RefCell::new(State {
+                clock_ms,
+                ..State::default()
+            })),
             outbox: Rc::new(RefCell::new(Vec::new())),
             cancels: Rc::new(RefCell::new(Vec::new())),
             budget,
@@ -290,11 +297,16 @@ impl ProgramInstance {
             } else {
                 return_value
             },
+            exit: failure
+                .is_none()
+                .then(|| state.exit.as_ref().map(|(exit, _)| *exit))
+                .flatten(),
             state: if failure.is_some() {
                 None
             } else {
-                state.state.take()
+                state.exit.take().map(|(_, value)| value)
             },
+            clock_ms: state.clock_ms,
             error: failure,
             pending_request_ids: state.pending.iter().cloned().collect(),
             // Timings are left out: a replayed run must report the same.

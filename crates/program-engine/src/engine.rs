@@ -28,8 +28,11 @@ pub(crate) struct State {
     pub(crate) failure: Option<ExecutionError>,
     pub(crate) calls: u32,
     pub(crate) jobs: u64,
-    /// The state `ctx.complete` hands over, once `run` returned its token.
-    pub(crate) state: Option<Value>,
+    /// The exit `run` returned and the state it hands over.
+    pub(crate) exit: Option<(ProgramExit, Value)>,
+    /// The program's clock: where it started, then the latest completion
+    /// time delivered.
+    pub(crate) clock_ms: u64,
 }
 
 pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
@@ -262,13 +265,13 @@ pub(crate) fn prepare_context<'js>(
         },
     )
     .map_err(|failure| js_error(&ctx, failure))?;
-    // `keep(json, store)`: `ctx.complete` checks its state when called (an
-    // oversized value is an ordinary exception the program can catch), and
-    // the prelude stores it once `run` returns the token.
+    // `keep(json, exit)`: an exit checks its state when called (an oversized
+    // value is an ordinary exception the program can catch), and the
+    // prelude keeps it with the exit's kind once `run` returns the token.
     let keep_state = state.clone();
     let keep = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, json: String, store: bool| -> rquickjs::Result<()> {
+        move |ctx: Ctx<'js>, json: String, exit: Option<String>| -> rquickjs::Result<()> {
             if json.len() > MAX_PROGRAM_STATE_BYTES {
                 return Err(Exception::throw_range(
                     &ctx,
@@ -277,9 +280,13 @@ pub(crate) fn prepare_context<'js>(
             }
             let value = serde_json::from_str(&json)
                 .map_err(|_| Exception::throw_type(&ctx, "program state is not JSON"))?;
-            if store {
-                keep_state.borrow_mut().state = Some(value);
-            }
+            let exit = match exit.as_deref() {
+                None => return Ok(()),
+                Some("complete") => ProgramExit::Complete,
+                Some("continueAsNew") => ProgramExit::ContinueAsNew,
+                Some(_) => return Err(Exception::throw_type(&ctx, "unknown program exit")),
+            };
+            keep_state.borrow_mut().exit = Some((exit, value));
             Ok(())
         },
     )
@@ -373,7 +380,11 @@ pub(crate) fn apply_completion<'js>(
     deliver
         .call::<_, ()>((&completion.request_id, success, json, completed_at))
         .map_err(|failure| js_error(ctx, failure))?;
-    state.borrow_mut().pending.remove(&completion.request_id);
+    let mut state = state.borrow_mut();
+    state.pending.remove(&completion.request_id);
+    if let Some(at) = completion.completed_at_ms {
+        state.clock_ms = state.clock_ms.max(at);
+    }
     Ok(())
 }
 

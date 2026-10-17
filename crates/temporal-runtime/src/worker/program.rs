@@ -1,7 +1,8 @@
 //! Program-role activities for program runs: prepare the run's scope and
 //! descriptor, load the program, admit each step's requests, collect
-//! recorded outcomes, close the scope as the run exits, conclude the run,
-//! and finalize its reply. The program
+//! recorded outcomes, close the scope as an execution exits, hand a run
+//! that continues as new over to its next execution, conclude the run, and
+//! finalize its reply. The program
 //! itself runs in `ProgramRunWorkflow`; these activities hold no interpreter.
 
 use std::{sync::Arc, time::Duration};
@@ -162,6 +163,15 @@ impl ProgramWorkerActivities {
         close_activity(&self, ctx, request).await
     }
 
+    #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CHECKPOINT)]
+    pub async fn program_checkpoint(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: temporal_workflow::ProgramCheckpointActivityRequest,
+    ) -> Result<temporal_workflow::ProgramCheckpointActivityResult, ActivityError> {
+        checkpoint_activity(&self, ctx, request).await
+    }
+
     #[activity(name = temporal_workflow::ACTIVITY_PROGRAM_CONCLUDE)]
     pub async fn program_conclude(
         self: Arc<Self>,
@@ -266,17 +276,21 @@ fn execution_limits(
     Ok(limits)
 }
 
+/// The scope of one execution of a run, with the budgets the run was
+/// prepared with.
 fn scope_request(
-    start: &WorkflowToolStartArgs,
-    program: &harness::PinnedProgram,
+    execution_id: &str,
+    execution: u32,
+    run_id: harness::RunId,
+    limits: &CodeExecutionLimits,
 ) -> OpenCodeToolScopeRequest {
     OpenCodeToolScopeRequest {
-        execution_id: start.execution_id.clone(),
+        execution_id: harness::program_scope_id(execution_id, execution),
         parent_invocation_id: None,
-        run_id: Some(start.invocation.run_id),
+        run_id: Some(run_id),
         allowed_tools: None,
-        max_calls: program.limits.max_calls,
-        max_in_flight: program.limits.max_in_flight,
+        max_calls: limits.max_tool_calls,
+        max_in_flight: limits.max_outstanding_tool_calls,
     }
 }
 
@@ -296,7 +310,10 @@ async fn prepare(
         start.holder_workflow_id.clone(),
     );
     let scope = code_tools
-        .open_scope(scope_request(start, &program), Default::default())
+        .open_scope(
+            scope_request(&start.execution_id, 0, start.invocation.run_id, &limits),
+            Default::default(),
+        )
         .await
         .map_err(|error| PreparationError::Transport(error.to_string()))?
         .map_err(|error| PreparationError::Invalid(error.to_string()))?;
@@ -326,6 +343,8 @@ async fn prepare(
         requires: program.requires.clone(),
         started_at_ms,
         context_ref,
+        execution: 0,
+        clock_ms: None,
     })
 }
 
@@ -368,7 +387,8 @@ async fn prepare_activity(
     }
 }
 
-/// The durable account of one attempt, kept in CAS by reference.
+/// The durable account of one attempt, kept in CAS by reference. A run that
+/// continued as new has one per execution, each linked to the one before.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProgramRunReport {
     version: u32,
@@ -389,6 +409,9 @@ struct ProgramRunReport {
     /// earlier try was lost with its worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity_attempt: Option<u32>,
+    /// The report of the execution this one continued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous: Option<BlobRef>,
 }
 
 async fn store_report(
@@ -406,6 +429,7 @@ async fn store_report(
         ]);
         children.extend(descriptor.context_ref.iter().cloned());
     }
+    children.extend(report.previous.iter().cloned());
     if let Some(scope) = &report.scope {
         for call in scope.calls.values() {
             children.extend(call.output_ref.iter().cloned());
@@ -476,6 +500,7 @@ async fn load_activity(
                         cleanup_error: None,
                         report_unavailable: None,
                         activity_attempt: None,
+                        previous: None,
                     },
                 )
                 .await?;
@@ -573,7 +598,7 @@ async fn close_activity(
         runner(&api)
             .close(
                 &request.session_workflow_id,
-                &request.execution_id,
+                &harness::program_scope_id(&request.execution_id, request.execution),
                 request.program_context,
             )
             .await
@@ -609,12 +634,98 @@ async fn conclude_activity(
                 cleanup_error: report.cleanup_error.clone(),
                 report_unavailable: None,
                 activity_attempt: Some(ctx.info().attempt),
+                previous: request.previous_report,
             },
         )
         .await?;
         Ok(ProgramAttemptActivityResult {
             report_ref,
             outcome,
+        })
+    })
+    .await
+}
+
+/// Store the state `ctx.continueAsNew` handed over and this execution's
+/// report, open the next execution's scope, and describe the next
+/// execution. Safe to repeat: the settled scope stays in session state until
+/// the execution after next opens its own, and opening a scope is
+/// idempotent.
+async fn checkpoint_activity(
+    activities: &ProgramWorkerActivities,
+    ctx: ActivityContext,
+    request: temporal_workflow::ProgramCheckpointActivityRequest,
+) -> Result<temporal_workflow::ProgramCheckpointActivityResult, ActivityError> {
+    let descriptor = request.descriptor;
+    require_activity_owner(&ctx, &descriptor.execution_id)?;
+    let universe_id = universe_of(&descriptor)?;
+    let execution = descriptor
+        .execution
+        .checked_add(1)
+        .ok_or_else(|| non_retryable("program run has no next execution"))?;
+    let state = request
+        .report
+        .state
+        .clone()
+        .ok_or_else(|| non_retryable("a program that continues as new hands over a state"))?;
+    heartbeating(&ctx, async {
+        let api = activities.universes.api_for(universe_id).await?;
+        let store = api.store();
+        let code_tools = CodeToolClient::new(
+            api.temporal_client().clone(),
+            descriptor.session_workflow_id.clone(),
+        );
+        let scope = ProgramRunner::report(&code_tools, &descriptor.scope_id())
+            .await
+            .map_err(retryable)?;
+        let state_ref = put_json(store.as_ref(), &state).await.map_err(retryable)?;
+        let clock_ms = request.report.clock_ms;
+        let report_ref = store_report(
+            store.as_ref(),
+            &ProgramRunReport {
+                version: 1,
+                execution_id: descriptor.execution_id.clone(),
+                attempt: 1,
+                descriptor: Some(descriptor.clone()),
+                execution: Some(request.report),
+                scope: Some(scope),
+                interruption: None,
+                cleanup_error: None,
+                report_unavailable: None,
+                activity_attempt: None,
+                previous: request.previous_report,
+            },
+        )
+        .await?;
+        let run_id = harness::RunId::new(descriptor.run_id);
+        let opened = code_tools
+            .open_scope(
+                scope_request(
+                    &descriptor.execution_id,
+                    execution,
+                    run_id,
+                    &descriptor.limits,
+                ),
+                Default::default(),
+            )
+            .await
+            .map_err(retryable)?
+            .map_err(retryable)?;
+        let mut next = descriptor.clone();
+        next.execution = execution;
+        next.context_ref = Some(state_ref);
+        next.clock_ms = Some(clock_ms);
+        // A pinned contract that changed since keeps the old bindings here:
+        // the next execution's load refuses the run with the change.
+        if let Ok(catalog) = program_catalog(&opened, &next.requires) {
+            let catalog = serde_json::to_vec(&catalog).map_err(non_retryable)?;
+            next.catalog_ref = store.put_bytes(catalog).await.map_err(retryable)?;
+        }
+        Ok(temporal_workflow::ProgramCheckpointActivityResult {
+            continuation: temporal_workflow::ProgramContinuation {
+                descriptor: next,
+                previous_report: report_ref,
+            },
         })
     })
     .await
@@ -674,12 +785,16 @@ async fn finalize(
         api.temporal_client().clone(),
         start.holder_workflow_id.clone(),
     );
-    // The workflow closed the run's scope and waited for everything in it
-    // to settle before finalizing. Only if that close failed is the scope
-    // still open: close it now, without waiting, and say so.
+    // The workflow closed the execution's scope and waited for everything
+    // in it to settle before finalizing. Only if that close failed is the
+    // scope still open: close it now, without waiting, and say so.
+    let scope_id = request.descriptor.as_ref().map_or_else(
+        || start.execution_id.clone(),
+        ProgramRunDescriptor::scope_id,
+    );
     let queried = tokio::time::timeout(
         Duration::from_secs(5),
-        ProgramRunner::report(&code_tools, &start.execution_id),
+        ProgramRunner::report(&code_tools, &scope_id),
     )
     .await;
     let (mut scope, mut cleanup_error) = match queried {
@@ -690,13 +805,13 @@ async fn finalize(
     };
     if scope.as_ref().is_some_and(|scope| !scope.closed) {
         let closed = runner
-            .close(&start.holder_workflow_id, &start.execution_id, None)
+            .close(&start.holder_workflow_id, &scope_id, None)
             .await;
         cleanup_error = Some(match closed {
             Ok(_) => "scope closed without waiting for its outcomes".to_owned(),
             Err(error) => format!("scope close failed: {error}"),
         });
-        scope = ProgramRunner::report(&code_tools, &start.execution_id)
+        scope = ProgramRunner::report(&code_tools, &scope_id)
             .await
             .ok()
             .or(scope);
@@ -720,6 +835,7 @@ async fn finalize(
         cleanup_error,
         report_unavailable: None,
         activity_attempt: None,
+        previous: request.previous_report.clone(),
     };
     let report_ref = store_report(store.as_ref(), &report).await?;
     let failure = |status: &str, message: String, attempt_report: Option<&BlobRef>| {
@@ -890,6 +1006,14 @@ mod tests {
             (
                 ProgramWorkerActivities::program_collect.name(),
                 WorkflowActivities::program_collect.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_close.name(),
+                WorkflowActivities::program_close.name(),
+            ),
+            (
+                ProgramWorkerActivities::program_checkpoint.name(),
+                WorkflowActivities::program_checkpoint.name(),
             ),
             (
                 ProgramWorkerActivities::program_conclude.name(),

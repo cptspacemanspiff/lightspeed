@@ -13153,6 +13153,178 @@ mod tests {
     }
 
     #[test]
+    fn each_execution_of_a_program_run_opens_its_own_scope_once_the_last_has_settled() {
+        let session_id = SessionId::new("program-executions");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), opened_ask_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "open"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings = BTreeMap::from([(
+            "open".to_owned(),
+            crate::CodeToolBinding {
+                tool_id: test_tool_id("open"),
+                tool_name: ToolName::new("open"),
+                contract: Some(test_contract("open")),
+            },
+        )]);
+        let execution_scope = |execution: u32| crate::CodeToolScopeSpec {
+            execution_id: crate::program_scope_id(&execution_id, execution),
+            ..scope.clone()
+        };
+        let refused = |drive: &mut CoreAgentDrive, execution: u32| {
+            drive
+                .admit_command(
+                    CoreAgentCommand::OpenCodeToolScope {
+                        scope: execution_scope(execution),
+                    },
+                    100,
+                )
+                .is_err()
+        };
+
+        // Each execution opens a request and exits: its close withdraws the
+        // handle, and the next execution's scope opens only once the
+        // withdrawal has settled. Call ids restart in every scope.
+        for execution in 0..3 {
+            let scope_id = crate::program_scope_id(&execution_id, execution);
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::OpenCodeToolScope {
+                    scope: execution_scope(execution),
+                },
+            ));
+            assert!(
+                refused(&mut drive, execution + 1),
+                "the scope is still open"
+            );
+            let call = scoped_call_spec(&scope_id, "1", "open");
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            ));
+            let request =
+                crate::code_tool_request(drive.session_id(), drive.state(), &scope_id, "1")
+                    .unwrap();
+            let (result, _) = code_tool_workflow_effect(&request);
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::CompleteCodeToolCall {
+                    origin: call.origin.clone(),
+                    result,
+                },
+            ));
+            let handle = PromiseId::from_number(request.promise_id_base);
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::CloseCodeToolScope {
+                    execution_id: scope_id.clone(),
+                    cancel: true,
+                    program_context: None,
+                },
+            ));
+            assert!(
+                refused(&mut drive, execution + 1),
+                "the withdrawal has not settled"
+            );
+            assert!(
+                refused(&mut drive, execution + 2),
+                "an execution was skipped"
+            );
+            let action = drive
+                .admit_command(
+                    CoreAgentCommand::ResolvePromise {
+                        promise_id: handle,
+                        resolution: crate::PromiseResolution::Cancelled,
+                    },
+                    50,
+                )
+                .unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+
+        // The session keeps the run's newest scope and the one before it;
+        // the log keeps them all.
+        let kept = drive
+            .state()
+            .code_tools
+            .scopes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            [
+                crate::program_scope_id(&execution_id, 1),
+                crate::program_scope_id(&execution_id, 2),
+            ]
+        );
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope {
+                scope: execution_scope(3),
+            },
+        ));
+        assert!(
+            !drive
+                .state()
+                .code_tools
+                .scopes
+                .contains_key(&crate::program_scope_id(&execution_id, 1))
+        );
+        // Another owner cannot borrow the run's numbering.
+        let mut foreign = execution_scope(4);
+        foreign.owner = crate::ScopeOwner::Run {
+            run_id: crate::RunId::new(run_id.as_u64() + 1),
+        };
+        assert!(
+            drive
+                .admit_command(CoreAgentCommand::OpenCodeToolScope { scope: foreign }, 100)
+                .is_err()
+        );
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
     fn a_detached_handle_outlives_the_close_until_a_run_takes_it_back() {
         let session_id = SessionId::new("program-detach");
         let mut drive =

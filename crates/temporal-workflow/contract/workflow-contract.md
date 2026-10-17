@@ -81,7 +81,10 @@ A trusted execution host calls the session's `open_code_tool_scope` Update with
 its parent, which must be an admitted, pending joined workflow-tool
 invocation. A program execution names the run it executes; the scope id must
 be that run's pending program execution and the budgets must fit the pinned
-program's limits. The request's allowlist and budgets only narrow the
+program's limits. A run that continues as new opens one scope per execution,
+`<execution id>.<n>` for the `n`th after the first, once the previous
+execution's scope has closed and every call and withdrawn handle in it has
+settled; the session then keeps only the previous scope beside the new one. The request's allowlist and budgets only narrow the
 session's existing capabilities; the session resolves and pins callable bindings.
 
 `invoke_code_tool` accepts `InvokeCodeToolRequest`: the execution and request ids, an

@@ -3,7 +3,9 @@
 //! activities still execute every tool effect. A waiting program holds no
 //! worker; it steps again when the session reports that one of its calls
 //! completed. A program lost with its worker replays from this workflow's
-//! history to the same point.
+//! history to the same point. A program that continues as new hands its
+//! run over to a new execution of this workflow, with fresh history and its
+//! own scope.
 
 use std::time::Duration;
 
@@ -17,10 +19,11 @@ use temporalio_sdk::{
 };
 
 use crate::{
-    AgentSessionWorkflow, ProgramFinalizeActivityRequest, ProgramPrepareActivityRequest,
-    ProgramPrepareActivityResult, ProgramRunDescriptor, ProgramRunInterruption, ProgramRunPhase,
-    ProgramRunSnapshot, ProgramRunTerminal, WorkflowActivities, WorkflowToolRecoveryResult,
-    WorkflowToolStartArgs, workflows::WorkflowContextExt as _,
+    AgentSessionWorkflow, ProgramContinuation, ProgramFinalizeActivityRequest,
+    ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
+    ProgramRunInput, ProgramRunInterruption, ProgramRunPhase, ProgramRunSnapshot,
+    ProgramRunTerminal, WorkflowActivities, WorkflowToolRecoveryResult, WorkflowToolStartArgs,
+    workflows::WorkflowContextExt as _,
 };
 
 const ACTIVITY_HEARTBEAT: Duration = Duration::from_secs(15);
@@ -32,8 +35,13 @@ pub struct ProgramRunWorkflow {
     snapshot: ProgramRunSnapshot,
     start: Option<WorkflowToolStartArgs>,
     holder_cancelled: bool,
-    /// The most recorded outcomes the session has reported for the run's
-    /// scope. A suspended attempt resumes once this passes what it saw.
+    /// Which execution of the run this is; its scope is the one it reads.
+    execution: u32,
+    /// The stored report of the execution this one continued.
+    previous_report: Option<harness::BlobRef>,
+    /// The most recorded outcomes the session has reported for this
+    /// execution's scope. A suspended attempt resumes once this passes what
+    /// it saw.
     recorded: u64,
     /// The most handles withdrawn at the run's close the session has
     /// reported settled. The exit waits for all of them.
@@ -45,8 +53,12 @@ impl ProgramRunWorkflow {
     #[run(name = "ProgramRunWorkflow")]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
-        start: WorkflowToolStartArgs,
+        input: ProgramRunInput,
     ) -> WorkflowResult<()> {
+        let ProgramRunInput {
+            start,
+            continuation,
+        } = input;
         let reply = validate_start(ctx.workflow_id(), &start)
             .map_err(|message| temporalio_sdk::ApplicationFailure::new(anyhow::anyhow!(message)))?;
         ctx.state_mut(|state| {
@@ -54,61 +66,32 @@ impl ProgramRunWorkflow {
             state.snapshot.phase = ProgramRunPhase::Preparing;
         });
 
-        let mut prepare = ctx.execute_activity(
-            WorkflowActivities::program_prepare,
-            ProgramPrepareActivityRequest {
-                start: start.clone(),
-            },
-            preparation_options(),
-        );
-        let prepared = {
-            let holder_cancel = ctx.wait_for_state(|state| state.holder_cancelled);
-            let external_cancel = ctx.cancelled().fuse();
-            let work = (&mut prepare).fuse();
-            futures::pin_mut!(holder_cancel, external_cancel, work);
-            select_biased! {
-                _ = holder_cancel => Err(ProgramRunInterruption::HolderCancelled),
-                _ = external_cancel => Err(ProgramRunInterruption::WorkflowCancelled),
-                result = work => Ok(result),
-            }
+        let end = match continuation {
+            Some(continuation) => continue_run(ctx, &start, continuation).await,
+            None => start_run(ctx, &start).await,
         };
-        let end = match prepared {
-            Err(reason) => {
-                prepare.cancel();
-                // A prepare receipt can race with cancellation. Record it if
-                // it arrives; finalization also works without it by scope id.
-                let grace = ctx
-                    .timer_with_manual_cancellation(ACTIVITY_CANCELLATION_GRACE)
-                    .fuse();
-                let work = prepare.fuse();
-                futures::pin_mut!(grace, work);
-                select_biased! {
-                    result = work => {
-                        if let Ok(ProgramPrepareActivityResult::Prepared { descriptor }) = result {
-                            ctx.state_mut(|state| state.snapshot.descriptor = Some(*descriptor));
-                        }
-                    },
-                    _ = grace => {},
-                }
-                ProgramEnd::Terminal(interrupted(reason))
-            }
-            Ok(Err(_)) => {
-                ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed))
-            }
-            Ok(Ok(ProgramPrepareActivityResult::Rejected { error_ref })) => {
-                ProgramEnd::Terminal(ProgramRunTerminal::Rejected { error_ref })
-            }
-            Ok(Ok(ProgramPrepareActivityResult::Prepared { descriptor })) => {
-                if !descriptor_matches_start(&descriptor, &start) {
-                    ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed))
-                } else {
-                    ctx.state_mut(|state| {
-                        state.snapshot.descriptor = Some((*descriptor).clone());
-                        state.snapshot.phase = ProgramRunPhase::Running;
-                    });
-                    run_program(ctx, *descriptor).await
+        // A program that continues as new hands its run over once everything
+        // it started has settled; the next execution starts from the state.
+        let end = match end {
+            ProgramEnd::Finished { descriptor, report }
+                if report.error.is_none()
+                    && report.exit == Some(program_engine::ProgramExit::ContinueAsNew) =>
+            {
+                match hand_over(ctx, &start, descriptor, report).await {
+                    Ok(continuation) => {
+                        let next = ProgramRunInput {
+                            start,
+                            continuation: Some(continuation),
+                        };
+                        return match ctx.continue_as_new(next, Default::default()) {
+                            Err(termination) => Err(termination),
+                            Ok(never) => match never {},
+                        };
+                    }
+                    Err(end) => end,
                 }
             }
+            end => end,
         };
 
         // Every exit, finished or interrupted, cancels what the program
@@ -117,7 +100,12 @@ impl ProgramRunWorkflow {
         // outcomes not delivered to the program. Then the run concludes.
         ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Finalizing);
         let program_context = match &end {
-            ProgramEnd::Finished { report, .. } if report.error.is_none() => report.state.clone(),
+            ProgramEnd::Finished { report, .. }
+                if report.error.is_none()
+                    && report.exit == Some(program_engine::ProgramExit::Complete) =>
+            {
+                report.state.clone()
+            }
             _ => None,
         };
         let close_error = settle(ctx, &start, program_context).await;
@@ -195,7 +183,9 @@ impl ProgramRunWorkflow {
         if crate::workflows::is_holder_reply_cancellation(start, &envelope) {
             self.holder_cancelled = true;
         }
-        if let Some((completed, withdrawals_settled)) = scope_progress(start, &envelope) {
+        let scope_id = harness::program_scope_id(&start.execution_id, self.execution);
+        if let Some((completed, withdrawals_settled)) = scope_progress(start, &scope_id, &envelope)
+        {
             self.recorded = self.recorded.max(completed);
             self.withdrawals_settled = self.withdrawals_settled.max(withdrawals_settled);
         }
@@ -212,6 +202,146 @@ impl ProgramRunWorkflow {
     }
 }
 
+/// The first execution of a run: prepare the run's descriptor and scope,
+/// then run the program.
+async fn start_run(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    start: &WorkflowToolStartArgs,
+) -> ProgramEnd {
+    let mut prepare = ctx.execute_activity(
+        WorkflowActivities::program_prepare,
+        ProgramPrepareActivityRequest {
+            start: start.clone(),
+        },
+        preparation_options(),
+    );
+    let prepared = {
+        let holder_cancel = ctx.wait_for_state(|state| state.holder_cancelled);
+        let external_cancel = ctx.cancelled().fuse();
+        let work = (&mut prepare).fuse();
+        futures::pin_mut!(holder_cancel, external_cancel, work);
+        select_biased! {
+            _ = holder_cancel => Err(ProgramRunInterruption::HolderCancelled),
+            _ = external_cancel => Err(ProgramRunInterruption::WorkflowCancelled),
+            result = work => Ok(result),
+        }
+    };
+    match prepared {
+        Err(reason) => {
+            prepare.cancel();
+            // A prepare receipt can race with cancellation. Record it if
+            // it arrives; finalization also works without it by scope id.
+            let grace = ctx
+                .timer_with_manual_cancellation(ACTIVITY_CANCELLATION_GRACE)
+                .fuse();
+            let work = prepare.fuse();
+            futures::pin_mut!(grace, work);
+            select_biased! {
+                result = work => {
+                    if let Ok(ProgramPrepareActivityResult::Prepared { descriptor }) = result {
+                        ctx.state_mut(|state| state.snapshot.descriptor = Some(*descriptor));
+                    }
+                },
+                _ = grace => {},
+            }
+            ProgramEnd::Terminal(interrupted(reason))
+        }
+        Ok(Err(_)) => ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed)),
+        Ok(Ok(ProgramPrepareActivityResult::Rejected { error_ref })) => {
+            ProgramEnd::Terminal(ProgramRunTerminal::Rejected { error_ref })
+        }
+        Ok(Ok(ProgramPrepareActivityResult::Prepared { descriptor })) => {
+            if !descriptor_matches_start(&descriptor, start) {
+                ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed))
+            } else {
+                ctx.state_mut(|state| {
+                    state.snapshot.descriptor = Some((*descriptor).clone());
+                    state.snapshot.phase = ProgramRunPhase::Running;
+                });
+                run_program(ctx, *descriptor).await
+            }
+        }
+    }
+}
+
+/// A later execution of a run that continued as new: the run's descriptor
+/// comes with it, so it is not prepared again.
+async fn continue_run(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    start: &WorkflowToolStartArgs,
+    continuation: ProgramContinuation,
+) -> ProgramEnd {
+    let descriptor = continuation.descriptor;
+    if descriptor.execution == 0 || !descriptor_matches_start(&descriptor, start) {
+        return ProgramEnd::Terminal(interrupted(ProgramRunInterruption::PreparationFailed));
+    }
+    ctx.state_mut(|state| {
+        state.execution = descriptor.execution;
+        state.previous_report = Some(continuation.previous_report);
+        state.snapshot.descriptor = Some(descriptor.clone());
+        state.snapshot.phase = ProgramRunPhase::Running;
+    });
+    run_program(ctx, descriptor).await
+}
+
+/// Hand a run over to its next execution: settle this execution's scope as
+/// every exit does, then store the state and this execution's report and
+/// open the next scope. Returns how the run ends here instead when the
+/// hand-over cannot happen.
+async fn hand_over(
+    ctx: &WorkflowContext<ProgramRunWorkflow>,
+    start: &WorkflowToolStartArgs,
+    descriptor: Box<ProgramRunDescriptor>,
+    report: Box<program_engine::ExecutionReport>,
+) -> Result<ProgramContinuation, ProgramEnd> {
+    ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Finalizing);
+    if settle(ctx, start, None).await.is_some() {
+        // The scope did not close: the run concludes as a failed cleanup.
+        return Err(ProgramEnd::Finished { descriptor, report });
+    }
+    let checkpoint = ctx
+        .execute_local_activity(
+            WorkflowActivities::program_checkpoint,
+            crate::ProgramCheckpointActivityRequest {
+                descriptor: (*descriptor).clone(),
+                report: *report,
+                previous_report: ctx.state(|state| state.previous_report.clone()),
+            },
+            conclude_options(),
+        )
+        .await;
+    let continuation = match checkpoint {
+        Ok(result) => result.continuation,
+        Err(_) => {
+            return Err(ProgramEnd::Terminal(interrupted(
+                ProgramRunInterruption::ActivityFailed,
+            )));
+        }
+    };
+    // A cancel that arrived meanwhile ends the run here, in the next
+    // execution's scope, which the exit then closes.
+    let reason = if ctx.cancellation_token().is_cancelled() {
+        Some(ProgramRunInterruption::WorkflowCancelled)
+    } else if ctx.state(|state| state.holder_cancelled) {
+        Some(ProgramRunInterruption::HolderCancelled)
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => {
+            ctx.state_mut(|state| {
+                state.execution = continuation.descriptor.execution;
+                state.previous_report = Some(continuation.previous_report.clone());
+                state.snapshot.descriptor = Some(continuation.descriptor.clone());
+                state.recorded = 0;
+                state.withdrawals_settled = 0;
+            });
+            Err(ProgramEnd::Terminal(interrupted(reason)))
+        }
+        None => Ok(continuation),
+    }
+}
+
 async fn finalize(
     ctx: &WorkflowContext<ProgramRunWorkflow>,
     start: &WorkflowToolStartArgs,
@@ -223,6 +353,7 @@ async fn finalize(
             start: start.clone(),
             descriptor: ctx.state(|state| state.snapshot.descriptor.clone()),
             terminal: terminal.clone(),
+            previous_report: ctx.state(|state| state.previous_report.clone()),
         },
         finalization_options(),
     )
@@ -269,11 +400,12 @@ fn terminal_after_cancellation(
     })
 }
 
-/// The run's scope progress an emission reports (recorded outcomes, settled
-/// withdrawals), if it comes from the run's own session about the run's own
-/// scope.
+/// The scope progress an emission reports (recorded outcomes, settled
+/// withdrawals), if it comes from the run's own session about this
+/// execution's scope.
 fn scope_progress(
     start: &WorkflowToolStartArgs,
+    scope_id: &str,
     envelope: &harness::EmissionEnvelope,
 ) -> Option<(u64, u64)> {
     let harness::EmissionProducer::Session {
@@ -294,7 +426,7 @@ fn scope_progress(
     };
     (*universe_id == start.universe_id
         && *session_id == start.invocation.session_id
-        && *execution_id == start.execution_id)
+        && execution_id == scope_id)
         .then_some((*completed, *withdrawals_settled))
 }
 
@@ -346,8 +478,10 @@ async fn run_program(
             program: program_engine::ProgramExecution {
                 input,
                 started_at_ms: descriptor.started_at_ms,
-                random_seed: program_random_seed(&descriptor.execution_id),
+                random_seed: program_random_seed(&descriptor.scope_id()),
                 state: context,
+                continued: descriptor.execution > 0,
+                clock_ms: descriptor.clock_ms,
             },
         },
         program_engine::StepBudget::default(),
@@ -435,7 +569,7 @@ async fn run_program(
                     WorkflowActivities::program_collect,
                     crate::ProgramCollectActivityRequest {
                         session_workflow_id: descriptor.session_workflow_id.clone(),
-                        execution_id: descriptor.execution_id.clone(),
+                        execution_id: descriptor.scope_id(),
                         after: collected,
                         max_result_bytes: descriptor.limits.max_result_bytes,
                     },
@@ -470,7 +604,7 @@ enum ProgramEnd {
     Terminal(ProgramRunTerminal),
 }
 
-/// Close the run's scope, cancelling what the program still owns and
+/// Close this execution's scope, cancelling what the program still owns and
 /// withdrawing its undetached handles, then wait until every admitted call
 /// has a recorded outcome and every withdrawn handle has settled. The wait
 /// is the one a suspended program uses, woken by the session's progress
@@ -489,6 +623,7 @@ async fn settle(
                 universe_id: start.universe_id,
                 session_workflow_id: start.holder_workflow_id.clone(),
                 execution_id: start.execution_id.clone(),
+                execution: ctx.state(|state| state.execution),
                 program_context,
             },
             conclude_options(),
@@ -533,6 +668,7 @@ async fn conclude(
                 descriptor: descriptor.clone(),
                 report,
                 cleanup_error,
+                previous_report: ctx.state(|state| state.previous_report.clone()),
             },
             conclude_options(),
         )
@@ -556,7 +692,9 @@ fn failed_report(
 ) -> program_engine::ExecutionReport {
     program_engine::ExecutionReport {
         return_value: None,
+        exit: None,
         state: None,
+        clock_ms: 0,
         error: Some(program_engine::ExecutionError { kind, message }),
         pending_request_ids: Vec::new(),
         metrics: Default::default(),
@@ -593,8 +731,9 @@ fn engine_limits(limits: &crate::CodeExecutionLimits) -> program_engine::Executi
     }
 }
 
-/// The seed of a program's randomness: a function of its execution id, so
-/// every replay draws the same values.
+/// The seed of a program's randomness: a function of its execution's scope
+/// id (the run and the execution number), so every replay draws the same
+/// values and each execution of a continued run draws new ones.
 pub fn program_random_seed(execution_id: &str) -> [u32; 4] {
     let digest = harness::BlobRef::from_bytes(execution_id.as_bytes());
     let hex = digest
@@ -773,6 +912,40 @@ mod tests {
                 ),
             },
         }
+    }
+
+    #[test]
+    fn an_execution_reads_progress_only_for_its_own_scope() {
+        let start = start_args(CallContext::Run {});
+        let progress = |scope_id: &str| {
+            harness::EmissionEnvelope::scope_progress(
+                start.universe_id,
+                start.invocation.session_id.clone(),
+                harness::EventSeq::new(9),
+                scope_id.to_owned(),
+                3,
+                1,
+            )
+        };
+        let second = harness::program_scope_id(&start.execution_id, 1);
+        assert_eq!(
+            scope_progress(&start, &second, &progress(&second)),
+            Some((3, 1))
+        );
+        assert_eq!(
+            scope_progress(&start, &second, &progress(&start.execution_id)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_continued_execution_starts_from_the_input_the_session_started() {
+        // The session starts a run with its start alone; a continued
+        // execution's input carries the start beside its continuation.
+        let start = start_args(CallContext::Run {});
+        let input: ProgramRunInput =
+            serde_json::from_value(serde_json::to_value(&start).unwrap()).unwrap();
+        assert_eq!((input.start, input.continuation), (start, None));
     }
 
     #[test]
