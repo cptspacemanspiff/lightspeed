@@ -41,6 +41,8 @@ services:
   minio:
     # MinIO no longer publishes images to quay.io or Docker Hub; use Chainguard's build.
     image: ${MINIO_IMAGE:-chainguard/minio:latest}
+    # Preserve write access to root-owned volumes created by the previous image.
+    user: "0:0"
     container_name: ${MINIO_CONTAINER_NAME:-lightspeed-minio}
     restart: unless-stopped
     command: server /data --console-address ":9001"
