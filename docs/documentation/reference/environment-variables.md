@@ -158,6 +158,20 @@ maximum, stops the process at startup.
 | `LIGHTSPEED_INPUT_MAX_DEADLINE_MS` | `2592000000` (30 days) | Longest deadline a request or profile may set. An escalated request may wait up to twice this. |
 | `LIGHTSPEED_INPUT_MIN_REMIND_AFTER_MS` | `3600000` (1 hour) | Shortest reminder interval a request may set. Lower it only for tests: frequent reminders grow a long wait's workflow history. |
 
+### Programs
+
+A program runs inside its Temporal workflow, so the values it reads pass
+through that workflow's history. A large value the session already stores (the
+program's source, input or state, or a tool's output or error) is kept there as
+a reference, `lightspeed-ref:<blob ref>`, and the `program` worker reads it back
+from the content store. The Temporal UI shows these references, not the values.
+Every worker that runs program workflows needs this: `lightspeed-runtime` sets
+it up for the `program` role.
+
+| Variable | Requirement/default | Purpose |
+| --- | --- | --- |
+| `LIGHTSPEED_PROGRAM_INLINE_VALUE_BYTES` | `16384` (16 KiB) | Largest value, in serialized bytes, kept inline in a program workflow's history; larger values are kept as references. Read by `program` workers. An invalid value logs a warning and keeps the default. |
+
 ### Split environment routing
 
 | Variable | Requirement/default | Purpose |
