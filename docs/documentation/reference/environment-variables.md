@@ -397,8 +397,8 @@ Pass `./dev.sh --require-api-keys` to make a missing deployment key fatal
 | `PGADMIN_DEFAULT_EMAIL` | `admin@lightspeed.dev` | Local pgAdmin account. |
 | `PGADMIN_DEFAULT_PASSWORD` | `lightspeed` | Local pgAdmin password. |
 | `PGADMIN_PORT` | `15080` | Host pgAdmin port. |
-| `MINIO_IMAGE` | `quay.io/minio/minio` | MinIO server image. |
-| `MINIO_MC_IMAGE` | `quay.io/minio/mc` | MinIO client image. |
+| `MINIO_IMAGE` | `chainguard/minio:latest` | MinIO server image. |
+| `MINIO_MC_IMAGE` | `chainguard/minio-client:latest` | MinIO client image. |
 | `MINIO_CONTAINER_NAME` | `lightspeed-minio` | MinIO container name. |
 | `MINIO_ROOT_USER` | `minioadmin` | Local MinIO access key. |
 | `MINIO_ROOT_PASSWORD` | `minioadmin` | Local MinIO secret key. |
