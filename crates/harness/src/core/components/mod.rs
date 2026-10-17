@@ -63,7 +63,7 @@ pub use program::{
     PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram, ProgramApprovals, ProgramContextInput,
     ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver, contract_digest,
     is_program_session, program_context, program_run_execution_id, program_run_invocation,
-    program_run_is_waiting, validate_contract_name,
+    program_run_is_waiting, program_scope_execution, program_scope_id, validate_contract_name,
 };
 pub use promise::AwaitOutcome;
 pub use promise::{

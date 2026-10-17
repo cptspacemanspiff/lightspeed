@@ -99,15 +99,15 @@ impl ProgramRunner {
         Self { client, blobs }
     }
 
-    /// Close the run's scope as the run exits: the session cancels every
+    /// Close an execution's scope as it exits: the session cancels every
     /// call the program still owns and withdraws its undetached handles. A
-    /// finished program's context is kept with the close. Returns at once
-    /// with what the exit must wait for; idempotent, so a lost result closes
-    /// again and keeps one context.
+    /// completed program's state is kept with the close as the session's
+    /// program context. Returns at once with what the exit must wait for;
+    /// idempotent, so a lost result closes again and keeps one context.
     pub async fn close(
         &self,
         session_workflow_id: &str,
-        execution_id: &str,
+        scope_id: &str,
         program_context: Option<Value>,
     ) -> Result<ProgramCloseActivityResult, String> {
         let code_tools = CodeToolClient::new(self.client.clone(), session_workflow_id.to_owned());
@@ -125,7 +125,7 @@ impl ProgramRunner {
         let closed = code_tools
             .close_scope(
                 CloseCodeToolScopeRequest {
-                    execution_id: execution_id.to_owned(),
+                    execution_id: scope_id.to_owned(),
                     cancel_pending: true,
                     program_context,
                 },
@@ -137,7 +137,7 @@ impl ProgramRunner {
             Ok(scope) => scope,
             Err(rejection) => {
                 // A run interrupted before it opened its scope has none.
-                return match Self::report(&code_tools, execution_id).await {
+                return match Self::report(&code_tools, scope_id).await {
                     Err(error) if error.kind == CodeToolRejectionKind::UnknownScope => {
                         Ok(ProgramCloseActivityResult::NoScope)
                     }
@@ -180,7 +180,7 @@ impl ProgramRunner {
     }
 
     /// What a workflow needs to run the program itself, with the pins
-    /// re-checked against the run's open scope.
+    /// re-checked against the execution's open scope.
     pub async fn load(
         &self,
         descriptor: &ProgramRunDescriptor,
@@ -190,17 +190,18 @@ impl ProgramRunner {
             .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
+        let scope_id = descriptor.scope_id();
         let scope = code_tools
             .report(
                 CodeToolScopeReportRequest {
-                    execution_id: descriptor.execution_id.clone(),
+                    execution_id: scope_id.clone(),
                 },
                 Default::default(),
             )
             .await
             .map_err(|error| CodeRunError::Preparation(error.to_string()))?
             .map_err(|error| CodeRunError::Preparation(error.to_string()))?;
-        if scope.execution_id != descriptor.execution_id || scope.closed {
+        if scope.execution_id != scope_id || scope.closed {
             return Err(CodeRunError::Preparation(
                 "program requires the run's open scope".into(),
             ));
@@ -250,7 +251,7 @@ impl ProgramRunner {
         })
     }
 
-    /// Admit one step's requests to the run's scope, in issue order, then
+    /// Admit one step's requests to the execution's scope, in issue order, then
     /// send its cancels, and return the failures the program receives for
     /// requests not admitted. A transport failure is returned as an error so
     /// the step is retried; admission and cancels are idempotent.
@@ -295,7 +296,7 @@ impl ProgramRunner {
             let sent = code_tools
                 .cancel(
                     CancelCodeToolRequest {
-                        execution_id: descriptor.execution_id.clone(),
+                        execution_id: descriptor.scope_id(),
                         target: target.clone(),
                     },
                     Default::default(),
@@ -309,7 +310,7 @@ impl ProgramRunner {
             // that call's failure) or is not the program's to cancel.
             if let Err(rejection) = sent {
                 tracing::warn!(
-                    execution_id = %descriptor.execution_id,
+                    scope_id = %descriptor.scope_id(),
                     ?target,
                     %rejection,
                     "program cancel refused"
@@ -367,8 +368,7 @@ impl ProgramRunner {
     ) -> CodeRunReport {
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
-        let (scope, report_error) = match Self::report(&code_tools, &descriptor.execution_id).await
-        {
+        let (scope, report_error) = match Self::report(&code_tools, &descriptor.scope_id()).await {
             Ok(scope) => (Some(scope), None),
             Err(error) => (None, Some(format!("scope report unavailable: {error}"))),
         };
@@ -423,7 +423,7 @@ impl ProgramRunner {
             code_tools
                 .invoke(
                     InvokeCodeToolRequest {
-                        execution_id: descriptor.execution_id.clone(),
+                        execution_id: descriptor.scope_id(),
                         request_id: request.request_id.clone(),
                         binding_id: request.binding_id,
                         arguments_ref,

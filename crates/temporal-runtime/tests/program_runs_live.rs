@@ -2998,3 +2998,289 @@ async fn a_detached_request_outlives_its_run_and_a_later_run_takes_it_back() -> 
     })
     .await
 }
+
+/// Loops over three executions: each sleeps, records what it saw, and
+/// continues as new until the third completes the run, handing the next run
+/// how many runs have completed.
+const CONTINUING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            const s = ctx.continued ? ctx.state : { i: 0, runs: ctx.state?.runs ?? 0, seen: [], draws: [], at: 0 };
+            await env.time.sleep({ ms: 1 });
+            const seen = [...s.seen, { i: s.i, continued: ctx.continued, clockKept: Date.now() >= s.at }];
+            const draws = [...s.draws, Math.random()];
+            if (s.i < 2) {
+                return ctx.continueAsNew({ ...s, i: s.i + 1, seen, draws, at: Date.now() });
+            }
+            return ctx.complete(
+                { claim: input.claim, slept: seen.length, runs: s.runs, seen, distinctDraws: new Set(draws).size },
+                { runs: s.runs + 1 },
+            );
+        }
+    };
+"#;
+
+/// The run id of the execution a workflow execution's history continued, if
+/// it continued one.
+fn continued_from(
+    events: &[temporalio_common::protos::temporal::api::history::v1::HistoryEvent],
+) -> Option<String> {
+    use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
+    match events.first()?.attributes.as_ref()? {
+        Attributes::WorkflowExecutionStartedEventAttributes(started) => {
+            Some(started.continued_execution_run_id.clone()).filter(|id| !id.is_empty())
+        }
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_continues_as_new_and_each_execution_starts_from_its_state() -> anyhow::Result<()>
+{
+    with_program_workers_and_client(
+        InputTimeouts::default(),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        CONTINUING_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+
+                let run = start_program_run(&api, &session_id, json!({"claim": "loop"})).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                // Each execution started from the state the last handed over,
+                // with its clock where the last stopped and its own seed.
+                assert_eq!(
+                    output,
+                    json!({
+                        "claim": "loop",
+                        "slept": 3,
+                        "runs": 0,
+                        "seen": [
+                            {"i": 0, "continued": false, "clockKept": true},
+                            {"i": 1, "continued": true, "clockKept": true},
+                            {"i": 2, "continued": true, "clockKept": true},
+                        ],
+                        "distinctDraws": 3,
+                    })
+                );
+
+                // The run is one workflow id; its third execution continued
+                // the second, and replays from its own history.
+                let state = programs::session_state(&store, &session_id).await?;
+                let execution_id = programs::program_execution_id(&state)?;
+                let handle = client.get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(
+                    execution_id.clone(),
+                );
+                let events = handle
+                    .fetch_history(Default::default())
+                    .into_events()
+                    .await?;
+                assert!(
+                    continued_from(&events).is_some(),
+                    "the last execution continued"
+                );
+                WorkflowReplayer::new(
+                    WorkflowReplayerOptions::new()
+                        .register_workflow::<temporal_workflow::ProgramRunWorkflow>()?
+                        .build(),
+                )?
+                .replay_workflow(handle.fetch_history(Default::default()))
+                .await?;
+
+                // The run's report links each execution's report to the one
+                // before, back to the first.
+                let snapshot = handle
+                    .query(
+                        temporal_workflow::ProgramRunWorkflow::snapshot,
+                        (),
+                        temporalio_client::WorkflowQueryOptions::default(),
+                    )
+                    .await?;
+                let Some(temporal_workflow::ProgramRunTerminal::Completed { result }) =
+                    snapshot.terminal
+                else {
+                    anyhow::bail!("the run completed: {snapshot:?}");
+                };
+                let mut chain = Vec::new();
+                let mut next = Some(result.report_ref.as_str().to_owned());
+                while let Some(report_ref) = next {
+                    let report = read_json(&store, &report_ref).await?;
+                    chain.push((
+                        report["descriptor"]["execution"].as_u64().unwrap_or(0),
+                        report["execution"]["exit"].clone(),
+                        report["scope"]["calls"]
+                            .as_object()
+                            .map(|calls| calls.len()),
+                    ));
+                    next = report["previous"].as_str().map(str::to_owned);
+                }
+                assert_eq!(
+                    chain,
+                    [
+                        (2, json!("complete"), Some(1)),
+                        (1, json!("continue_as_new"), Some(1)),
+                        (0, json!("continue_as_new"), Some(1)),
+                    ]
+                );
+
+                // Each execution had its own scope, and the session keeps
+                // only the last two.
+                assert_eq!(
+                    state.code_tools.scopes.keys().cloned().collect::<Vec<_>>(),
+                    [
+                        harness::program_scope_id(&execution_id, 1),
+                        harness::program_scope_id(&execution_id, 2),
+                    ]
+                );
+                assert!(
+                    state
+                        .code_tools
+                        .scopes
+                        .values()
+                        .all(|scope| scope.calls.len() == 1 && scope.calls.contains_key("call-1"))
+                );
+
+                // The next run starts from the state the run completed with,
+                // not continued.
+                let run = start_program_run(&api, &session_id, json!({"claim": "again"})).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                assert_eq!(output["runs"], json!(1), "{output}");
+                assert_eq!(output["seen"][0]["continued"], json!(false), "{output}");
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+/// Opens two requests and detaches one before continuing as new; the next
+/// execution takes the detached one back and waits for its answer, and
+/// reads what became of the other.
+const HANDING_OVER_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            if (!ctx.continued) {
+                const dropped = await env.input.open({ ask: "Drop it?", assignees: ["alice"] });
+                const kept = await env.input.open({ ask: "Keep it?", assignees: ["alice"] });
+                await kept.detach();
+                return ctx.continueAsNew({ dropped: dropped.id, kept: kept.id });
+            }
+            const dropped = await env.input.handle(ctx.state.dropped);
+            const droppedAs = await dropped.answer().then(() => "answered", (error) => error.kind);
+            const kept = await env.input.handle(ctx.state.kept);
+            return { claim: input.claim, slept: 0, droppedAs, answer: await kept.answer() };
+        }
+    };
+"#;
+
+/// The session's inbox requests by their ask: id and status.
+async fn inbox_by_ask(
+    api: &GatewayAgentApi,
+    session_id: &SessionId,
+) -> anyhow::Result<std::collections::BTreeMap<String, (String, api::InputRequestStatus)>> {
+    Ok(api
+        .list_inbox_requests(api::InboxRequestListParams {
+            session: Some(session_id.to_string()),
+            ..Default::default()
+        })
+        .await?
+        .result
+        .requests
+        .into_iter()
+        .map(|request| (request.ask, (request.request_id, request.status)))
+        .collect())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn continue_as_new_withdraws_undetached_requests_and_carries_detached_ones()
+-> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(
+                    &profile_id,
+                    HANDING_OVER_PROGRAM,
+                    &[
+                        ("input.open", None),
+                        ("input.handle", None),
+                        ("promise.await", None),
+                        ("promise.detach", None),
+                    ],
+                ),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(&api, &session_id, json!({"claim": "hand over"})).await?;
+
+            // The handover withdrew the request the program did not detach;
+            // the detached one waits for its answer in the next execution.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let kept = loop {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the handover never settled: {:?}",
+                    inbox_by_ask(&api, &session_id).await?
+                );
+                let requests = inbox_by_ask(&api, &session_id).await?;
+                if let (Some((_, dropped)), Some((kept, api::InputRequestStatus::Pending))) =
+                    (requests.get("Drop it?"), requests.get("Keep it?"))
+                    && *dropped == api::InputRequestStatus::Cancelled
+                {
+                    break kept.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            api.answer_inbox_request(api::InboxRequestAnswerParams {
+                request_id: kept,
+                approved: true,
+                value: None,
+                comment: None,
+            })
+            .await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["droppedAs"], json!("input_cancelled"), "{output}");
+            assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}

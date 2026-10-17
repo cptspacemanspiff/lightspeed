@@ -794,6 +794,19 @@ loop:
      - Signals arriving during the handover are not lost: the server
        rejects a continue-as-new completion with new events and redelivers
        them, and later signals reach the current execution by workflow id.
+     - **Built** (item 6 step 2). Scope ids are `wtx:…` then `wtx:….N`
+       (ids allow no `~`; execution ids contain no `.`). The exit's close
+       settles the scope as at any exit; `program_checkpoint` then stores
+       the state and this execution's report and opens the next scope. The
+       session keeps the previous scope beside the new one, so a retried
+       checkpoint can still read it, and drops older ones; it opens
+       execution `N` only after `N-1` has closed and settled. The
+       continuation carries the descriptor with `execution`, the state as
+       `context_ref`, `clock_ms` and the new scope's catalog (a pin that
+       drifted keeps the old catalog, and the next load refuses the run),
+       plus `previous_report`: each execution's report links to the one
+       before (user, 2026-10-16). A cancel that arrives during the
+       handover ends the run in the next execution's scope.
   6. **`ctx.shouldContinue()`** (true when Temporal suggests continue-as-new
      or our event or byte threshold is near, the same signals as the
      TypeScript SDK's `workflowInfo()`) and a typed

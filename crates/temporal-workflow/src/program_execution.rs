@@ -29,14 +29,40 @@ pub enum ProgramPrepareActivityResult {
     },
 }
 
-/// Small, immutable input shared by program-run orchestration and its
-/// runner. The program session owns the run's scope and bindings; holding
-/// this descriptor authorizes nothing.
+/// The program workflow's input: the session's start and, for an execution
+/// that continues its run, what the run carries into it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramRunInput {
+    #[serde(flatten)]
+    pub start: crate::WorkflowToolStartArgs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ProgramContinuation>,
+}
+
+/// What a run that continued as new carries into its next execution. The
+/// descriptor is the run's, with the next execution's number, scope
+/// bindings, state and clock: a continued run is not prepared again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramContinuation {
+    pub descriptor: ProgramRunDescriptor,
+    /// The stored report of the execution this one continues; each report
+    /// links to the one before.
+    pub previous_report: BlobRef,
+}
+
+/// Small input shared by program-run orchestration and its runner, fixed
+/// for an execution. The program session owns the run's scope and
+/// bindings; holding this descriptor authorizes nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramRunDescriptor {
-    /// The run's program execution: the scope id and this workflow's id.
+    /// The run's program execution: this workflow's id, and the first
+    /// execution's scope id.
     pub execution_id: String,
+    /// Which execution of the run this is: 0 for the first, one more each
+    /// time the run continues as new. Each has its own scope.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub execution: u32,
     /// The program session's composed workflow id, without a Temporal run id.
     pub session_workflow_id: String,
     pub run_id: u64,
@@ -58,13 +84,28 @@ pub struct ProgramRunDescriptor {
     /// When the run started, as the session recorded it: the program's
     /// clock before its first completion.
     pub started_at_ms: u64,
-    /// The session's newest program context when the run started: the
-    /// program's `ctx.state`. Absent before any run has handed one over.
+    /// The state the execution starts with, the program's `ctx.state`: the
+    /// session's newest program context when the run started, or the state
+    /// `ctx.continueAsNew` handed to this execution. Absent before any run
+    /// has handed one over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_ref: Option<BlobRef>,
+    /// Where a continued execution's clock starts: where the previous
+    /// execution's stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_ms: Option<u64>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl ProgramRunDescriptor {
+    /// The scope of this execution of the run.
+    pub fn scope_id(&self) -> String {
+        harness::program_scope_id(&self.execution_id, self.execution)
+    }
+
     pub fn validate(&self) -> Result<(), CodeExecutionValidationError> {
         if self.execution_id.trim().is_empty() {
             return Err(CodeExecutionValidationError::EmptyExecutionId);
@@ -141,6 +182,7 @@ pub struct ProgramAdmitActivityResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramCollectActivityRequest {
     pub session_workflow_id: String,
+    /// The execution's scope.
     pub execution_id: String,
     pub after: u64,
     pub max_result_bytes: u64,
@@ -161,6 +203,9 @@ pub struct ProgramCloseActivityRequest {
     pub universe_id: uuid::Uuid,
     pub session_workflow_id: String,
     pub execution_id: String,
+    /// Which execution's scope to close.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub execution: u32,
     /// The state a program handed over through `ctx.complete`, stored with
     /// the close as the session's program context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,6 +243,31 @@ pub struct ProgramConcludeActivityRequest {
     /// Why the run's close did not go through, if it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_error: Option<String>,
+    /// The stored report of the execution this one continued, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_report: Option<BlobRef>,
+}
+
+/// Hand a run over to its next execution, once everything the program
+/// started has settled: store the state `ctx.continueAsNew` handed over and
+/// this execution's report, open the next execution's scope, and describe
+/// the next execution. A local activity, so the state is not recorded in
+/// history. Safe to repeat: the settled scope stays readable until the
+/// execution after next opens its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramCheckpointActivityRequest {
+    pub descriptor: ProgramRunDescriptor,
+    /// The finished execution's report; its `state` is the handed-over
+    /// state.
+    pub report: program_engine::ExecutionReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_report: Option<BlobRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramCheckpointActivityResult {
+    /// What the next execution carries.
+    pub continuation: ProgramContinuation,
 }
 
 /// What one attempt of the program did. The detailed report stays in CAS.
@@ -252,6 +322,9 @@ pub struct ProgramFinalizeActivityRequest {
     pub start: crate::WorkflowToolStartArgs,
     pub descriptor: Option<ProgramRunDescriptor>,
     pub terminal: ProgramRunTerminal,
+    /// The stored report of the execution this one continued, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_report: Option<BlobRef>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

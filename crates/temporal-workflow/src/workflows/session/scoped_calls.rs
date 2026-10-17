@@ -572,7 +572,7 @@ async fn admit_open(
                 })?;
                 if run.run_id != *run_id
                     || harness::program_run_execution_id(&state.core_state, *run_id).as_deref()
-                        != Some(request.execution_id.as_str())
+                        != Some(harness::program_scope_execution(&request.execution_id).0)
                 {
                     return Err(rejected(
                         Rejection::Unavailable,

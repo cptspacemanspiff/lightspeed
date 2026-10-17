@@ -28,7 +28,7 @@ pub use activities::{
     ACTIVITY_ENVIRONMENT_JOB_POLL, ACTIVITY_ENVIRONMENT_JOB_PREPARE_WORKFLOW_TOOL,
     ACTIVITY_ENVIRONMENT_JOB_START, ACTIVITY_INPUT_REQUEST_EXECUTE, ACTIVITY_INPUT_REQUEST_OPEN,
     ACTIVITY_INPUT_REQUEST_STEP, ACTIVITY_LLM_GENERATE, ACTIVITY_MATERIALIZE_AWAIT_RESULT,
-    ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_CLOSE, ACTIVITY_PROGRAM_COLLECT, ACTIVITY_PROGRAM_CONCLUDE, ACTIVITY_PROGRAM_FINALIZE,
+    ACTIVITY_PREPARE_JOINED_CONTEXT, ACTIVITY_PROGRAM_ADMIT, ACTIVITY_PROGRAM_CHECKPOINT, ACTIVITY_PROGRAM_CLOSE, ACTIVITY_PROGRAM_COLLECT, ACTIVITY_PROGRAM_CONCLUDE, ACTIVITY_PROGRAM_FINALIZE,
     ACTIVITY_PROGRAM_LOAD, ACTIVITY_PROGRAM_PREPARE, ACTIVITY_PUT_BLOB, ACTIVITY_READ_BLOB,
     ACTIVITY_RUNTIME_PROJECTION_REFRESH, ACTIVITY_START_WORKFLOW_TOOL_EXECUTION,
     ACTIVITY_SUBAGENT_CLOSE, ACTIVITY_SUBAGENT_PREPARE, ACTIVITY_SUBAGENT_RESOLVE,
@@ -62,10 +62,12 @@ pub use input_request::{
 pub use program_execution::{
     DEFAULT_PROGRAM_ATTEMPT_TIMEOUT_MS, PROGRAM_RUN_WORKFLOW_TYPE, ProgramAdmitActivityRequest,
     ProgramAdmitActivityResult, ProgramAttemptActivityResult,
-    ProgramAttemptOutcome, ProgramCloseActivityRequest, ProgramCloseActivityResult,
+    ProgramAttemptOutcome, ProgramCheckpointActivityRequest, ProgramCheckpointActivityResult,
+    ProgramCloseActivityRequest, ProgramCloseActivityResult, ProgramContinuation,
     ProgramCollectActivityRequest, ProgramCollectActivityResult, ProgramConcludeActivityRequest, ProgramFinalizeActivityRequest, ProgramLoadActivityRequest,
     ProgramLoadActivityResult,
     ProgramPrepareActivityRequest, ProgramPrepareActivityResult, ProgramRunDescriptor,
+    ProgramRunInput,
     ProgramRunInterruption, ProgramRunPhase, ProgramRunSnapshot, ProgramRunTerminal,
 };
 pub use rehydrate::{

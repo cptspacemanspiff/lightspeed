@@ -670,8 +670,9 @@ fn validate_live_owner(
 }
 
 /// A run-owned scope lives while its program run is active and its program
-/// execution is still pending. Cancelling the run ends liveness, which makes
-/// the session close the scope and drain its calls before the run ends.
+/// execution is still pending; each execution of the run has its own scope
+/// (`program_scope_id`). Cancelling the run ends liveness, which makes the
+/// session close the scope and drain its calls before the run ends.
 fn validate_live_run(
     state: &CoreAgentState,
     scope: &CodeToolScopeSpec,
@@ -691,7 +692,7 @@ fn validate_live_run(
     }
     let execution_id = super::program::program_run_execution_id(state, run_id)
         .ok_or_else(|| invalid("run-owned scope has no pending program execution"))?;
-    if execution_id != scope.execution_id {
+    if crate::program_scope_execution(&scope.execution_id).0 != execution_id {
         return Err(invalid(
             "run-owned scope id does not match the run's program execution",
         ));
@@ -791,13 +792,59 @@ fn validate_scope(state: &CoreAgentState, scope: &CodeToolScopeSpec) -> Result<(
     if count >= MAX_CODE_TOOL_SCOPES_PER_RUN {
         return Err(invalid("code tool scope count exceeds the per-run limit"));
     }
-    if state
+    validate_owner_free(state, scope)
+}
+
+/// The scope of the previous execution of the program run whose later
+/// execution `scope` belongs to, if it is one.
+fn previous_execution_scope(scope: &CodeToolScopeSpec) -> Option<String> {
+    let ScopeOwner::Run { .. } = scope.owner else {
+        return None;
+    };
+    match crate::program_scope_execution(&scope.execution_id) {
+        (execution_id, execution) if execution > 0 => {
+            Some(crate::program_scope_id(execution_id, execution - 1))
+        }
+        _ => None,
+    }
+}
+
+/// An owner holds one scope at a time. A program run that continues as new
+/// opens its next execution's scope only after the previous execution's has
+/// closed and settled: every call recorded, every withdrawn handle settled.
+fn validate_owner_free(
+    state: &CoreAgentState,
+    scope: &CodeToolScopeSpec,
+) -> Result<(), DomainError> {
+    let mut owned = state
         .code_tools
         .scopes
         .values()
-        .any(|existing| existing.spec.owner == scope.owner)
+        .filter(|existing| existing.spec.owner == scope.owner);
+    let Some(previous) = previous_execution_scope(scope) else {
+        return if owned.next().is_none() {
+            Ok(())
+        } else {
+            Err(invalid("scope owner already owns a code tool scope"))
+        };
+    };
+    let previous = state
+        .code_tools
+        .scopes
+        .get(&previous)
+        .filter(|previous| previous.spec.owner == scope.owner)
+        .ok_or_else(|| invalid("a program execution's scope must follow the previous one's"))?;
+    if owned.any(|existing| !existing.closed) {
+        return Err(invalid("the run's previous program scope is still open"));
+    }
+    let (withdrawn, settled) = code_tool_scope_withdrawals(state, previous);
+    if settled < withdrawn
+        || previous
+            .calls
+            .values()
+            .any(|call| !call.status.is_terminal())
     {
-        return Err(invalid("scope owner already owns a code tool scope"));
+        return Err(invalid("the run's previous program scope has not settled"));
     }
     Ok(())
 }
@@ -1758,17 +1805,22 @@ pub(crate) fn apply_code_tool_event(
             validate_scope(state, scope)?;
             match scope.policy.retention {
                 // Retain closed outcomes for the current run, and drop
-                // prior-run scope indexes. The immutable log remains the
-                // outcome archive.
+                // prior-run scope indexes. A program run's later execution
+                // keeps only the previous execution's settled scope beside
+                // its own. The immutable log remains the outcome archive.
                 Retention::FullInState => {
                     let run_id = scope_owner(state, scope)?.run_id;
+                    let previous = previous_execution_scope(scope);
                     let retain: BTreeSet<_> = state
                         .code_tools
                         .scopes
                         .iter()
-                        .filter(|(_, existing)| {
+                        .filter(|(id, existing)| {
                             scope_owner(state, &existing.spec)
                                 .is_ok_and(|owner| owner.run_id == run_id)
+                                && previous.as_ref().is_none_or(|previous| {
+                                    *id == previous || existing.spec.owner != scope.owner
+                                })
                         })
                         .map(|(id, _)| id.clone())
                         .collect();

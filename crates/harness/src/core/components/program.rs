@@ -566,6 +566,31 @@ pub fn program_run_execution_id(state: &CoreAgentState, run_id: RunId) -> Option
     ))
 }
 
+/// The scope id of a program run's `execution`th execution: the run's
+/// program execution id for the first (`0`), `{id}.{execution}` after. Each
+/// execution of a run that continues as new has its own scope, so call ids
+/// restart and session state stops growing.
+pub fn program_scope_id(execution_id: &str, execution: u32) -> String {
+    if execution == 0 {
+        execution_id.to_owned()
+    } else {
+        format!("{execution_id}.{execution}")
+    }
+}
+
+/// The run's program execution id and the execution number a program scope
+/// id names; the inverse of [`program_scope_id`]. Execution ids contain no
+/// `.`, so an id without a canonical number is the first execution's.
+pub fn program_scope_execution(scope_id: &str) -> (&str, u32) {
+    scope_id
+        .rsplit_once('.')
+        .and_then(|(execution_id, number)| {
+            let execution = number.parse::<u32>().ok()?;
+            (execution > 0 && execution.to_string() == number).then_some((execution_id, execution))
+        })
+        .unwrap_or((scope_id, 0))
+}
+
 /// Whether the active run of a program session is waiting on something only
 /// the outside world can advance: an active run on its program's reply, or a
 /// cancelling run on its scope's calls draining. The planner has nothing to
@@ -880,6 +905,23 @@ pub(crate) fn require_agent_driver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_scope_id_names_its_run_and_execution() {
+        let run = "wtx:sha256:00ff";
+        assert_eq!(program_scope_id(run, 0), run);
+        assert_eq!(program_scope_id(run, 12), "wtx:sha256:00ff.12");
+        for execution in [0, 1, 12, u32::MAX] {
+            assert_eq!(
+                program_scope_execution(&program_scope_id(run, execution)),
+                (run, execution)
+            );
+        }
+        // Only a canonical positive number names a later execution.
+        for id in ["x.0", "x.01", "x.", "x.a", "x.4294967296"] {
+            assert_eq!(program_scope_execution(id), (id, 0));
+        }
+    }
 
     fn pin(contract: &str) -> ContractPin {
         ContractPin {

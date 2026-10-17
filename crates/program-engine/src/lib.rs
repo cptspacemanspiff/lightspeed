@@ -50,13 +50,36 @@ pub struct ProgramExecution {
     /// Seeds `Math.random` and `crypto`: the same seed draws the same values.
     #[serde(rename = "seed")]
     pub random_seed: [u32; 4],
-    /// The state the run starts with, `ctx.state`: what the last run that
-    /// completed through `ctx.complete` handed over. Absent before any has.
+    /// The state the execution starts with, `ctx.state`: what the last run
+    /// that completed through `ctx.complete` handed over or, when this
+    /// execution continues its run, what `ctx.continueAsNew` handed over.
+    /// Absent before either has.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
+    /// Whether this execution continues its run (`ctx.continued`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub continued: bool,
+    /// Where the program's clock starts when it continues its run: where the
+    /// previous execution's stopped. `started_at_ms` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_ms: Option<u64>,
 }
 
-/// The largest state `ctx.complete` accepts, in serialized JSON bytes.
+/// How a program that returned one of `ctx`'s exit tokens ends its
+/// execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramExit {
+    /// `ctx.complete(result, state)`: the run ends; the next run starts with
+    /// the state.
+    Complete,
+    /// `ctx.continueAsNew(state)`: the run goes on in a new execution that
+    /// starts with the state.
+    ContinueAsNew,
+}
+
+/// The largest state `ctx.complete` and `ctx.continueAsNew` accept, in
+/// serialized JSON bytes.
 pub const MAX_PROGRAM_STATE_BYTES: usize = 64 * 1024;
 
 /// Every budget is positive; there are intentionally no deployment defaults.
@@ -141,10 +164,18 @@ pub struct ExecutionMetrics {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub return_value: Option<Value>,
-    /// The state the program handed to the next run: set only when `run`
-    /// returned the token of `ctx.complete(result, state)`.
+    /// How the program asked to end its execution, if `run` returned an exit
+    /// token and nothing failed afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<ProgramExit>,
+    /// The state the exit hands over: to the next run, or to the next
+    /// execution of this one. Set only with `exit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
+    /// The program's clock when it finished: the latest completion time it
+    /// was delivered, or where it started.
+    #[serde(default)]
+    pub clock_ms: u64,
     pub error: Option<ExecutionError>,
     /// Requests issued before the program ended, whose completions have not
     /// entered this interpreter. Only the host knows their durable outcomes.
