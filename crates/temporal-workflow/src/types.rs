@@ -623,6 +623,11 @@ pub struct CreateOrLoadSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_after_close_ms: Option<u64>,
     pub observed_at_ms: u64,
+    /// The workflow reads `WorkflowToolState::emissions_dropped`, so the load
+    /// may leave out a live run's settled workflow calls
+    /// (`harness::trim_for_handoff`). Workflow code from before it sends none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub counts_dropped_emissions: bool,
 }
 
 /// Compact session rehydration result.

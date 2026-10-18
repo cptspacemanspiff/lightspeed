@@ -3988,3 +3988,156 @@ async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Res
     })
     .await
 }
+
+const SEQUENTIAL_AGENTS_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            let ran = 0;
+            let refused = null;
+            for (let i = 0; i < input.calls; i++) {
+                try {
+                    await env.agent.run({ agent: input.agent, input: "CHECK " + i });
+                    ran++;
+                } catch (error) {
+                    refused = [i, error.kind];
+                    break;
+                }
+            }
+            return { claim: input.claim, slept: 0, ran, refused };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_workflow_calls()
+-> anyhow::Result<()> {
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            // Each reload leaves out the child runs the program acknowledged.
+            session_continue_as_new_events: Some(1),
+            ..Default::default()
+        },
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let child_id = api::ProfileId::new(format!(
+                    "live_program_child_{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: api::AgentProfileInput {
+                        profile_id: child_id.clone(),
+                        display_name: Some("Live child".to_owned()),
+                        description: Some("Answers CHECK briefs".to_owned()),
+                        document: api::ProfileDocument {
+                            program: None,
+                            metadata: Default::default(),
+                            config: Some(api::SessionConfig::default()),
+                            instructions: Some(api::ProfileInstructions::Text {
+                                text: "You are a scripted child agent.".to_owned(),
+                            }),
+                            retention: None,
+                        },
+                    },
+                })
+                .await?;
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                let mut profile = program_profile(
+                    &profile_id,
+                    SEQUENTIAL_AGENTS_PROGRAM,
+                    &[("agent.run", None)],
+                );
+                // Enough descendants that the per-run cap is the limit.
+                profile.document.config = Some(api::SessionConfig {
+                    features: Some(api::FeaturesConfig {
+                        subagents: Some(api::SubagentsFeature {
+                            version: api::CURRENT_FEATURE_VERSION,
+                            agents: vec![api::SubagentAgentRef {
+                                profile_id: child_id.clone(),
+                            }],
+                            max_depth: 2,
+                            max_descendants: 40,
+                            max_concurrent: 4,
+                            deadline_ms: 120_000,
+                        }),
+                        ..api::FeaturesConfig::default()
+                    }),
+                    ..api::SessionConfig::default()
+                });
+                api.create_profile(api::ProfileCreateParams { profile })
+                    .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let cap = harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN;
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "capped", "agent": child_id.as_str(), "calls": cap + 1}),
+                )
+                .await?;
+                // Thirty-three child agents one after another.
+                let run = support::live::wait_for_terminal_run_with_timeout(
+                    &api,
+                    &session_id,
+                    &run.id,
+                    Duration::from_secs(180),
+                )
+                .await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                // The cap still counts the child runs the session dropped.
+                assert_eq!(output["ran"], json!(cap), "{output}");
+                assert_eq!(output["refused"][0], json!(cap), "{output}");
+
+                // The full log replays: nothing past the cap was recorded.
+                let state = programs::session_state(&store, &session_id).await?;
+                let execution_id = programs::program_execution_id(&state)?;
+                assert_eq!(
+                    state.code_tools.scopes[&execution_id].calls.len(),
+                    cap as usize
+                );
+                assert_eq!(
+                    state.workflow_tools.emission_count(
+                        harness::RunId::new(1),
+                        &harness::WorkflowToolId::new(tools::subagents::AGENT_RUN_WORKFLOW_TOOL_ID)
+                    ),
+                    cap
+                );
+                // The run's report reads the session's memory, which had left
+                // acknowledged calls out.
+                let snapshot = client
+                    .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(execution_id)
+                    .query(
+                        temporal_workflow::ProgramRunWorkflow::snapshot,
+                        (),
+                        temporalio_client::WorkflowQueryOptions::default(),
+                    )
+                    .await?;
+                let Some(temporal_workflow::ProgramRunTerminal::Completed { result }) =
+                    snapshot.terminal
+                else {
+                    anyhow::bail!("the run completed: {snapshot:?}");
+                };
+                let report = read_json(&store, result.report_ref.as_str()).await?;
+                let held = report["scope"]["calls"]
+                    .as_object()
+                    .map_or(0, |calls| calls.len());
+                assert!(held < cap as usize, "{}", report["scope"]);
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                for profile_id in [profile_id, child_id] {
+                    api.delete_profile(api::ProfileDeleteParams { profile_id })
+                        .await?;
+                }
+                Ok(())
+            })
+        },
+    )
+    .await
+}

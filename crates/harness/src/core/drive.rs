@@ -14267,7 +14267,7 @@ mod tests {
 
         let full = drive.state().clone();
         let mut trimmed = full.clone();
-        crate::trim_for_handoff(&mut trimmed);
+        crate::trim_for_handoff(&mut trimmed, true);
         let scope = &trimmed.code_tools.scopes[&execution_id];
         assert_eq!(
             scope.calls.keys().map(String::as_str).collect::<Vec<_>>(),

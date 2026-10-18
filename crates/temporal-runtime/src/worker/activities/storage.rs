@@ -84,7 +84,7 @@ pub(super) async fn create_or_load_session(
         (None, 0)
     } else {
         let mut core_state = reduced.core_state;
-        harness::trim_for_handoff(&mut core_state);
+        harness::trim_for_handoff(&mut core_state, request.counts_dropped_emissions);
         retain_kept_run_submissions(&core_state, &mut run_submissions);
         (Some(core_state), reduced.replayed_event_count)
     };
@@ -1067,6 +1067,7 @@ mod tests {
                 session_id: session_id.clone(),
                 delete_after_close_ms: None,
                 observed_at_ms: 2,
+                counts_dropped_emissions: true,
             },
         )
         .await

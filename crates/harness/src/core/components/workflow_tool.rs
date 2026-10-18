@@ -875,6 +875,12 @@ pub struct WorkflowToolState {
     pub start_requests: BTreeMap<WorkflowToolInvocationId, WorkflowToolInvocation>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub start_failures: BTreeMap<WorkflowToolInvocationId, BlobRef>,
+    /// Settled invocations of live runs left out of the memory a session's
+    /// workflow loads (`trim_for_handoff`), counted per run and tool so the
+    /// per-run cap still counts them. Only that memory has it; the log and
+    /// checkpoints hold every invocation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub emissions_dropped: BTreeMap<RunId, BTreeMap<WorkflowToolId, u32>>,
 }
 
 impl WorkflowToolState {
@@ -895,15 +901,24 @@ impl WorkflowToolState {
     }
 
     /// Per-run/per-tool invocation count across both bound emissions and
-    /// start requests; the deterministic cap covers them uniformly.
+    /// start requests, and those left out of memory; the deterministic cap
+    /// covers them uniformly.
     pub fn emission_count(&self, run_id: RunId, tool_id: &WorkflowToolId) -> u32 {
-        self.emissions
+        let held: u32 = self
+            .emissions
             .values()
             .chain(self.start_requests.values())
             .filter(|invocation| invocation.run_id == run_id && &invocation.tool_id == tool_id)
             .count()
             .try_into()
-            .unwrap_or(u32::MAX)
+            .unwrap_or(u32::MAX);
+        let dropped = self
+            .emissions_dropped
+            .get(&run_id)
+            .and_then(|tools| tools.get(tool_id))
+            .copied()
+            .unwrap_or(0);
+        held.saturating_add(dropped)
     }
 }
 

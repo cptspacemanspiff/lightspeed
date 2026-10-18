@@ -501,7 +501,8 @@ impl CodeToolScope {
     /// first `acknowledged` completions. Counts and positions stay absolute.
     /// Only calls with program request ids are left out, in completion
     /// order, so `left_out` can tell them from requests never admitted.
-    pub(crate) fn leave_out_acknowledged(&mut self) {
+    /// Returns the calls left out.
+    pub(crate) fn leave_out_acknowledged(&mut self) -> Vec<CodeToolCall> {
         let acknowledged = self.acknowledged.saturating_sub(self.completed_base);
         let acknowledged = usize::try_from(acknowledged)
             .unwrap_or(usize::MAX)
@@ -510,9 +511,12 @@ impl CodeToolScope {
             .iter()
             .take_while(|request_id| program_request_number(request_id).is_some())
             .count();
+        let mut left_out = Vec::with_capacity(numbered);
         for request_id in self.completed.drain(..numbered) {
-            let call = self.calls.remove(&request_id);
-            debug_assert!(call.is_some_and(|call| call.status.is_terminal()));
+            if let Some(call) = self.calls.remove(&request_id) {
+                debug_assert!(call.status.is_terminal());
+                left_out.push(call);
+            }
             self.cancel_requested_calls.remove(&request_id);
             self.calls_dropped += 1;
             self.completed_base += 1;
@@ -520,6 +524,7 @@ impl CodeToolScope {
                 .dropped_max_request
                 .max(program_request_number(&request_id).expect("numbered above"));
         }
+        left_out
     }
 }
 

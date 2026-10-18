@@ -37,6 +37,7 @@ pub(super) async fn initialize(
                 metadata: args.metadata.clone(),
                 delete_after_close_ms: args.delete_after_close_ms,
                 observed_at_ms,
+                counts_dropped_emissions: true,
             },
             activity_options(),
         )

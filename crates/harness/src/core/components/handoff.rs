@@ -10,7 +10,10 @@
 
 use std::collections::BTreeSet;
 
-use crate::{CoreAgentState, PromiseId, PromiseScope, RunId, ScopeOwner, WorkflowToolInvocation};
+use crate::{
+    CallContext, CoreAgentState, PromiseId, PromiseOwnership, PromiseScope, RunId, ScopeOwner,
+    ToolCallId, WorkflowToolInvocation,
+};
 
 /// How many completed runs' summaries the workflow keeps, newest first. The
 /// gateway pages runs and checks duplicate submissions against the complete
@@ -31,6 +34,12 @@ pub const HANDOFF_COMPLETED_RUNS: usize = 100;
 /// - A workflow-tool invocation stays while its run is live, a kept scope
 ///   names it as its parent, or one of its completion promises is pending. Its
 ///   delivery or start failure stays with it.
+/// - When `counts_dropped_emissions`, a live run's invocation made by a call
+///   left out goes too, with its completion promises, if they all settled and
+///   belong to the runtime (a joined call's reply, which only that call
+///   waited on). `WorkflowToolState::emissions_dropped` counts it for the
+///   per-run cap. A model-owned promise (a handle the program holds, as from
+///   `agent.spawn`) may still be awaited, so its invocation stays.
 /// - A promise stays while it is pending, detached (any later run may await a
 ///   session-scoped promise), scoped to a live run, or a completion promise of
 ///   a kept invocation.
@@ -39,7 +48,12 @@ pub const HANDOFF_COMPLETED_RUNS: usize = 100;
 /// Nothing left out is asked for again: admission treats a late delivery or
 /// cancel for an issued promise it no longer holds as a no-op, and an
 /// execution sends the cancels it owes settled starts before it hands over.
-pub fn trim_for_handoff(state: &mut CoreAgentState) {
+///
+/// `counts_dropped_emissions` says the workflow loading the result reads
+/// `emissions_dropped`. Code from before it would count only the invocations
+/// it holds, admit calls past the cap, and append events the full log then
+/// refuses to replay.
+pub fn trim_for_handoff(state: &mut CoreAgentState, counts_dropped_emissions: bool) {
     let CoreAgentState {
         runs,
         promises,
@@ -61,6 +75,7 @@ pub fn trim_for_handoff(state: &mut CoreAgentState) {
     };
 
     let mut parents = BTreeSet::new();
+    let mut left_out = BTreeSet::<ToolCallId>::new();
     code_tools.scopes.retain(|_, scope| {
         let run_id = match &scope.spec.owner {
             ScopeOwner::Run { run_id } => Some(*run_id),
@@ -77,7 +92,12 @@ pub fn trim_for_handoff(state: &mut CoreAgentState) {
             || scope.calls.values().any(|call| !call.status.is_terminal())
             || scope.withdrawn.iter().any(pending);
         if keep {
-            scope.leave_out_acknowledged();
+            left_out.extend(
+                scope
+                    .leave_out_acknowledged()
+                    .into_iter()
+                    .map(|call| call.call_id),
+            );
         }
         if keep
             && let ScopeOwner::ModelInvocation {
@@ -88,6 +108,53 @@ pub fn trim_for_handoff(state: &mut CoreAgentState) {
         }
         keep
     });
+
+    // A live run's settled invocations whose calls were left out, and their
+    // runtime-owned completion promises.
+    let settled_by_runtime = |promise_id: &PromiseId| {
+        promises.promises.get(promise_id).is_some_and(|promise| {
+            promise.status.is_terminal() && promise.ownership == PromiseOwnership::Runtime
+        })
+    };
+    let made_by_left_out_call = |invocation: &WorkflowToolInvocation| {
+        counts_dropped_emissions
+            && live_runs.contains(&invocation.run_id)
+            && matches!(&invocation.context, CallContext::Scope { tool_call_id }
+                if left_out.contains(tool_call_id))
+            && invocation
+                .completion_promises
+                .as_ref()
+                .is_none_or(|keyed| keyed.values().all(settled_by_runtime))
+    };
+    let mut dropped_promises = BTreeSet::new();
+    for invocations in [
+        &mut workflow_tools.emissions,
+        &mut workflow_tools.start_requests,
+    ] {
+        invocations.retain(|_, invocation| {
+            if !made_by_left_out_call(invocation) {
+                return true;
+            }
+            *workflow_tools
+                .emissions_dropped
+                .entry(invocation.run_id)
+                .or_default()
+                .entry(invocation.tool_id.clone())
+                .or_default() += 1;
+            dropped_promises.extend(
+                invocation
+                    .completion_promises
+                    .iter()
+                    .flat_map(|keyed| keyed.values().cloned()),
+            );
+            false
+        });
+    }
+
+    // Only a live run can emit again.
+    workflow_tools
+        .emissions_dropped
+        .retain(|run_id, _| live_runs.contains(run_id));
 
     let keep_invocation = |invocation: &WorkflowToolInvocation| {
         live_runs.contains(&invocation.run_id)
@@ -119,10 +186,11 @@ pub fn trim_for_handoff(state: &mut CoreAgentState) {
         .collect();
     promises.promises.retain(|promise_id, promise| {
         !promise.status.is_terminal()
-            || match promise.scope {
-                PromiseScope::Session => true,
-                PromiseScope::Run { run_id } => live_runs.contains(&run_id),
-            }
+            || (!dropped_promises.contains(promise_id)
+                && match promise.scope {
+                    PromiseScope::Session => true,
+                    PromiseScope::Run { run_id } => live_runs.contains(&run_id),
+                })
             || completions.contains(promise_id)
     });
     promises
@@ -368,7 +436,7 @@ mod tests {
     #[test]
     fn a_handoff_keeps_live_runs_and_work_in_progress_and_leaves_finished_work_behind() {
         let mut state = session();
-        trim_for_handoff(&mut state);
+        trim_for_handoff(&mut state, true);
 
         assert_eq!(
             state
@@ -419,6 +487,7 @@ mod tests {
         ] {
             let mut call = call.clone();
             call.spec.origin.request_id = format!("call-{number}");
+            call.call_id = ToolCallId::new(format!("code-tool:call-{number}"));
             call.status = serde_json::from_value(status).expect("status");
             scope.calls.insert(format!("call-{number}"), call);
         }
@@ -435,7 +504,7 @@ mod tests {
             .code_tools
             .scopes
             .insert("program".to_owned(), acknowledged_scope(2));
-        trim_for_handoff(&mut state);
+        trim_for_handoff(&mut state, true);
 
         let scope = &state.code_tools.scopes["program"];
         assert_eq!(
@@ -446,7 +515,11 @@ mod tests {
         assert_eq!(scope.completed, ["call-3"]);
         assert!(scope.cancel_requested_calls.is_empty());
         assert_eq!(
-            (scope.admitted(), scope.recorded(), scope.dropped_max_request),
+            (
+                scope.admitted(),
+                scope.recorded(),
+                scope.dropped_max_request
+            ),
             (4, 3, 2),
             "counts stay absolute"
         );
@@ -469,8 +542,81 @@ mod tests {
             .code_tools
             .scopes
             .insert("program".to_owned(), acknowledged_scope(0));
-        trim_for_handoff(&mut state);
+        trim_for_handoff(&mut state, true);
         assert_eq!(state.code_tools.scopes["program"], acknowledged_scope(0));
+    }
+
+    #[test]
+    fn a_live_runs_workflow_calls_left_out_go_with_their_replies_and_still_count() {
+        let session = || {
+            let mut state = session();
+            state
+                .code_tools
+                .scopes
+                .insert("program".to_owned(), acknowledged_scope(2));
+            for (n, ownership) in [(7, "runtime"), (8, "model"), (9, "runtime")] {
+                let mut promise = promise(n, run_scope(151), "resolved");
+                promise.ownership = serde_json::from_value(json!(ownership)).expect("ownership");
+                state
+                    .promises
+                    .promises
+                    .insert(promise.promise_id.clone(), promise);
+            }
+            state.id_cursors.last_promise_id = 9;
+            // Calls 1 and 2 are left out, call 3 is not acknowledged. Call 1
+            // joined its child (a runtime-owned reply); call 2 spawned one
+            // (the program holds a model-owned handle).
+            for (n, call, promise) in [(20, 1, 7), (21, 2, 8), (22, 3, 9)] {
+                let mut invocation = invocation(n, 151, &[("reply", promise)]);
+                invocation.context = CallContext::Scope {
+                    tool_call_id: ToolCallId::new(format!("code-tool:call-{call}")),
+                };
+                state
+                    .workflow_tools
+                    .start_requests
+                    .insert(invocation.invocation_id.clone(), invocation);
+            }
+            state
+        };
+        let tool = crate::WorkflowToolId::new("subagent-run");
+        let run = RunId::new(151);
+        let mut state = session();
+        let counted = state.workflow_tools.emission_count(run, &tool);
+        assert_eq!(counted, 4, "the active run's own call and calls 1 to 3");
+        trim_for_handoff(&mut state, true);
+
+        assert_eq!(
+            invocation_numbers(&state.workflow_tools.start_requests),
+            [
+                invocation_id(11),
+                invocation_id(12),
+                invocation_id(13),
+                invocation_id(21),
+                invocation_id(22)
+            ],
+            "of the program's calls, only call 1's invocation goes"
+        );
+        assert_eq!(promise_numbers(&state), [2, 3, 4, 5, 6, 8, 9]);
+        assert_eq!(
+            state.workflow_tools.emissions_dropped,
+            [(run, [(tool.clone(), 1)].into())].into()
+        );
+        assert_eq!(state.workflow_tools.emission_count(run, &tool), counted);
+        // The count crosses the activity boundary with the state.
+        let carried: crate::WorkflowToolState =
+            serde_json::from_value(serde_json::to_value(&state.workflow_tools).unwrap()).unwrap();
+        assert_eq!(carried, state.workflow_tools);
+
+        // A workflow that does not read the count gets the invocation.
+        let mut state = session();
+        trim_for_handoff(&mut state, false);
+        assert!(
+            state.workflow_tools.start_requests.contains_key(
+                &crate::WorkflowToolInvocationId::try_new(invocation_id(20)).unwrap()
+            )
+        );
+        assert!(state.workflow_tools.emissions_dropped.is_empty());
+        assert_eq!(promise_numbers(&state), [2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -487,9 +633,9 @@ mod tests {
         once.code_tools
             .scopes
             .insert("program".to_owned(), acknowledged_scope(2));
-        trim_for_handoff(&mut once);
+        trim_for_handoff(&mut once, true);
         let mut twice = once.clone();
-        trim_for_handoff(&mut twice);
+        trim_for_handoff(&mut twice, true);
         assert_eq!(once, twice);
     }
 }
