@@ -321,13 +321,18 @@ What goes where:
   a configurable TTL (Cloudflare's default is 24 hours) as a rejection. The
   decision is a promise the session owns, so the executor needs nothing new:
   a parked call is just a slow call.
-- **Retention `Indexed`.** State keeps full records only for non-terminal calls.
-  Terminal calls shrink to a compact index entry:
-  `request_id → { spec_digest, status, output_ref | error_ref }`. Admission dedup
-  needs only the digest. Full specs and results stay in events and CAS, and the
-  replaying executor fetches them through a batched
-  `scope_recorded_outcomes(scope_id, after_request, limit)` query instead of one
-  Update per recorded call.
+- **Acknowledged retention** (replaces the planned `Indexed` retention, user,
+  2026-10-18). With each admission and close, the program acknowledges the
+  outcomes it had collected when its current workflow task began. Those were
+  delivered in recorded history, so a replay never asks for them again, and no
+  admission before them can be re-sent. The session records the highest
+  acknowledgement on the scope. The load at its next continue-as-new leaves the
+  acknowledged finished calls out of the workflow's copy and keeps absolute
+  counts (calls dropped, the base position of the completed list, the highest
+  dropped request). A re-sent request at or below that request is refused as a
+  conflict. Full specs and results stay in events and CAS. A session execution
+  never drops calls while it runs, and runs on code without acknowledgements
+  drop nothing.
 - **Wire compatibility.**
   - Keep the stored kind strings `lightspeed.core.code_tool.*` and the existing
     field names. `CallScopeSpec` decodes legacy events (no `owner`/`policy`) as
@@ -519,7 +524,8 @@ loop:
   function, which builds a fresh instance and feeds it the same inputs in
   the same order, so it issues the same requests; Temporal's command check
   catches a divergence. Re-issued admissions are no-ops at the session,
-  which dedups by request id.
+  which dedups by request id until the program has acknowledged them
+  ("Acknowledged retention").
 - **Waking.** When a call in a run-owned scope completes, the session sends
   the program workflow a `ScopeProgress { execution_id, completed }`
   emission with the scope's count of recorded outcomes. The workflow
@@ -638,7 +644,8 @@ loop:
        with `cancel_pending` (close and return, no polling), then the
        workflow suspends on `ScopeProgress` wakes until
        `recorded == admitted`, exactly like a JS await but with nothing
-       delivered to the engine, and reads the outcomes for the run report.
+       delivered to the engine, and reads the counts and the calls the session
+       still holds for the run report.
        It holds no worker and has no deadline (today's 10 s polling inside
        `program_conclude`, and its "outcome unknown", go away). Every way a
        call can end must emit `ScopeProgress`. Built: the close is the
