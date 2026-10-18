@@ -886,6 +886,8 @@ mod tests {
                 cancel_requested: false,
                 withdrawals: 0,
                 withdrawals_settled: 0,
+                admitted: 0,
+                recorded: 0,
                 bindings: Default::default(),
                 contracts: Default::default(),
                 calls: calls
@@ -1290,6 +1292,8 @@ mod tests {
                 cancel_requested: true,
                 withdrawals: 0,
                 withdrawals_settled: 0,
+                admitted: 0,
+                recorded: 0,
                 bindings: Default::default(),
                 contracts: Default::default(),
                 calls: [(

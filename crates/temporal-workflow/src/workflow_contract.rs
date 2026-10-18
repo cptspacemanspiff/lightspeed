@@ -453,6 +453,8 @@ fn code_tool_vectors() -> Value {
             bindings: BTreeMap::from([(binding_id, tool_name)]),
             contracts: BTreeMap::new(),
             calls: BTreeMap::from([(request_id, outcome.clone())]),
+            admitted: 1,
+            recorded: 1,
             withdrawals: 1,
             withdrawals_settled: 1,
         },

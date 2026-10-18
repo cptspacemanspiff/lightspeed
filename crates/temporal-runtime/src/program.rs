@@ -145,13 +145,17 @@ impl ProgramRunner {
                 };
             }
         };
+        // A session worker from before the totals sends none: count the
+        // calls it lists.
         Ok(ProgramCloseActivityResult::Closed {
-            calls: scope.calls.len() as u64,
-            recorded: scope
-                .calls
-                .values()
-                .filter(|call| call.status.is_terminal())
-                .count() as u64,
+            calls: scope.admitted.max(scope.calls.len() as u64),
+            recorded: scope.recorded.max(
+                scope
+                    .calls
+                    .values()
+                    .filter(|call| call.status.is_terminal())
+                    .count() as u64,
+            ),
             withdrawals: scope.withdrawals,
             withdrawals_settled: scope.withdrawals_settled,
             context_error,
@@ -604,6 +608,8 @@ mod tests {
             cancel_requested: false,
             withdrawals: 0,
             withdrawals_settled: 0,
+            admitted: 0,
+            recorded: 0,
             bindings: [
                 ("h-read", "vfs_read_file"),
                 ("h-sleep", "time_sleep"),

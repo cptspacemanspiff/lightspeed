@@ -697,6 +697,8 @@ mod tests {
             cancel_requested: false,
             withdrawals: 0,
             withdrawals_settled: 0,
+            admitted: 0,
+            recorded: 0,
             bindings: [
                 ("binding-a".into(), ToolName::new("mcp.read")),
                 ("binding-b".into(), ToolName::new("timer_sleep")),

@@ -422,9 +422,18 @@ pub struct CodeToolScope {
     pub cancel_requested: bool,
     pub calls: BTreeMap<String, CodeToolCall>,
     /// Request ids in the order their completions were recorded: the log
-    /// order a replaying executor is fed outcomes in.
+    /// order a replaying executor is fed outcomes in. It starts at absolute
+    /// position `completed_base`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed: Vec<String>,
+    /// Completions recorded before `completed` begins: acknowledged by the
+    /// program and left out of memory loaded at a handoff. Positions and
+    /// counts stay absolute, so this memory and the full log decide alike.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub completed_base: u64,
+    /// Admitted calls left out of `calls` the same way; all had outcomes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub calls_dropped: u64,
     /// The program context a run-owned scope's program kept, passed when
     /// the scope closed. It is written only if the run completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,15 +450,37 @@ pub struct CodeToolScope {
 }
 
 impl CodeToolScope {
-    /// Recorded outcomes after the first `after` completions, in log order.
-    pub fn recorded_outcomes(&self, after: usize, limit: usize) -> Vec<&CodeToolCall> {
-        self.completed
-            .iter()
-            .skip(after)
-            .take(limit)
-            .filter_map(|request_id| self.calls.get(request_id))
-            .collect()
+    /// Recorded outcomes after the first `after` completions, in log order;
+    /// `None` when some of them were left out of memory (before
+    /// `completed_base`).
+    pub fn recorded_outcomes(&self, after: u64, limit: usize) -> Option<Vec<&CodeToolCall>> {
+        let skip = after.checked_sub(self.completed_base)?;
+        Some(
+            self.completed
+                .iter()
+                .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+                .take(limit)
+                .filter_map(|request_id| self.calls.get(request_id))
+                .collect(),
+        )
     }
+
+    /// Calls ever admitted to the scope, including those left out of memory.
+    pub fn admitted(&self) -> u64 {
+        self.calls_dropped
+            .saturating_add(u64::try_from(self.calls.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Completions ever recorded in the scope, including those left out of
+    /// memory.
+    pub fn recorded(&self) -> u64 {
+        self.completed_base
+            .saturating_add(u64::try_from(self.completed.len()).unwrap_or(u64::MAX))
+    }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,7 +917,7 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
         return Err(invalid("code tool is outside the execution grant"));
     }
     let limits = scope.spec.policy.limits;
-    if scope.calls.len() >= limits.max_calls as usize {
+    if scope.admitted() >= u64::from(limits.max_calls) {
         return Err(invalid("code tool execution exhausted its call budget"));
     }
     if scope
@@ -1845,6 +1876,8 @@ pub(crate) fn apply_code_tool_event(
                     cancel_requested: false,
                     calls: BTreeMap::new(),
                     completed: Vec::new(),
+                    completed_base: 0,
+                    calls_dropped: 0,
                     program_context: None,
                     cancel_requested_calls: BTreeSet::new(),
                     withdrawn: BTreeSet::new(),
@@ -2068,6 +2101,88 @@ mod tests {
 
     fn invocation_id(fill: char) -> String {
         format!("wti:sha256:{}", fill.to_string().repeat(64))
+    }
+
+    /// A run-owned scope whose calls 1 and 2 a handoff left out, holding
+    /// calls 3 and 4.
+    fn scope_after_a_handoff() -> CodeToolScope {
+        let call = |n: u64| {
+            serde_json::json!({
+                "spec": {
+                    "origin": { "execution_id": "wtx:run", "request_id": format!("call-{n}") },
+                    "binding_id": format!("binding:sha256:{n:064x}"),
+                    "tool_id": "time.sleep",
+                    "tool_name": "time_sleep",
+                    "arguments_ref": format!("sha256:{n:064x}"),
+                },
+                "call_id": format!("code-tool:{n}"),
+                "promise_id_base": n,
+                "status": {
+                    "kind": "completed",
+                    "result": {
+                        "call_id": format!("code-tool:{n}"),
+                        "status": "succeeded",
+                        "output_ref": null,
+                        "error_ref": null,
+                    },
+                },
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "toolset_revision": 1,
+            "spec": {
+                "execution_id": "wtx:run",
+                "owner": { "kind": "run", "run_id": 1 },
+                "policy": {
+                    "binding_mode": "contract",
+                    "revalidation": "toolset_revision",
+                    "completion": "ack",
+                    "limits": { "max_calls": 10, "max_in_flight": 4 },
+                    "retention": "full_in_state",
+                    "approvals": "park",
+                },
+                "bindings": {},
+            },
+            "closed": false,
+            "cancel_requested": false,
+            "calls": { "call-3": call(3), "call-4": call(4) },
+            "completed": ["call-3", "call-4"],
+            "completed_base": 2,
+            "calls_dropped": 2,
+        }))
+        .expect("scope")
+    }
+
+    #[test]
+    fn a_scope_keeps_counts_and_positions_absolute_when_calls_are_left_out() {
+        let scope = scope_after_a_handoff();
+        assert_eq!(scope.admitted(), 4);
+        assert_eq!(scope.recorded(), 4);
+        let outcomes = |after: u64| -> Option<Vec<String>> {
+            let calls: Vec<&CodeToolCall> = scope.recorded_outcomes(after, 10)?;
+            Some(
+                calls
+                    .into_iter()
+                    .map(|call| call.spec.origin.request_id.clone())
+                    .collect(),
+            )
+        };
+        assert_eq!(outcomes(1), None, "position 1 was left out");
+        assert_eq!(
+            outcomes(2),
+            Some(vec!["call-3".to_owned(), "call-4".to_owned()])
+        );
+        assert_eq!(outcomes(3), Some(vec!["call-4".to_owned()]));
+        assert_eq!(outcomes(4), Some(Vec::new()));
+
+        let mut whole = scope.clone();
+        whole.completed_base = 0;
+        whole.calls_dropped = 0;
+        let stored = serde_json::to_value(&whole).expect("serialize");
+        assert!(
+            stored.get("completed_base").is_none() && stored.get("calls_dropped").is_none(),
+            "a scope that left nothing out is stored as before"
+        );
     }
 
     #[test]

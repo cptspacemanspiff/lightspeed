@@ -12968,6 +12968,7 @@ mod tests {
         assert_eq!(
             scope
                 .recorded_outcomes(1, 10)
+                .expect("every outcome is held")
                 .iter()
                 .map(|call| call.spec.origin.request_id.as_str())
                 .collect::<Vec<_>>(),

@@ -259,6 +259,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "message": "scope is closed"
       },
       "report": {
+        "admitted": 1,
         "bindings": {
           "binding:vector": "read_file"
         },
@@ -274,6 +275,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "cancel_requested": true,
         "closed": true,
         "execution_id": "execution:vector",
+        "recorded": 1,
         "withdrawals": 1,
         "withdrawals_settled": 1
       },

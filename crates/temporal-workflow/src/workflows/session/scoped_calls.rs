@@ -215,9 +215,14 @@ pub(super) fn recorded_outcomes(
             "recorded outcome page size is outside its bounded range",
         ));
     }
-    let after = usize::try_from(request.after).unwrap_or(usize::MAX);
     let outcomes = scope
-        .recorded_outcomes(after, request.limit as usize)
+        .recorded_outcomes(request.after, request.limit as usize)
+        .ok_or_else(|| {
+            rejected(
+                Rejection::Conflict,
+                "recorded outcomes before this position were acknowledged and are no longer held",
+            )
+        })?
         .into_iter()
         .map(crate::CodeToolCallOutcome::from)
         .collect::<Vec<_>>();
@@ -418,7 +423,7 @@ fn invocation_command(
             ));
         }
         let limits = scope.spec.policy.limits;
-        if scope.calls.len() >= limits.max_calls as usize
+        if scope.admitted() >= u64::from(limits.max_calls)
             || scope
                 .calls
                 .values()
@@ -1355,6 +1360,8 @@ mod tests {
                 cancel_requested: false,
                 calls,
                 completed: Vec::new(),
+                completed_base: 0,
+                calls_dropped: 0,
                 program_context: None,
                 cancel_requested_calls: Default::default(),
                 withdrawn: Default::default(),
@@ -1472,5 +1479,81 @@ mod tests {
         state.code_tools.waiters -= 1;
         assert!(wait_loop::workflow_state_is_closed_and_quiescent(&state));
         assert!(wait_loop::workflow_state_has_immediate_work(&state));
+    }
+
+    #[test]
+    fn recorded_outcomes_are_read_by_absolute_position_after_a_handoff() {
+        let mut state = AgentSessionWorkflow::default();
+        let scope: harness::CodeToolScope = serde_json::from_value(serde_json::json!({
+            "toolset_revision": 1,
+            "spec": {
+                "execution_id": "wtx:run",
+                "owner": { "kind": "run", "run_id": 1 },
+                "policy": {
+                    "binding_mode": "contract",
+                    "revalidation": "toolset_revision",
+                    "completion": "ack",
+                    "limits": { "max_calls": 10, "max_in_flight": 4 },
+                    "retention": "full_in_state",
+                    "approvals": "park",
+                },
+                "bindings": {},
+            },
+            "closed": false,
+            "cancel_requested": false,
+            "calls": {
+                "call-3": {
+                    "spec": {
+                        "origin": { "execution_id": "wtx:run", "request_id": "call-3" },
+                        "binding_id": format!("binding:sha256:{:064x}", 3),
+                        "tool_id": "time.sleep",
+                        "tool_name": "time_sleep",
+                        "arguments_ref": format!("sha256:{:064x}", 3),
+                    },
+                    "call_id": "code-tool:3",
+                    "promise_id_base": 3,
+                    "status": {
+                        "kind": "completed",
+                        "result": {
+                            "call_id": "code-tool:3",
+                            "status": "succeeded",
+                            "output_ref": null,
+                            "error_ref": null,
+                        },
+                    },
+                },
+            },
+            "completed": ["call-3"],
+            "completed_base": 2,
+            "calls_dropped": 2,
+        }))
+        .expect("scope");
+        state
+            .core_state
+            .code_tools
+            .scopes
+            .insert("wtx:run".to_owned(), scope);
+        let query = |after| {
+            recorded_outcomes(
+                &state,
+                &crate::ScopeRecordedOutcomesRequest {
+                    execution_id: "wtx:run".to_owned(),
+                    after,
+                    limit: 10,
+                },
+            )
+        };
+
+        let left_out = query(1).expect_err("position 1 was left out");
+        assert_eq!(left_out.kind, Rejection::Conflict);
+        let page = query(2).expect("outcomes from the base");
+        assert_eq!(
+            page.outcomes
+                .iter()
+                .map(|outcome| outcome.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["call-3"]
+        );
+        assert_eq!(page.next, 3);
     }
 }

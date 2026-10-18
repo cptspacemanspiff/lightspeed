@@ -198,7 +198,7 @@ impl AgentSessionWorkflow {
                 let (_, settled) = harness::code_tool_scope_withdrawals(&self.core_state, scope);
                 progressed.insert(
                     scope.spec.execution_id.clone(),
-                    (entry.position.seq, scope.completed.len() as u64, settled),
+                    (entry.position.seq, scope.recorded(), settled),
                 );
             }
         }

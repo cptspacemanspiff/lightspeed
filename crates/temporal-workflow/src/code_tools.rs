@@ -152,7 +152,15 @@ pub struct CodeToolScopeReport {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub contracts: BTreeMap<String, harness::ContractBinding>,
     /// Requests are keyed by execution-local request id, never arrival order.
+    /// Calls the program acknowledged may be left out; `admitted` and
+    /// `recorded` count every call.
     pub calls: BTreeMap<String, CodeToolCallOutcome>,
+    /// Calls ever admitted to the scope.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub admitted: u64,
+    /// Calls ever given an outcome.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub recorded: u64,
     /// Handles a program run's close withdrew (opened input requests), and
     /// how many of them have settled. A run's exit waits for all of them.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -215,6 +223,8 @@ impl From<&harness::CodeToolScope> for CodeToolScopeReport {
                 .iter()
                 .map(|(id, call)| (id.clone(), CodeToolCallOutcome::from(call)))
                 .collect(),
+            admitted: scope.admitted(),
+            recorded: scope.recorded(),
         }
     }
 }

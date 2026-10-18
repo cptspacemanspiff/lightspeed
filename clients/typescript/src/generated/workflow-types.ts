@@ -732,6 +732,10 @@ export interface CodeToolRejection {
  */
 export interface CodeToolScopeReport {
   /**
+   * Calls ever admitted to the scope.
+   */
+  admitted?: number;
+  /**
    * Exposed names keyed by the opaque handles accepted by invoke requests.
    */
   bindings: {
@@ -739,6 +743,8 @@ export interface CodeToolScopeReport {
   };
   /**
    * Requests are keyed by execution-local request id, never arrival order.
+   * Calls the program acknowledged may be left out; `admitted` and
+   * `recorded` count every call.
    */
   calls: {
     [k: string]: CodeToolCallOutcome;
@@ -752,6 +758,10 @@ export interface CodeToolScopeReport {
     [k: string]: ContractBinding;
   };
   execution_id: string;
+  /**
+   * Calls ever given an outcome.
+   */
+  recorded?: number;
   /**
    * Handles a program run's close withdrew (opened input requests), and
    * how many of them have settled. A run's exit waits for all of them.
