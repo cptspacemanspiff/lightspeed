@@ -555,19 +555,27 @@ impl Default for CodeModeFeature {
     }
 }
 
-/// Grants sub-agent delegation: `agent_run` (joined, result inline) and
-/// `agent_spawn` (promise, joined with `await`) over the listed agent
-/// profiles. Limits are root-scoped and attenuating: every descendant of a
-/// root session counts against the root, and a nested grant can narrow but
-/// never widen the limits pinned on its origin.
+/// Grants delegation to child sessions: `agent_run` (joined, result inline)
+/// and `agent_spawn` (promise, joined with `await`) over the listed agent
+/// profiles, and `program_run` / `program_spawn` over the listed program
+/// profiles. At least one of the two lists must be non-empty. Limits are
+/// root-scoped and attenuating: every descendant of a root session, agent or
+/// program, counts against the root, and a nested grant can narrow but never
+/// widen the limits pinned on its origin.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubagentsFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
-    /// The agent menu. Every id must name an existing profile; the model
-    /// picks by id and reads descriptions from the sub-agent catalog.
+    /// The agent menu. Every id must name an existing agent profile; the
+    /// model picks by id and reads descriptions from the sub-agent catalog.
+    #[serde(default)]
     pub agents: Vec<SubagentAgentRef>,
+    /// The program menu. Every id must name an existing program profile (one
+    /// with a `program`); a child program runs once with the caller's input
+    /// and returns its output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<SubagentProgramRef>,
     /// A child at depth `d` may spawn only while `d + 1 <= maxDepth`.
     #[serde(default = "default_subagent_max_depth")]
     pub max_depth: u32,
@@ -586,6 +594,12 @@ pub struct SubagentsFeature {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubagentAgentRef {
+    pub profile_id: ProfileId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubagentProgramRef {
     pub profile_id: ProfileId,
 }
 

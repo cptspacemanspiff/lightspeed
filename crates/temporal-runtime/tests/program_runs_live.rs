@@ -3923,6 +3923,7 @@ async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Res
             profile.document.config = Some(api::SessionConfig {
                 features: Some(api::FeaturesConfig {
                     subagents: Some(api::SubagentsFeature {
+                        programs: Vec::new(),
                         version: api::CURRENT_FEATURE_VERSION,
                         agents: vec![api::SubagentAgentRef {
                             profile_id: child_id.clone(),
@@ -4052,6 +4053,7 @@ async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_w
                 profile.document.config = Some(api::SessionConfig {
                     features: Some(api::FeaturesConfig {
                         subagents: Some(api::SubagentsFeature {
+                            programs: Vec::new(),
                             version: api::CURRENT_FEATURE_VERSION,
                             agents: vec![api::SubagentAgentRef {
                                 profile_id: child_id.clone(),

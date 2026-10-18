@@ -640,13 +640,15 @@ impl SessionPreparationService {
         self.validate_workspace_attachment_targets(&config.features)
             .await?;
         if let Some(subagents) = &config.features.subagents {
-            for agent in &subagents.agents {
-                let id = api::ProfileId::try_new(agent.profile_id.clone())
+            for (kind, profile_id) in api_config::subagent_profiles(subagents) {
+                let id = api::ProfileId::try_new(profile_id.to_owned())
                     .map_err(|e| AgentApiError::invalid_request(e.to_string()))?;
-                self.store
+                let profile = self
+                    .store
                     .read_agent_profile(&id)
                     .await
                     .map_err(profiles::map_profile_error)?;
+                kind.check(&profile)?;
             }
         }
         Ok(())

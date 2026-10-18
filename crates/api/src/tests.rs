@@ -3141,6 +3141,7 @@ fn test_profile(profile_id: ProfileId) -> AgentProfile {
             config: Some(SessionConfig {
                 features: Some(FeaturesConfig {
                     subagents: Some(SubagentsFeature {
+                        programs: Vec::new(),
                         version: CURRENT_FEATURE_VERSION,
                         agents: vec![SubagentAgentRef {
                             profile_id: ProfileId::new("reviewer"),

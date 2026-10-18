@@ -80,10 +80,9 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       }],
       "version": 0,
     },
-    // Grants sub-agent delegation: \`agent_run\` (joined, result inline) and \`agent_spawn\` (promise, joined with \`await\`) over the listed agent profiles. Limits are root-scoped and attenuating: every descendant of a root session counts against the root, and a nested grant can narrow but never widen the limits pinned on its origin.
+    // Grants delegation to child sessions: \`agent_run\` (joined, result inline) and \`agent_spawn\` (promise, joined with \`await\`) over the listed agent profiles, and \`program_run\` / \`program_spawn\` over the listed program profiles. At least one of the two lists must be non-empty. Limits are root-scoped and attenuating: every descendant of a root session, agent or program, counts against the root, and a nested grant can narrow but never widen the limits pinned on its origin.
     "subagents": {
-      // The agent menu. Every id must name an existing profile; the model picks by id and reads descriptions from the sub-agent catalog.
-      // (required when this object is present)
+      // The agent menu. Every id must name an existing agent profile; the model picks by id and reads descriptions from the sub-agent catalog.
       "agents": [{
         // (required when this object is present)
         "profileId": "string",
@@ -96,6 +95,11 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       "maxDepth": 0,
       // Lifetime total of sessions ever created under the root.
       "maxDescendants": 0,
+      // The program menu. Every id must name an existing program profile (one with a \`program\`); a child program runs once with the caller's input and returns its output.
+      "programs": [{
+        // (required when this object is present)
+        "profileId": "string",
+      }],
       "version": 0,
     },
     // Grants timer promises through the sleep tool plus the base concurrency tools (await/cancel/detach).

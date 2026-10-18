@@ -411,17 +411,22 @@ impl CodeModeFeature {
     }
 }
 
-/// Grants sub-agent delegation: `agent_run` (joined) and `agent_spawn`
-/// (promise) over the allowlisted agent profiles, bounded by root-scoped,
-/// attenuating limits.
+/// Grants delegation to child sessions: `agent_run` (joined) and
+/// `agent_spawn` (promise) over the allowlisted agent profiles, and
+/// `program_run` / `program_spawn` over the allowlisted program profiles, all
+/// bounded by one set of root-scoped, attenuating limits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentsFeature {
     #[serde(default = "default_feature_version")]
     pub version: u32,
     /// The agent menu: profiles the model may run. Ids must name existing
-    /// profiles at admission; the list is the authority.
+    /// agent profiles at admission; the list is the authority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<SubagentAgentConfig>,
+    /// The program menu, the same way: ids must name existing program
+    /// profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<SubagentProgramConfig>,
     #[serde(flatten)]
     pub limits: SubagentLimits,
 }
@@ -431,6 +436,7 @@ impl Default for SubagentsFeature {
         Self {
             version: CURRENT_FEATURE_VERSION,
             agents: Vec::new(),
+            programs: Vec::new(),
             limits: SubagentLimits::default(),
         }
     }
@@ -442,10 +448,21 @@ impl SubagentsFeature {
             .iter()
             .any(|agent| agent.profile_id == profile_id)
     }
+
+    pub fn program_allowed(&self, profile_id: &str) -> bool {
+        self.programs
+            .iter()
+            .any(|program| program.profile_id == profile_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentAgentConfig {
+    pub profile_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentProgramConfig {
     pub profile_id: String,
 }
 
@@ -940,22 +957,32 @@ fn validate_features(
 }
 
 fn validate_subagents_feature(subagents: &SubagentsFeature) -> Result<(), DomainError> {
-    if subagents.agents.is_empty() {
+    if subagents.agents.is_empty() && subagents.programs.is_empty() {
         return Err(DomainError::InvariantViolation(
-            "subagents feature must list at least one agent profile".to_owned(),
+            "subagents feature must list at least one agent or program profile".to_owned(),
         ));
     }
+    // A profile is an agent or a program, so no id belongs in both lists.
     let mut seen = std::collections::BTreeSet::new();
-    for agent in &subagents.agents {
-        if agent.profile_id.trim().is_empty() {
-            return Err(DomainError::InvariantViolation(
-                "subagents agent profile id must be non-empty".to_owned(),
-            ));
-        }
-        if !seen.insert(agent.profile_id.as_str()) {
+    let listed = subagents
+        .agents
+        .iter()
+        .map(|agent| ("agent", agent.profile_id.as_str()))
+        .chain(
+            subagents
+                .programs
+                .iter()
+                .map(|program| ("program", program.profile_id.as_str())),
+        );
+    for (kind, profile_id) in listed {
+        if profile_id.trim().is_empty() {
             return Err(DomainError::InvariantViolation(format!(
-                "subagents agent profile id is listed twice: {}",
-                agent.profile_id
+                "subagents {kind} profile id must be non-empty"
+            )));
+        }
+        if !seen.insert(profile_id) {
+            return Err(DomainError::InvariantViolation(format!(
+                "subagents profile id is listed twice: {profile_id}"
             )));
         }
     }
@@ -1950,6 +1977,45 @@ mod tests {
                 Err(DomainError::InvariantViolation(_))
             ));
         }
+    }
+
+    #[test]
+    fn a_subagents_grant_lists_agents_or_programs_and_no_profile_twice() {
+        let mut config = config(ProviderApiKind::OpenAiResponses, None);
+        let grant = |agents: &[&str], programs: &[&str]| SubagentsFeature {
+            agents: agents
+                .iter()
+                .map(|id| SubagentAgentConfig {
+                    profile_id: (*id).to_owned(),
+                })
+                .collect(),
+            programs: programs
+                .iter()
+                .map(|id| SubagentProgramConfig {
+                    profile_id: (*id).to_owned(),
+                })
+                .collect(),
+            ..SubagentsFeature::default()
+        };
+        for valid in [grant(&["reviewer"], &[]), grant(&[], &["checker"])] {
+            config.features.subagents = Some(valid);
+            config.validate().expect("one list is enough");
+        }
+        for invalid in [
+            grant(&[], &[]),
+            grant(&["checker"], &["checker"]),
+            grant(&[], &["checker", "checker"]),
+            grant(&[], &[" "]),
+        ] {
+            config.features.subagents = Some(invalid);
+            assert!(matches!(
+                config.validate(),
+                Err(DomainError::InvariantViolation(_))
+            ));
+        }
+        let granted = grant(&["reviewer"], &["checker"]);
+        assert!(granted.agent_allowed("reviewer") && !granted.agent_allowed("checker"));
+        assert!(granted.program_allowed("checker") && !granted.program_allowed("reviewer"));
     }
 
     #[test]

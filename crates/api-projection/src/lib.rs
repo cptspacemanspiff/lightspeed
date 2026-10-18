@@ -2471,6 +2471,22 @@ fn subagents_feature_to_api(
                 })
             })
             .collect::<Result<Vec<_>, AgentApiError>>()?,
+        programs: subagents
+            .programs
+            .iter()
+            .map(|program| {
+                Ok(api::SubagentProgramRef {
+                    profile_id: api::ProfileId::try_new(program.profile_id.clone()).map_err(
+                        |error| {
+                            AgentApiError::internal(format!(
+                                "invalid subagent program profile id {}: {error}",
+                                program.profile_id
+                            ))
+                        },
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, AgentApiError>>()?,
         max_depth: subagents.limits.max_depth,
         max_descendants: subagents.limits.max_descendants,
         max_concurrent: subagents.limits.max_concurrent,
@@ -5074,6 +5090,7 @@ mod tests {
                     }),
                 }),
                 subagents: Some(harness::SubagentsFeature {
+                    programs: Vec::new(),
                     version: harness::CURRENT_FEATURE_VERSION,
                     agents: vec![harness::SubagentAgentConfig {
                         profile_id: "researcher".to_owned(),
@@ -5162,6 +5179,7 @@ mod tests {
                         }),
                     }),
                     subagents: Some(api::SubagentsFeature {
+                        programs: Vec::new(),
                         version: api::CURRENT_FEATURE_VERSION,
                         agents: vec![api::SubagentAgentRef {
                             profile_id: api::ProfileId::try_new("researcher".to_owned())

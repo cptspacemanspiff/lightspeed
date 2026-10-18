@@ -2587,21 +2587,23 @@ export interface McpServerAttachment {
   tools?: string[] | null;
 }
 /**
- * Grants sub-agent delegation: `agent_run` (joined, result inline) and
- * `agent_spawn` (promise, joined with `await`) over the listed agent
- * profiles. Limits are root-scoped and attenuating: every descendant of a
- * root session counts against the root, and a nested grant can narrow but
- * never widen the limits pinned on its origin.
+ * Grants delegation to child sessions: `agent_run` (joined, result inline)
+ * and `agent_spawn` (promise, joined with `await`) over the listed agent
+ * profiles, and `program_run` / `program_spawn` over the listed program
+ * profiles. At least one of the two lists must be non-empty. Limits are
+ * root-scoped and attenuating: every descendant of a root session, agent or
+ * program, counts against the root, and a nested grant can narrow but never
+ * widen the limits pinned on its origin.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SubagentsFeature".
  */
 export interface SubagentsFeature {
   /**
-   * The agent menu. Every id must name an existing profile; the model
-   * picks by id and reads descriptions from the sub-agent catalog.
+   * The agent menu. Every id must name an existing agent profile; the
+   * model picks by id and reads descriptions from the sub-agent catalog.
    */
-  agents: SubagentAgentRef[];
+  agents?: SubagentAgentRef[];
   /**
    * Per-child run deadline in milliseconds; at most the execution
    * ceiling of 24 hours.
@@ -2619,6 +2621,12 @@ export interface SubagentsFeature {
    * Lifetime total of sessions ever created under the root.
    */
   maxDescendants?: number;
+  /**
+   * The program menu. Every id must name an existing program profile (one
+   * with a `program`); a child program runs once with the caller's input
+   * and returns its output.
+   */
+  programs?: SubagentProgramRef[];
   version?: number;
 }
 /**
@@ -2626,6 +2634,13 @@ export interface SubagentsFeature {
  * via the `definition` "SubagentAgentRef".
  */
 export interface SubagentAgentRef {
+  profileId: ProfileId;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "SubagentProgramRef".
+ */
+export interface SubagentProgramRef {
   profileId: ProfileId;
 }
 /**

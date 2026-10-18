@@ -646,6 +646,7 @@ fn subagents_features_with_deadline(
 ) -> api::FeaturesConfig {
     api::FeaturesConfig {
         subagents: Some(api::SubagentsFeature {
+            programs: Vec::new(),
             version: api::CURRENT_FEATURE_VERSION,
             agents: vec![api::SubagentAgentRef {
                 profile_id: profile_id.clone(),

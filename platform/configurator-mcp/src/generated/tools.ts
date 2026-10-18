@@ -1130,14 +1130,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
         "SubagentsFeature": {
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
           "properties": {
             "agents": {
-              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
               "items": {
                 "$ref": "#/definitions/SubagentAgentRef"
               },
@@ -1171,6 +1186,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "minimum": 0,
               "type": "integer"
             },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
             "version": {
               "default": 1,
               "format": "uint32",
@@ -1178,9 +1200,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             }
           },
-          "required": [
-            "agents"
-          ],
           "type": "object"
         },
         "TimersFeature": {
@@ -2229,14 +2248,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
         "SubagentsFeature": {
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
           "properties": {
             "agents": {
-              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
               "items": {
                 "$ref": "#/definitions/SubagentAgentRef"
               },
@@ -2270,6 +2304,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "minimum": 0,
               "type": "integer"
             },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
             "version": {
               "default": 1,
               "format": "uint32",
@@ -2277,9 +2318,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             }
           },
-          "required": [
-            "agents"
-          ],
           "type": "object"
         },
         "TimersFeature": {
@@ -5057,14 +5095,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
         "SubagentsFeature": {
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
           "properties": {
             "agents": {
-              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
               "items": {
                 "$ref": "#/definitions/SubagentAgentRef"
               },
@@ -5098,6 +5151,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "minimum": 0,
               "type": "integer"
             },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
             "version": {
               "default": 1,
               "format": "uint32",
@@ -5105,9 +5165,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             }
           },
-          "required": [
-            "agents"
-          ],
           "type": "object"
         },
         "TimersFeature": {
@@ -7473,14 +7530,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
         "SubagentsFeature": {
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
           "properties": {
             "agents": {
-              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
               "items": {
                 "$ref": "#/definitions/SubagentAgentRef"
               },
@@ -7514,6 +7586,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "minimum": 0,
               "type": "integer"
             },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
             "version": {
               "default": 1,
               "format": "uint32",
@@ -7521,9 +7600,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             }
           },
-          "required": [
-            "agents"
-          ],
           "type": "object"
         },
         "TimersFeature": {
@@ -8830,14 +8906,29 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
           ],
           "type": "object"
         },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
         "SubagentsFeature": {
           "additionalProperties": {
             "not": {}
           },
-          "description": "Grants sub-agent delegation: `agent_run` (joined, result inline) and\n`agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles. Limits are root-scoped and attenuating: every descendant of a\nroot session counts against the root, and a nested grant can narrow but\nnever widen the limits pinned on its origin.",
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
           "properties": {
             "agents": {
-              "description": "The agent menu. Every id must name an existing profile; the model\npicks by id and reads descriptions from the sub-agent catalog.",
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
               "items": {
                 "$ref": "#/definitions/SubagentAgentRef"
               },
@@ -8871,6 +8962,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "minimum": 0,
               "type": "integer"
             },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
             "version": {
               "default": 1,
               "format": "uint32",
@@ -8878,9 +8976,6 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             }
           },
-          "required": [
-            "agents"
-          ],
           "type": "object"
         },
         "TimersFeature": {

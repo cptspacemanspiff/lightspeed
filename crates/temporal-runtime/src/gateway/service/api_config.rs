@@ -21,7 +21,7 @@ impl GatewayAgentApi {
         self.admit_attachments(&config.features).await?;
         self.validate_workspace_attachment_targets(&config.features)
             .await?;
-        self.validate_subagent_agents(&config.features).await?;
+        self.validate_subagent_profiles(&config.features).await?;
         Ok(config)
     }
 
@@ -32,39 +32,93 @@ impl GatewayAgentApi {
         }
     }
 
-    /// Every allowlisted sub-agent profile must exist when the grant is
-    /// admitted; the list is the authority, so a dangling id is a config
-    /// error, not a spawn-time surprise.
-    pub(super) async fn validate_subagent_agents(
+    /// Every allowlisted child profile must exist when the grant is admitted,
+    /// and be of its list's kind; the lists are the authority, so a dangling
+    /// id is a config error, not a spawn-time surprise.
+    pub(super) async fn validate_subagent_profiles(
         &self,
         features: &harness::FeaturesConfig,
     ) -> Result<(), AgentApiError> {
         let Some(subagents) = features.subagents.as_ref() else {
             return Ok(());
         };
-        for agent in &subagents.agents {
-            let profile_id =
-                api::ProfileId::try_new(agent.profile_id.clone()).map_err(|error| {
-                    AgentApiError::invalid_request(format!(
-                        "invalid subagents agent profile id {:?}: {error}",
-                        agent.profile_id
-                    ))
-                })?;
-            self.read_profile(ProfileReadParams { profile_id })
+        for (kind, profile_id) in subagent_profiles(subagents) {
+            let id = api::ProfileId::try_new(profile_id.to_owned()).map_err(|error| {
+                AgentApiError::invalid_request(format!(
+                    "invalid subagents {} profile id {profile_id:?}: {error}",
+                    kind.noun()
+                ))
+            })?;
+            let profile = self
+                .read_profile(ProfileReadParams { profile_id: id })
                 .await
                 .map_err(|error| {
                     if is_not_found(&error) {
                         AgentApiError::invalid_request(format!(
-                            "subagents agent profile does not exist: {}",
-                            agent.profile_id
+                            "subagents {} profile does not exist: {profile_id}",
+                            kind.noun()
                         ))
                     } else {
                         error
                     }
-                })?;
+                })?
+                .result
+                .profile;
+            kind.check(&profile)?;
         }
         Ok(())
     }
+}
+
+/// Which list of `features.subagents` names a profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SubagentProfileKind {
+    Agent,
+    Program,
+}
+
+impl SubagentProfileKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Program => "program",
+        }
+    }
+
+    /// A profile listed as an agent must not be a program profile, and the
+    /// other way round: a child of the wrong kind cannot start its run.
+    pub(super) fn check(self, profile: &api::AgentProfile) -> Result<(), AgentApiError> {
+        match (self, profile.document.program.is_some()) {
+            (Self::Agent, true) => Err(AgentApiError::invalid_request(format!(
+                "subagents agent {} is a program profile; list it under programs",
+                profile.profile_id
+            ))),
+            (Self::Program, false) => Err(AgentApiError::invalid_request(format!(
+                "subagents program {} is not a program profile",
+                profile.profile_id
+            ))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The profiles a grant lists, each with its list.
+pub(super) fn subagent_profiles(
+    subagents: &harness::SubagentsFeature,
+) -> impl Iterator<Item = (SubagentProfileKind, &str)> {
+    subagents
+        .agents
+        .iter()
+        .map(|agent| (SubagentProfileKind::Agent, agent.profile_id.as_str()))
+        .chain(
+            subagents
+                .programs
+                .iter()
+                .map(|program| (SubagentProfileKind::Program, program.profile_id.as_str())),
+        )
+}
+
+impl GatewayAgentApi {
 }
 
 /// Build only the per-run overrides supplied by `session/runs/start`.
@@ -207,6 +261,13 @@ fn features_from_api(
                     .into_iter()
                     .map(|agent| harness::SubagentAgentConfig {
                         profile_id: agent.profile_id.as_str().to_owned(),
+                    })
+                    .collect(),
+                programs: subagents
+                    .programs
+                    .into_iter()
+                    .map(|program| harness::SubagentProgramConfig {
+                        profile_id: program.profile_id.as_str().to_owned(),
                     })
                     .collect(),
                 limits: harness::SubagentLimits {
@@ -461,6 +522,46 @@ pub(super) fn model_selection_from_api(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listed_profile_must_be_of_its_lists_kind() {
+        let profile = |program: Option<api::ProgramSpec>| api::AgentProfile {
+            profile_id: api::ProfileId::new("child"),
+            display_name: None,
+            description: None,
+            revision: 1,
+            document: api::ProfileDocument {
+                program,
+                metadata: Default::default(),
+                config: None,
+                instructions: None,
+                retention: None,
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let agent = profile(None);
+        let program = profile(Some(api::ProgramSpec {
+            source: api::ProgramSource::Text {
+                text: "export default { run() { return {}; } };".to_owned(),
+            },
+            semantics_version: 1,
+            input_schema: None,
+            output_schema: None,
+            limits: None,
+            requires: Vec::new(),
+            approvals: None,
+        }));
+        assert!(SubagentProfileKind::Agent.check(&agent).is_ok());
+        assert!(SubagentProfileKind::Program.check(&program).is_ok());
+        for (kind, profile) in [
+            (SubagentProfileKind::Agent, &program),
+            (SubagentProfileKind::Program, &agent),
+        ] {
+            let error = kind.check(profile).unwrap_err();
+            assert_eq!(error.kind, api::AgentApiErrorKind::InvalidRequest, "{error:?}");
+        }
+    }
 
     #[test]
     fn run_model_override_keeps_provider_identity_and_api_kind() {

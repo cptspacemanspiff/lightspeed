@@ -2444,7 +2444,7 @@ impl AgentApiService for GatewayAgentApi {
         self.desired_mcp_tools(&config.features).await?;
         self.validate_workspace_attachment_targets(&config.features)
             .await?;
-        self.validate_subagent_agents(&config.features).await?;
+        self.validate_subagent_profiles(&config.features).await?;
         validate_subagent_deadline_for_existing_bindings(&loaded.state, &config.features)?;
         self.prepare_session_operation(
             &session_id,
