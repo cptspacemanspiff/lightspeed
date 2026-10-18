@@ -165,7 +165,8 @@
                 }));
                 continue;
             }
-            if (binding.name === "agent.run") {
+            if (binding.name === "agent.run" || binding.name === "program.run") {
+                const noun = binding.name === "agent.run" ? "agent" : "program";
                 place(env, binding.name, freeze(function (args) {
                     let issued;
                     try {
@@ -174,13 +175,14 @@
                         return NativePromise.reject(error);
                     }
                     const ran = issued.promise.then(undefined, function (error) {
-                        throw agentCallFailure(error);
+                        throw childCallFailure(error, noun);
                     });
                     return withCancel(ran, issued.request);
                 }));
                 continue;
             }
-            if (binding.name === "agent.spawn") {
+            if (binding.name === "agent.spawn" || binding.name === "program.spawn") {
+                const noun = binding.name === "agent.spawn" ? "agent" : "program";
                 place(env, binding.name, freeze(function (args) {
                     let issued;
                     try {
@@ -189,7 +191,7 @@
                         return NativePromise.reject(error);
                     }
                     const spawned = issued.promise.then(function (spawned) {
-                        return agentHandle(spawned.executionId, spawned.promise);
+                        return childHandle(spawned.executionId, spawned.promise, noun);
                     });
                     return withCancel(spawned, issued.request);
                 }));
@@ -350,24 +352,26 @@
         return freeze(handle);
     }
 
-    // A child agent that did not complete fails its call with its result
-    // envelope; one that could not start, with `{ error }`. The program sees
-    // `agent_failed`, `agent_cancelled` (cancelled from elsewhere),
-    // `deadline_exceeded` or `agent_rejected` as the error's kind, and the
-    // document as its value.
-    function agentError(document) {
+    // A child (`noun` is "agent" or "program") that did not complete fails
+    // its call with a document of its `status`; one that could not start,
+    // with `{ error }` (and a `reason`, such as "grant_exceeded", when the
+    // runtime gives one). The program sees `agent_failed` / `program_failed`,
+    // `agent_cancelled` / `program_cancelled` (cancelled from elsewhere),
+    // `deadline_exceeded` or `agent_rejected` / `program_rejected` as the
+    // error's kind, and the document as its value.
+    function childError(document, noun) {
         if (document === null || typeof document !== "object") return null;
         let kind;
         let message;
         if (typeof document.status === "string") {
-            kind = "agent_failed";
-            if (document.status === "cancelled") kind = "agent_cancelled";
+            kind = noun + "_failed";
+            if (document.status === "cancelled") kind = noun + "_cancelled";
             else if (document.status === "deadline") kind = "deadline_exceeded";
             message = typeof document.error === "string"
                 ? document.error
-                : "agent " + document.agent + " " + document.status;
+                : noun + " " + document[noun] + " " + document.status;
         } else if (typeof document.error === "string") {
-            kind = "agent_rejected";
+            kind = noun + "_rejected";
             message = document.error;
         } else {
             return null;
@@ -377,7 +381,7 @@
         define(error, "value", { value: document, enumerable: true });
         return error;
     }
-    function agentCallFailure(error) {
+    function childCallFailure(error, noun) {
         if (error === null || typeof error !== "object" || error.kind !== "tool_failed") return error;
         let document;
         try {
@@ -385,13 +389,14 @@
         } catch (_) {
             return error;
         }
-        const failure = agentError(document);
+        const failure = childError(document, noun);
         return failure === null ? error : failure;
     }
-    // A spawned child agent: `result` awaits its result envelope, `cancel`
-    // closes it and waits until it has settled, and `detach` keeps it
-    // running past the run's exits (no later run can take it back yet).
-    function agentHandle(id, promise) {
+    // A spawned child: `result` awaits its result (an agent's envelope, a
+    // program's output), `cancel` stops it and waits until it has settled,
+    // and `detach` keeps it running past the run's exits (no later run can
+    // take it back yet).
+    function childHandle(id, promise, noun) {
         let settled = null;
         const result = function () {
             // One await per handle: every caller shares its outcome.
@@ -399,11 +404,11 @@
                 settled = contractCall("promise.await", { promises: [promise] }).then(function (awaited) {
                     const outcome = awaited.results[0];
                     if (outcome.status === "resolved") return outcome.output;
-                    let failure = agentError(outcome.error);
+                    let failure = childError(outcome.error, noun);
                     if (failure === null) {
-                        let kind = "agent_failed";
-                        let message = "agent " + outcome.status;
-                        if (outcome.status === "cancelled") kind = "agent_cancelled";
+                        let kind = noun + "_failed";
+                        let message = noun + " " + outcome.status;
+                        if (outcome.status === "cancelled") kind = noun + "_cancelled";
                         // The session failed the promise at its hard deadline.
                         else if (outcome.error === undefined) kind = "deadline_exceeded";
                         else if (typeof outcome.error === "string") message = outcome.error;
@@ -420,7 +425,7 @@
             result: async function () { return await result(); },
             cancel: async function () {
                 cancelHost("promise", promise);
-                return await settledStatus(result(), "agent_cancelled");
+                return await settledStatus(result(), noun + "_cancelled");
             },
             detach: async function () {
                 await contractCall("promise.detach", { promises: [promise] });

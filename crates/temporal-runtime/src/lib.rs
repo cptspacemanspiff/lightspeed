@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod program;
 pub mod roles;
 pub(crate) mod session_deletion;
+mod subagent_grants;
 pub mod subagents;
 pub mod universe;
 pub mod worker;

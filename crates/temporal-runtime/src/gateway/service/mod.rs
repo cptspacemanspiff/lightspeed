@@ -928,7 +928,7 @@ impl GatewayAgentApi {
     pub(crate) async fn start_run_for_subagent(
         &self,
         session_id: &SessionId,
-        input: Vec<InputItem>,
+        source: RunStartSource,
         submission_id: SubmissionId,
         notify_on_terminal: Vec<harness::RunTerminalNotifyIntent>,
     ) -> Result<String, AgentApiError> {
@@ -936,7 +936,7 @@ impl GatewayAgentApi {
             .start_run_internal(
                 RunStartParams {
                     session_id: session_id.as_str().to_owned(),
-                    source: RunStartSource::Input { items: input },
+                    source,
                     submission_id: Some(submission_id.as_str().to_owned()),
                     config: None,
                     notify_on_terminal: None,
@@ -1623,8 +1623,11 @@ fn is_core_environment_job_binding(binding: &harness::WorkflowToolBinding) -> bo
     is_core_environment_job_tool_id(binding.definition.tool_id.as_str())
 }
 
-fn is_core_subagent_binding(binding: &harness::WorkflowToolBinding) -> bool {
-    tools::subagents::is_subagent_workflow_tool_id(binding.definition.tool_id.as_str())
+/// The child-session tool a core binding serves, if it is one.
+fn core_subagent_kind(
+    binding: &harness::WorkflowToolBinding,
+) -> Option<tools::subagents::SubagentToolKind> {
+    tools::subagents::SubagentToolKind::from_workflow_tool_id(binding.definition.tool_id.as_str())
 }
 
 fn is_core_input_binding(binding: &harness::WorkflowToolBinding) -> bool {
@@ -1664,27 +1667,25 @@ fn validate_subagent_deadline_for_existing_bindings(
     else {
         return Ok(());
     };
-    let existing_ceiling_ms = [
-        tools::subagents::AGENT_RUN_WORKFLOW_TOOL_ID,
-        tools::subagents::AGENT_SPAWN_WORKFLOW_TOOL_ID,
-    ]
-    .into_iter()
-    .filter_map(|tool_id| {
-        state
-            .workflow_tools
-            .bindings
-            .get(&WorkflowToolId::new(tool_id))
-    })
-    .filter_map(|binding| match binding.completion {
-        WorkflowToolCompletion::Joined {
-            deadline_after_ms, ..
-        } => Some(deadline_after_ms),
-        WorkflowToolCompletion::Promises {
-            deadline_after_ms, ..
-        } => deadline_after_ms,
-        WorkflowToolCompletion::Accepted => None,
-    })
-    .min();
+    let existing_ceiling_ms = tools::subagents::SubagentToolKind::AGENTS
+        .into_iter()
+        .chain(tools::subagents::SubagentToolKind::PROGRAMS)
+        .filter_map(|kind| {
+            state
+                .workflow_tools
+                .bindings
+                .get(&WorkflowToolId::new(kind.workflow_tool_id()))
+        })
+        .filter_map(|binding| match binding.completion {
+            WorkflowToolCompletion::Joined {
+                deadline_after_ms, ..
+            } => Some(deadline_after_ms),
+            WorkflowToolCompletion::Promises {
+                deadline_after_ms, ..
+            } => deadline_after_ms,
+            WorkflowToolCompletion::Accepted => None,
+        })
+        .min();
     if let Some(ceiling_ms) = existing_ceiling_ms
         && requested_deadline_ms > ceiling_ms
     {

@@ -189,8 +189,9 @@ impl GatewayAgentApi {
         &self,
         session_id: &SessionId,
         profile: ProfileSource,
+        pinned_from: Option<(api::ProfileId, u64)>,
     ) -> Result<(), AgentApiError> {
-        self.start_session_internal(
+        self.start_session_with_profile_identity(
             SessionStartParams {
                 metadata: Default::default(),
                 session_id: Some(session_id.as_str().to_owned()),
@@ -205,6 +206,7 @@ impl GatewayAgentApi {
             false,
             true,
             None,
+            pinned_from,
         )
         .await?;
         Ok(())
@@ -288,6 +290,27 @@ impl GatewayAgentApi {
         close_on_terminal: bool,
         auto_reject_approvals: bool,
         trusted_workflow_tools: Option<ManagedSessionWorkflowTools>,
+    ) -> Result<AgentApiOutcome<SessionStartResponse>, AgentApiError> {
+        self.start_session_with_profile_identity(
+            params,
+            close_on_terminal,
+            auto_reject_approvals,
+            trusted_workflow_tools,
+            None,
+        )
+        .await
+    }
+
+    /// `start_session_internal`, where an inline profile is the copy of a
+    /// named profile's revision (`pinned_from`): a program pinned from it
+    /// records that identity, as one started from the named profile would.
+    async fn start_session_with_profile_identity(
+        &self,
+        params: SessionStartParams,
+        close_on_terminal: bool,
+        auto_reject_approvals: bool,
+        trusted_workflow_tools: Option<ManagedSessionWorkflowTools>,
+        pinned_from: Option<(api::ProfileId, u64)>,
     ) -> Result<AgentApiOutcome<SessionStartResponse>, AgentApiError> {
         self.authorize_method(METHOD_SESSION_START, None).await?;
         let SessionStartParams {
@@ -373,7 +396,11 @@ impl GatewayAgentApi {
             return Ok(self.session_start_response(&loaded));
         }
         let resolved = match profile {
-            Some(source) => Some(self.resolve_profile(source).await?),
+            Some(source) => {
+                let mut resolved = self.resolve_profile(source).await?;
+                resolved.named = resolved.named.or(pinned_from);
+                Some(resolved)
+            }
             None => None,
         };
         let program_spec = resolved

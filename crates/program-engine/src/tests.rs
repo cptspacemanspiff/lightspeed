@@ -836,6 +836,62 @@ fn a_child_agent_that_does_not_complete_fails_by_its_status() {
 }
 
 #[test]
+fn a_child_program_returns_its_output_and_fails_by_its_status() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const outcomes = [];
+                for (const claim of ["done", "broken", "late", "greedy"]) {
+                    try {
+                        outcomes.push(["ok", await env.program.run({ program: "checker", input: { claim } })]);
+                    } catch (error) {
+                        outcomes.push([error.kind, error.message, error.value.reason ?? error.value.status]);
+                    }
+                }
+                const child = await env.program.spawn({ program: "checker", input: { claim: "later" } });
+                outcomes.push(["spawned", await child.result()]);
+                return outcomes;
+            }
+        };
+    "#;
+    let failure = |status: &str, error: &str| {
+        json!({"program": "checker", "session_id": "agent_x", "status": status, "error": error})
+            .to_string()
+    };
+    let contracts = ["program.run", "program.spawn", "promise.await"];
+    let (requests, report) = run_program(program_input(source, &contracts, SEED), |request| {
+        let outcome = match request.binding_id.as_str() {
+            "opaque-program.run" => match request.arguments["input"]["claim"].as_str() {
+                Some("done") => Ok(json!({"verdict": "supported"})),
+                Some("broken") => Err(tool_failure(failure("failed", "no sources"))),
+                Some("late") => Err(tool_failure(failure("deadline", "too slow"))),
+                _ => Err(tool_failure(
+                    json!({"error": "program checker asks for the timers feature", "reason": "grant_exceeded"})
+                        .to_string(),
+                )),
+            },
+            "opaque-program.spawn" => Ok(opened()),
+            "opaque-promise.await" => Ok(json!({"outcome": "completed", "results": [{
+                "promise_id": "promise_3", "status": "resolved", "output": {"verdict": "later"}}]})),
+            other => panic!("unexpected call {other}"),
+        };
+        (outcome, None)
+    });
+    assert_eq!(report.error, None);
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        report.return_value,
+        Some(json!([
+            ["ok", {"verdict": "supported"}],
+            ["program_failed", "no sources", "failed"],
+            ["deadline_exceeded", "too slow", "deadline"],
+            ["program_rejected", "program checker asks for the timers feature", "grant_exceeded"],
+            ["spawned", {"verdict": "later"}],
+        ]))
+    );
+}
+
+#[test]
 fn a_spawned_child_agent_is_a_handle_over_its_promise() {
     let source = r#"
         export default {

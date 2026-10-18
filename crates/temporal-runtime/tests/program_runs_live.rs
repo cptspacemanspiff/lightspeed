@@ -3990,6 +3990,176 @@ async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Res
     .await
 }
 
+const CHECKER_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            if (input.claim === "bad") throw new Error("no sources for " + input.claim);
+            return { claim: input.claim, slept: 0, verdict: "supported" };
+        }
+    };
+"#;
+
+const PROGRAM_CALLER_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const ran = await env.program.run({ program: input.checker, input: { claim: "one" } });
+            const child = await env.program.spawn({ program: input.checker, input: { claim: "two" } });
+            const spawned = await child.result();
+            let failed = null;
+            try { await env.program.run({ program: input.checker, input: { claim: "bad" } }); }
+            catch (error) { failed = [error.kind, error.message, error.value.status]; }
+            let refused = null;
+            try { await env.program.run({ program: input.greedy, input: { claim: "x" } }); }
+            catch (error) { refused = [error.kind, error.value.reason]; }
+            let invalid = null;
+            try { await env.program.run({ program: input.checker, input: { nope: 1 } }); }
+            catch (error) { invalid = error.kind; }
+            return { claim: input.claim, slept: 0, ran, spawned, failed, refused, invalid };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let checker = api::ProfileId::new(format!("live_checker_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&checker, CHECKER_PROGRAM, &[]),
+            })
+            .await?;
+            // A child that also wants web fetch, which its caller lacks.
+            let greedy = api::ProfileId::new(format!("live_greedy_{suffix}"));
+            let mut greedy_profile = program_profile(&greedy, CHECKER_PROGRAM, &[]);
+            greedy_profile
+                .document
+                .config
+                .as_mut()
+                .and_then(|config| config.features.as_mut())
+                .expect("features")
+                .web = Some(api::WebFeature {
+                version: api::CURRENT_FEATURE_VERSION,
+                fetch: Some(api::WebFetchFeature {}),
+                search: None,
+            });
+            api.create_profile(api::ProfileCreateParams {
+                profile: greedy_profile,
+            })
+            .await?;
+            let profile_id = api::ProfileId::new(format!("live_program_{suffix}"));
+            let mut profile = program_profile(
+                &profile_id,
+                PROGRAM_CALLER_PROGRAM,
+                &[
+                    ("program.run", None),
+                    ("program.spawn", None),
+                    ("promise.await", None),
+                ],
+            );
+            let features = profile
+                .document
+                .config
+                .as_mut()
+                .and_then(|config| config.features.as_mut())
+                .expect("features");
+            features.subagents = Some(api::SubagentsFeature {
+                version: api::CURRENT_FEATURE_VERSION,
+                agents: Vec::new(),
+                programs: [&checker, &greedy]
+                    .into_iter()
+                    .map(|profile_id| api::SubagentProgramRef {
+                        profile_id: profile_id.clone(),
+                    })
+                    .collect(),
+                max_depth: 2,
+                max_descendants: 8,
+                max_concurrent: 4,
+                deadline_ms: 120_000,
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "composed", "checker": checker.as_str(), "greedy": greedy.as_str()}),
+            )
+            .await?;
+            let run = support::live::wait_for_terminal_run_with_timeout(
+                &api,
+                &session_id,
+                &run.id,
+                Duration::from_secs(120),
+            )
+            .await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(
+                output,
+                json!({
+                    "claim": "composed",
+                    "slept": 0,
+                    "ran": {"claim": "one", "slept": 0, "verdict": "supported"},
+                    "spawned": {"claim": "two", "slept": 0, "verdict": "supported"},
+                    "failed": ["program_failed", "javascript: no sources for bad", "failed"],
+                    "refused": ["program_rejected", "grant_exceeded"],
+                    "invalid": "program_rejected",
+                })
+            );
+
+            // Three children ran (the greedy one and the invalid input never
+            // did); each is a closed program session pinned to its profile.
+            let children = api
+                .list_sessions(api::SessionListParams {
+                    trees: vec![session_id.as_str().to_owned()],
+                    subagent: Some(true),
+                    ..Default::default()
+                })
+                .await?
+                .result
+                .sessions;
+            assert_eq!(children.len(), 3, "{children:?}");
+            for child in &children {
+                let view = api
+                    .read_session(api::SessionReadParams {
+                        session_id: child.id.as_str().to_owned(),
+                        run_limit: None,
+                    })
+                    .await?
+                    .result
+                    .session;
+                assert_eq!(view.status, api::SessionStatus::Closed);
+                assert!(
+                    matches!(
+                        &view.driver,
+                        api::SessionDriverView::Program { program_id: Some(id), revision: Some(1), .. }
+                            if id == checker.as_str()
+                    ),
+                    "{:?}",
+                    view.driver
+                );
+            }
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [profile_id, checker, greedy] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
 const SEQUENTIAL_AGENTS_PROGRAM: &str = r#"
     export default {
         async run(input, env) {

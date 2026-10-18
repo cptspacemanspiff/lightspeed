@@ -506,7 +506,11 @@ pub enum SubagentPrepareActivityResult {
 pub struct SubagentChildRef {
     pub session_id: String,
     pub run_id: u64,
+    /// The child's profile: an agent's, or a program's when `program`.
     pub agent_profile_id: String,
+    /// The child is a program session: its result is its JSON output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub program: bool,
 }
 
 /// How the child's run ended, as observed by the execution.

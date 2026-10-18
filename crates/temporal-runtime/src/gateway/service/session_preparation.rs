@@ -107,12 +107,15 @@ impl SessionPreparationService {
             .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;
         let mut tools = toolset.tools.into_values().collect::<Vec<_>>();
         // Every program session binds the input workflow tools, and one with
-        // the sub-agents grant the sub-agent tools.
+        // the sub-agents grant the child-session tools it lists children for.
         tools.push(tools::human_input::input_request_tool_spec());
         tools.push(tools::human_input::input_open_tool_spec());
-        if session_config.features.subagents.is_some() {
-            tools.push(tools::subagents::SubagentToolKind::Run.tool_spec());
-            tools.push(tools::subagents::SubagentToolKind::Spawn.tool_spec());
+        if let Some(subagents) = &session_config.features.subagents {
+            tools.extend(
+                tools::subagents::SubagentToolKind::granted(subagents)
+                    .into_iter()
+                    .map(tools::subagents::SubagentToolKind::tool_spec),
+            );
         }
         let mut contracts = tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
             .await
@@ -230,8 +233,12 @@ impl SessionPreparationService {
         Ok(declarations)
     }
 
+    /// The child-session bindings of `kinds`. Agent children reply with
+    /// their result envelope; a program child's reply is its output, which
+    /// its own output schema has already checked.
     pub(crate) async fn core_subagent_workflow_tool_declarations(
         &self,
+        kinds: &[tools::subagents::SubagentToolKind],
     ) -> Result<Vec<WorkflowToolDeclaration>, AgentApiError> {
         let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
             workflow_type: tools::subagents::SUBAGENT_WORKFLOW_TYPE.to_owned(),
@@ -259,14 +266,10 @@ impl SessionPreparationService {
         // The binding carries the hard ceiling; the grant's `deadlineMs` is
         // pinned per call and enforced inside the execution, so the
         // immutable binding never has to change with the grant.
-        let kinds = [
-            tools::subagents::SubagentToolKind::Run,
-            tools::subagents::SubagentToolKind::Spawn,
-        ];
         let mut declarations = Vec::with_capacity(kinds.len());
-        for kind in kinds {
+        for &kind in kinds {
             let completion = kind.completion(
-                Some(reply_schema_ref.clone()),
+                (!kind.is_program()).then(|| reply_schema_ref.clone()),
                 harness::SUBAGENT_DEADLINE_CEILING_MS,
             );
             let tool = kind.tool_spec();
@@ -494,7 +497,12 @@ impl SessionPreparationService {
             .as_ref()
             .and_then(|environments| environments.tool_access())
             .is_some_and(|access| access.allows_jobs());
-        let subagents = session_config.features.subagents.is_some();
+        let subagents = session_config
+            .features
+            .subagents
+            .as_ref()
+            .map(tools::subagents::SubagentToolKind::granted)
+            .unwrap_or_default();
         let code_mode = session_config.features.code_mode.is_some();
         let mut declarations = Vec::new();
         if source.driver.is_program() {
@@ -510,8 +518,11 @@ impl SessionPreparationService {
                     .await?,
             );
         }
-        if subagents {
-            declarations.extend(self.core_subagent_workflow_tool_declarations().await?);
+        if !subagents.is_empty() {
+            declarations.extend(
+                self.core_subagent_workflow_tool_declarations(&subagents)
+                    .await?,
+            );
         }
         if code_mode {
             declarations.push(self.core_code_workflow_tool_declaration().await?);
@@ -556,7 +567,7 @@ impl SessionPreparationService {
             .values()
             .filter(|binding| {
                 (jobs || !is_core_environment_job_binding(binding))
-                    && (subagents || !is_core_subagent_binding(binding))
+                    && core_subagent_kind(binding).is_none_or(|kind| subagents.contains(&kind))
                     && (code_mode
                         || binding.definition.tool_id.as_str()
                             != tools::code::CODE_EXECUTE_WORKFLOW_TOOL_ID)

@@ -118,9 +118,6 @@ pub(super) fn subagent_profiles(
         )
 }
 
-impl GatewayAgentApi {
-}
-
 /// Build only the per-run overrides supplied by `session/runs/start`.
 /// Session defaults remain in `SessionConfig` and are resolved by the harness
 /// from its live state; they must not be copied into the override document.
@@ -559,7 +556,11 @@ mod tests {
             (SubagentProfileKind::Program, &agent),
         ] {
             let error = kind.check(profile).unwrap_err();
-            assert_eq!(error.kind, api::AgentApiErrorKind::InvalidRequest, "{error:?}");
+            assert_eq!(
+                error.kind,
+                api::AgentApiErrorKind::InvalidRequest,
+                "{error:?}"
+            );
         }
     }
 

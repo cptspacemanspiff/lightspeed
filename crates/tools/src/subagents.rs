@@ -1,8 +1,10 @@
-//! Sub-agent tool contracts: `agent_run` (joined completion, result inline)
-//! and `agent_spawn` (promise completion, joined with `await`). Both are
-//! system workflow-tool bindings whose start-on-call recipe runs the
-//! sub-agent execution workflow; the session runtime only admits the call,
-//! pins the grant, and hands the invocation to the generic start machinery.
+//! Child-session tool contracts: `agent_run` (joined completion, result
+//! inline) and `agent_spawn` (promise completion, joined with `await`) start a
+//! child agent; `program_run` and `program_spawn` start a child program the
+//! same ways. All are system workflow-tool bindings whose start-on-call recipe
+//! runs the sub-agent execution workflow (which runs program children too);
+//! the session runtime only admits the call, pins the grant, and hands the
+//! invocation to the generic start machinery.
 
 use crate::catalog::{
     SUBAGENT_CATALOG_CONTEXT_KEY, catalog_context_input, catalog_publication_command,
@@ -24,21 +26,51 @@ pub const AGENT_RUN_WORKFLOW_TOOL_ID: &str = "subagent-run";
 pub const AGENT_SPAWN_WORKFLOW_TOOL_ID: &str = "subagent-spawn";
 pub const AGENT_RUN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subagent.run.v1";
 pub const AGENT_SPAWN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subagent.spawn.v1";
+pub const PROGRAM_RUN_TOOL_NAME: &str = "program_run";
+pub const PROGRAM_SPAWN_TOOL_NAME: &str = "program_spawn";
+pub const PROGRAM_RUN_TOOL_ID: &str = "subprogram.run";
+pub const PROGRAM_SPAWN_TOOL_ID: &str = "subprogram.spawn";
+pub const PROGRAM_RUN_WORKFLOW_TOOL_ID: &str = "subprogram-run";
+pub const PROGRAM_SPAWN_WORKFLOW_TOOL_ID: &str = "subprogram-spawn";
+pub const PROGRAM_RUN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subprogram.run.v1";
+pub const PROGRAM_SPAWN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subprogram.spawn.v1";
 pub const SUBAGENT_WORKFLOW_TYPE: &str = "SubagentExecutionWorkflow";
 pub const MAX_SUBAGENT_INPUT_BYTES: usize = 256 * 1024;
 pub const MAX_SUBAGENT_LABEL_BYTES: usize = 200;
 
+/// A child-session tool: a child agent (`Run`, `Spawn`) or a child program
+/// (`ProgramRun`, `ProgramSpawn`), joined or as a promise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubagentToolKind {
     Run,
     Spawn,
+    ProgramRun,
+    ProgramSpawn,
 }
 
 impl SubagentToolKind {
+    pub const AGENTS: [Self; 2] = [Self::Run, Self::Spawn];
+    pub const PROGRAMS: [Self; 2] = [Self::ProgramRun, Self::ProgramSpawn];
+
+    /// The tools a grant enables: the agent tools when it lists agents, the
+    /// program tools when it lists programs.
+    pub fn granted(grant: &harness::SubagentsFeature) -> Vec<Self> {
+        let agents = (!grant.agents.is_empty()).then_some(Self::AGENTS);
+        let programs = (!grant.programs.is_empty()).then_some(Self::PROGRAMS);
+        agents.into_iter().chain(programs).flatten().collect()
+    }
+
+    /// Whether the child is a program session.
+    pub fn is_program(self) -> bool {
+        matches!(self, Self::ProgramRun | Self::ProgramSpawn)
+    }
+
     pub fn tool_name(self) -> &'static str {
         match self {
             Self::Run => AGENT_RUN_TOOL_NAME,
             Self::Spawn => AGENT_SPAWN_TOOL_NAME,
+            Self::ProgramRun => PROGRAM_RUN_TOOL_NAME,
+            Self::ProgramSpawn => PROGRAM_SPAWN_TOOL_NAME,
         }
     }
 
@@ -47,6 +79,8 @@ impl SubagentToolKind {
         match self {
             Self::Run => AGENT_RUN_TOOL_ID,
             Self::Spawn => AGENT_SPAWN_TOOL_ID,
+            Self::ProgramRun => PROGRAM_RUN_TOOL_ID,
+            Self::ProgramSpawn => PROGRAM_SPAWN_TOOL_ID,
         }
     }
 
@@ -59,19 +93,20 @@ impl SubagentToolKind {
         )
     }
 
-    /// The completion of the binding: `agent_run` joins the child's result,
-    /// `agent_spawn` returns its promise under the reply key.
+    /// The completion of the binding: `agent_run` and `program_run` join the
+    /// child's result, `agent_spawn` and `program_spawn` return its promise
+    /// under the reply key.
     pub fn completion(
         self,
         reply_schema_ref: Option<BlobRef>,
         deadline_after_ms: u64,
     ) -> harness::WorkflowToolCompletion {
         match self {
-            Self::Run => harness::WorkflowToolCompletion::Joined {
+            Self::Run | Self::ProgramRun => harness::WorkflowToolCompletion::Joined {
                 reply_schema_ref,
                 deadline_after_ms,
             },
-            Self::Spawn => harness::WorkflowToolCompletion::Promises {
+            Self::Spawn | Self::ProgramSpawn => harness::WorkflowToolCompletion::Promises {
                 reply_schema_ref,
                 deadline_after_ms: Some(deadline_after_ms),
                 max_promises: 1,
@@ -84,6 +119,8 @@ impl SubagentToolKind {
         match self {
             Self::Run => AGENT_RUN_WORKFLOW_TOOL_ID,
             Self::Spawn => AGENT_SPAWN_WORKFLOW_TOOL_ID,
+            Self::ProgramRun => PROGRAM_RUN_WORKFLOW_TOOL_ID,
+            Self::ProgramSpawn => PROGRAM_SPAWN_WORKFLOW_TOOL_ID,
         }
     }
 
@@ -91,23 +128,29 @@ impl SubagentToolKind {
         match self {
             Self::Run => AGENT_RUN_WORKFLOW_SEMANTIC_TYPE,
             Self::Spawn => AGENT_SPAWN_WORKFLOW_SEMANTIC_TYPE,
+            Self::ProgramRun => PROGRAM_RUN_WORKFLOW_SEMANTIC_TYPE,
+            Self::ProgramSpawn => PROGRAM_SPAWN_WORKFLOW_SEMANTIC_TYPE,
         }
     }
 
     pub fn from_binding(tool_id: &str, semantic_type: &str) -> Option<Self> {
-        match (tool_id, semantic_type) {
-            (AGENT_RUN_WORKFLOW_TOOL_ID, AGENT_RUN_WORKFLOW_SEMANTIC_TYPE) => Some(Self::Run),
-            (AGENT_SPAWN_WORKFLOW_TOOL_ID, AGENT_SPAWN_WORKFLOW_SEMANTIC_TYPE) => Some(Self::Spawn),
-            _ => None,
-        }
+        [Self::Run, Self::Spawn, Self::ProgramRun, Self::ProgramSpawn]
+            .into_iter()
+            .find(|kind| {
+                kind.workflow_tool_id() == tool_id && kind.semantic_type() == semantic_type
+            })
+    }
+
+    /// The kind whose binding has this workflow tool id.
+    pub fn from_workflow_tool_id(tool_id: &str) -> Option<Self> {
+        [Self::Run, Self::Spawn, Self::ProgramRun, Self::ProgramSpawn]
+            .into_iter()
+            .find(|kind| kind.workflow_tool_id() == tool_id)
     }
 }
 
 pub fn is_subagent_workflow_tool_id(tool_id: &str) -> bool {
-    matches!(
-        tool_id,
-        AGENT_RUN_WORKFLOW_TOOL_ID | AGENT_SPAWN_WORKFLOW_TOOL_ID
-    )
+    SubagentToolKind::from_workflow_tool_id(tool_id).is_some()
 }
 
 /// Model arguments of `agent_run` and `agent_spawn`; identical on purpose.
@@ -140,17 +183,51 @@ impl AgentCallArgs {
                 message: format!("input must be at most {MAX_SUBAGENT_INPUT_BYTES} bytes"),
             });
         }
-        if let Some(label) = &self.label
-            && (label.trim().is_empty() || label.len() > MAX_SUBAGENT_LABEL_BYTES)
-        {
+        validate_label(self.label.as_deref())
+    }
+}
+
+/// Arguments of `program_run` and `program_spawn`; identical on purpose.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramCallArgs {
+    /// Profile id from the session's program list.
+    pub program: String,
+    /// The child program's input, checked against its input schema.
+    pub input: Value,
+    /// Human-readable name shown in the sessions tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl ProgramCallArgs {
+    pub fn validate(&self) -> ToolResult<()> {
+        if self.program.trim().is_empty() {
             return Err(ToolError::InvalidRequest {
-                message: format!(
-                    "label must be non-empty and at most {MAX_SUBAGENT_LABEL_BYTES} bytes"
-                ),
+                message: "program must name a profile from the program catalog".to_owned(),
             });
         }
-        Ok(())
+        let size = serde_json::to_vec(&self.input).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_SUBAGENT_INPUT_BYTES {
+            return Err(ToolError::InvalidRequest {
+                message: format!("input must be at most {MAX_SUBAGENT_INPUT_BYTES} bytes of JSON"),
+            });
+        }
+        validate_label(self.label.as_deref())
     }
+}
+
+fn validate_label(label: Option<&str>) -> ToolResult<()> {
+    if let Some(label) = label
+        && (label.trim().is_empty() || label.len() > MAX_SUBAGENT_LABEL_BYTES)
+    {
+        return Err(ToolError::InvalidRequest {
+            message: format!(
+                "label must be non-empty and at most {MAX_SUBAGENT_LABEL_BYTES} bytes"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Runtime-owned facts pinned when a sub-agent call is admitted: the grant
@@ -163,6 +240,8 @@ pub struct SubagentExecutionContextV1 {
     pub version: u32,
     pub parent_session_id: String,
     pub parent_run_id: u64,
+    /// The child's profile: an agent's, or a program's for the program
+    /// tools.
     pub agent_profile_id: String,
     /// The parent's grant limits at admission; the prepare activity
     /// attenuates them by the parent's own origin.
@@ -223,6 +302,25 @@ pub enum SubagentResultStatus {
     Failed,
     Cancelled,
     Deadline,
+}
+
+/// Why a program child returned no output: the error of the failed call. A
+/// program child that completes resolves to its output itself, already
+/// checked against its output schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProgramChildFailure {
+    pub program: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub status: SubagentResultStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The child run's own failure document (its `status`, `error` and
+    /// `report_ref`), when it recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Value>,
 }
 
 pub const SUBAGENT_CATALOG_SCHEMA_VERSION: &str = "lightspeed.subagents.catalog.v1";
@@ -313,27 +411,60 @@ pub fn subagent_tool_definition(
         SubagentToolKind::Spawn => {
             "Start a sub-agent from the sub-agent catalog with a complete brief and return a promise immediately. Join it later with await (any/all/timeout); cancel closes the child."
         }
+        SubagentToolKind::ProgramRun => {
+            "Run a program from the sub-agent catalog with a JSON input that matches its input schema, and return its output when it finishes. Several program_run calls in one turn run concurrently and return together."
+        }
+        SubagentToolKind::ProgramSpawn => {
+            "Start a program from the sub-agent catalog with a JSON input that matches its input schema, and return a promise immediately. Join it later with await (any/all/timeout); cancel stops the program."
+        }
     };
-    let definition = crate::runtime::FunctionDefinition::new(
-        kind.tool_name(),
-        description,
-        agent_call_input_schema(),
-    );
+    let input_schema = if kind.is_program() {
+        program_call_input_schema()
+    } else {
+        agent_call_input_schema()
+    };
+    let definition =
+        crate::runtime::FunctionDefinition::new(kind.tool_name(), description, input_schema);
     Ok(match kind {
         SubagentToolKind::Run => {
             definition.with_output_schema(crate::definitions::output_schema_for::<
                 SubagentResultEnvelope,
             >())
         }
+        // The output is the child program's own, typed by its profile.
+        SubagentToolKind::ProgramRun => definition,
         // The generic workflow completion contract determines the
         // acknowledgement; declaring it here puts it in a program's contract.
-        SubagentToolKind::Spawn => match crate::workflow_tool::acknowledgement_result_schema(
-            &kind.completion(None, 1),
-            true,
-        ) {
-            Some(schema) => definition.with_output_schema(schema),
-            None => definition,
+        SubagentToolKind::Spawn | SubagentToolKind::ProgramSpawn => {
+            match crate::workflow_tool::acknowledgement_result_schema(
+                &kind.completion(None, 1),
+                true,
+            ) {
+                Some(schema) => definition.with_output_schema(schema),
+                None => definition,
+            }
+        }
+    })
+}
+
+fn program_call_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "program": {
+                "type": "string",
+                "description": "Profile id of the program, from the sub-agent catalog in your context."
+            },
+            "input": {
+                "description": "The program's input, matching the input schema the catalog lists for it."
+            },
+            "label": {
+                "type": "string",
+                "description": "Short human-readable name for this delegation, shown in the sessions tree."
+            }
         },
+        "required": ["program", "input"],
+        "additionalProperties": false
     })
 }
 

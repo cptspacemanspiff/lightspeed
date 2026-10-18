@@ -566,6 +566,55 @@ impl SessionTools {
             .map_err(|error| io_error(format!("invalid JSON tool arguments: {error}")))
     }
 
+    /// The profile a child-session call names, once its arguments are valid
+    /// and the grant lists it; otherwise the failure the call reports.
+    async fn admitted_child(
+        &self,
+        kind: SubagentToolKind,
+        call: &harness::ToolInvocationRequest,
+        policy: &harness::SubagentsFeature,
+    ) -> Result<String, String> {
+        if kind.is_program() {
+            let args: tools::subagents::ProgramCallArgs = self
+                .read_tool_args(call)
+                .await
+                .map_err(|error| error.to_string())?;
+            args.validate().map_err(|error| error.to_string())?;
+            if !policy.program_allowed(&args.program) {
+                let allowed = policy
+                    .programs
+                    .iter()
+                    .map(|program| program.profile_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "program {} is not in this session's sub-agent catalog (allowed: {allowed})",
+                    args.program
+                ));
+            }
+            Ok(args.program)
+        } else {
+            let args: AgentCallArgs = self
+                .read_tool_args(call)
+                .await
+                .map_err(|error| error.to_string())?;
+            args.validate().map_err(|error| error.to_string())?;
+            if !policy.agent_allowed(&args.agent) {
+                let allowed = policy
+                    .agents
+                    .iter()
+                    .map(|agent| agent.profile_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "agent {} is not in this session's sub-agent catalog (allowed: {allowed})",
+                    args.agent
+                ));
+            }
+            Ok(args.agent)
+        }
+    }
+
     async fn invoke_workflow_tool_call(
         &self,
         request: &ToolInvocationBatchRequest,
@@ -642,16 +691,14 @@ impl SessionTools {
                     .await
                     .map_err(map_blob_error)?,
             )
-        } else if SubagentToolKind::from_binding(
+        } else if let Some(kind) = SubagentToolKind::from_binding(
             binding.definition.tool_id.as_str(),
             binding.definition.semantic_type.as_str(),
-        )
-        .is_some()
-        {
-            // Sub-agent admission: the grant on the batch request is
-            // the authority. Validate the agent against its allowlist here,
-            // pin the grant limits and parent identity for the execution,
-            // and let the generic start-on-call path do the rest.
+        ) {
+            // Child-session admission: the grant on the batch request is the
+            // authority. Validate the child against its list here, pin the
+            // grant limits and parent identity for the execution, and let the
+            // generic start-on-call path do the rest.
             let Some(policy) = request.subagents_policy.as_ref() else {
                 return failed_result(
                     self.blobs.as_ref(),
@@ -663,42 +710,16 @@ impl SessionTools {
                 )
                 .await;
             };
-            let args: AgentCallArgs = match self.read_tool_args(call).await {
-                Ok(args) => args,
-                Err(error) => {
-                    return failed_result(
-                        self.blobs.as_ref(),
-                        call.call_id.clone(),
-                        error.to_string(),
-                    )
-                    .await;
+            let child = match self.admitted_child(kind, call, policy).await {
+                Ok(child) => child,
+                Err(message) => {
+                    return failed_result(self.blobs.as_ref(), call.call_id.clone(), message).await;
                 }
             };
-            if let Err(error) = args.validate() {
-                return failed_result(self.blobs.as_ref(), call.call_id.clone(), error.to_string())
-                    .await;
-            }
-            if !policy.agent_allowed(&args.agent) {
-                let allowed = policy
-                    .agents
-                    .iter()
-                    .map(|agent| agent.profile_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return failed_result(
-                    self.blobs.as_ref(),
-                    call.call_id.clone(),
-                    format!(
-                        "agent {} is not in this session's sub-agent catalog (allowed: {allowed})",
-                        args.agent
-                    ),
-                )
-                .await;
-            }
             let context = SubagentExecutionContextV1::new(
                 request.session_id.as_str().to_owned(),
                 request.run_id.as_u64(),
-                args.agent,
+                child,
                 policy.limits,
                 request
                     .active_environment_id
@@ -3668,10 +3689,7 @@ mod tests {
         kind: SubagentToolKind,
     ) -> harness::WorkflowToolBinding {
         let tool = tools::definitions::register(
-            match kind {
-                SubagentToolKind::Run => "subagent.run",
-                SubagentToolKind::Spawn => "subagent.spawn",
-            },
+            kind.tool_id(),
             Default::default(),
             harness::ToolParallelism::ParallelSafe,
             Default::default(),
@@ -3695,20 +3713,9 @@ mod tests {
                     recipe_fingerprint,
                 },
             },
-            match kind {
-                SubagentToolKind::Run => harness::WorkflowToolCompletion::Joined {
-                    reply_schema_ref: None,
-                    deadline_after_ms: harness::SUBAGENT_DEADLINE_CEILING_MS,
-                },
-                SubagentToolKind::Spawn => harness::WorkflowToolCompletion::Promises {
-                    reply_schema_ref: None,
-                    deadline_after_ms: Some(harness::SUBAGENT_DEADLINE_CEILING_MS),
-                    max_promises: 1,
-                    key_source: harness::WorkflowToolCompletionKeySource::Reply,
-                },
-            },
+            kind.completion(None, harness::SUBAGENT_DEADLINE_CEILING_MS),
         )
-        .expect("admit agent_run binding")
+        .expect("admit child-session binding")
     }
 
     fn subagents_policy(
@@ -3755,7 +3762,15 @@ mod tests {
                 builtin: Some(test_builtin_runtime()),
                 call_id: ToolCallId::new("call-agent-run"),
                 tool_id: Some(binding.definition.tool.name.clone()),
-                tool_name: ToolName::new("agent_run"),
+                // The model name of a child-session tool; other bindings
+                // (code mode's) do not check it.
+                tool_name: ToolName::new(
+                    SubagentToolKind::from_binding(
+                        binding.definition.tool_id.as_str(),
+                        &binding.definition.semantic_type,
+                    )
+                    .map_or("agent_run", SubagentToolKind::tool_name),
+                ),
                 arguments_ref,
                 workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(binding.clone(), 0)),
                 promise_control: None,
@@ -4129,6 +4144,68 @@ mod tests {
             }
         }
         assert_eq!(retried, first);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn program_run_admits_only_listed_programs_and_pins_the_child() {
+        let blobs = Arc::new(InMemoryBlobStore::new());
+        let binding = subagent_binding(&blobs, SubagentToolKind::ProgramRun).await;
+        let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
+        let mut policy = subagents_policy(&["reviewer"], harness::SubagentLimits::default());
+        policy.programs = vec![harness::SubagentProgramConfig {
+            profile_id: "checker".to_owned(),
+        }];
+        let invoke = |arguments: &'static [u8]| {
+            let tools = &tools;
+            let blobs = &blobs;
+            let binding = &binding;
+            let policy = policy.clone();
+            async move {
+                tools
+                    .invoke_batch(agent_run_batch(blobs, binding, arguments, Some(policy)).await)
+                    .await
+                    .expect("invoke program_run")
+                    .completed_result()
+                    .expect("completed batch")
+            }
+        };
+
+        // An agent is not a program, and a program needs an input.
+        for (arguments, expected) in [
+            (
+                &br#"{"program":"reviewer","input":{}}"#[..],
+                "program reviewer is not in this session's sub-agent catalog (allowed: checker)",
+            ),
+            (&br#"{"program":"checker"}"#[..], "input"),
+        ] {
+            let refused = invoke(arguments).await;
+            let error = failure_text(&blobs, &refused.results[0]).await;
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let admitted = invoke(br#"{"program":"checker","input":{"claim":"x"}}"#).await;
+        assert_eq!(
+            admitted.results[0].status,
+            ToolCallStatus::Succeeded,
+            "{}",
+            failure_text(&blobs, &admitted.results[0]).await
+        );
+        let context_ref = BlobRef::parse(
+            admitted.results[0].effects[0]
+                .data
+                .get("execution_context_ref")
+                .expect("execution context ref")
+                .clone(),
+        )
+        .expect("valid execution context ref");
+        let context: SubagentExecutionContextV1 = serde_json::from_slice(
+            &blobs
+                .read_bytes(&context_ref)
+                .await
+                .expect("read execution context"),
+        )
+        .expect("decode execution context");
+        assert_eq!(context.agent_profile_id, "checker");
     }
 
     async fn code_binding(

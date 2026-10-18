@@ -176,6 +176,12 @@ pub fn resolve(
         "code.execute" => crate::code::code_execute_tool_definition()?,
         crate::subagents::AGENT_RUN_TOOL_ID => subagent_tool_definition(SubagentToolKind::Run)?,
         crate::subagents::AGENT_SPAWN_TOOL_ID => subagent_tool_definition(SubagentToolKind::Spawn)?,
+        crate::subagents::PROGRAM_RUN_TOOL_ID => {
+            subagent_tool_definition(SubagentToolKind::ProgramRun)?
+        }
+        crate::subagents::PROGRAM_SPAWN_TOOL_ID => {
+            subagent_tool_definition(SubagentToolKind::ProgramSpawn)?
+        }
         "mcp.find_tools" => FunctionDefinition::new(
             "mcp_find_tools",
             format!(

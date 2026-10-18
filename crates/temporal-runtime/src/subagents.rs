@@ -1,15 +1,16 @@
-//! Hosted sub-agent delegation service: the activities behind
-//! `SubagentExecutionWorkflow`. Prepare validates the pinned grant, reserves
-//! the root-scoped tree slot by creating the child session row, creates the
-//! child from the pinned profile, and starts its run with a notify intent
-//! back to the execution; resolve builds the result envelope and closes the
+//! Hosted child-session delegation service: the activities behind
+//! `SubagentExecutionWorkflow`, for child agents and child programs alike.
+//! Prepare validates the pinned grant, reserves the root-scoped tree slot by
+//! creating the child session row, creates the child from the pinned profile,
+//! and starts its run with a notify intent back to the execution; resolve
+//! builds the result (an agent's envelope, a program's output) and closes the
 //! child; close force-closes a cancelled child.
 
 use std::sync::Arc;
 
 use api::{
     AgentApiError, AgentApiService, AgentProfile, InlineAgentProfile, InputItem, ProfileId,
-    ProfileSource, SessionCloseParams, SessionReadParams,
+    ProfileSource, RunStartSource, SessionCloseParams, SessionReadParams,
 };
 use async_trait::async_trait;
 use harness::{
@@ -27,8 +28,8 @@ use tools::{
     attachments::{Attachment, linked_attachments},
     concurrency::{AwaitArgs, AwaitModeArg},
     subagents::{
-        AgentCallArgs, SubagentExecutionContextV1, SubagentResultEnvelope, SubagentResultStatus,
-        SubagentToolKind,
+        AgentCallArgs, ProgramCallArgs, ProgramChildFailure, SubagentExecutionContextV1,
+        SubagentResultEnvelope, SubagentResultStatus, SubagentToolKind,
     },
 };
 
@@ -42,19 +43,30 @@ const MAX_SUBAGENT_OUTPUT_BYTES: usize = 512 * 1024;
 pub trait SubagentChildRuntime: Send + Sync {
     async fn read_profile(&self, profile_id: ProfileId) -> Result<AgentProfile, AgentApiError>;
 
+    /// Open the child's workflow from `profile`. `pinned_from` names the
+    /// profile revision an inline copy came from, so a program pinned from it
+    /// records its program identity.
     async fn start_session(
         &self,
         session_id: &SessionId,
         profile: ProfileSource,
+        pinned_from: Option<(ProfileId, u64)>,
     ) -> Result<(), AgentApiError>;
 
     async fn start_run(
         &self,
         session_id: &SessionId,
-        input: Vec<InputItem>,
+        source: RunStartSource,
         submission_id: SubmissionId,
         notify_on_terminal: Vec<RunTerminalNotifyIntent>,
     ) -> Result<String, AgentApiError>;
+
+    /// The session's config as it was last put, for the grants a child may
+    /// ask for. Read on behalf of the runtime, not a caller.
+    async fn session_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<api::SessionConfig>, AgentApiError>;
 
     async fn close_session(&self, session_id: &SessionId, force: bool)
     -> Result<(), AgentApiError>;
@@ -93,11 +105,12 @@ impl SubagentChildRuntime for AgentApiSubagentRuntime {
         &self,
         session_id: &SessionId,
         profile: ProfileSource,
+        pinned_from: Option<(ProfileId, u64)>,
     ) -> Result<(), AgentApiError> {
         let authority = self.api.delegated_session_authority(session_id).await?;
         crate::gateway::service::authorization::with_controller_authority(authority, async {
             self.api
-                .start_session_for_subagent(session_id, profile)
+                .start_session_for_subagent(session_id, profile, pinned_from)
                 .await
         })
         .await
@@ -106,17 +119,31 @@ impl SubagentChildRuntime for AgentApiSubagentRuntime {
     async fn start_run(
         &self,
         session_id: &SessionId,
-        input: Vec<InputItem>,
+        source: RunStartSource,
         submission_id: SubmissionId,
         notify_on_terminal: Vec<RunTerminalNotifyIntent>,
     ) -> Result<String, AgentApiError> {
         let authority = self.api.delegated_session_authority(session_id).await?;
         crate::gateway::service::authorization::with_controller_authority(authority, async {
             self.api
-                .start_run_for_subagent(session_id, input, submission_id, notify_on_terminal)
+                .start_run_for_subagent(session_id, source, submission_id, notify_on_terminal)
                 .await
         })
         .await
+    }
+
+    async fn session_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<api::SessionConfig>, AgentApiError> {
+        let loaded = self.api.load_session_state(session_id).await?;
+        loaded
+            .state
+            .lifecycle
+            .config
+            .as_ref()
+            .map(api_projection::session_config_to_api)
+            .transpose()
     }
 
     async fn close_session(
@@ -228,21 +255,50 @@ impl SubagentService {
                 "subagent invocation is missing its reply completion promise",
             ));
         };
-        if SubagentToolKind::from_binding(
+        let Some(kind) = SubagentToolKind::from_binding(
             invocation.tool_id.as_str(),
             invocation.semantic_type.as_str(),
-        )
-        .is_none()
-        {
+        ) else {
             return Err(AgentApiError::invalid_request(format!(
                 "unsupported subagent workflow tool {} ({})",
                 invocation.tool_id, invocation.semantic_type
             )));
-        }
-        let args: AgentCallArgs = self.read_json(&invocation.arguments_ref).await?;
-        if let Err(error) = args.validate() {
-            return self.rejected(error.to_string()).await;
-        }
+        };
+        let noun = if kind.is_program() {
+            "program"
+        } else {
+            "agent"
+        };
+        let call = if kind.is_program() {
+            let args: ProgramCallArgs = self.read_json(&invocation.arguments_ref).await?;
+            if let Err(error) = args.validate() {
+                return self.rejected(error.to_string()).await;
+            }
+            ChildCall {
+                profile: args.program,
+                label: args.label,
+                run: RunStartSource::Program {
+                    input: args.input,
+                    input_defaults: None,
+                },
+            }
+        } else {
+            let args: AgentCallArgs = self.read_json(&invocation.arguments_ref).await?;
+            if let Err(error) = args.validate() {
+                return self.rejected(error.to_string()).await;
+            }
+            ChildCall {
+                profile: args.agent,
+                label: args.label,
+                run: RunStartSource::Input {
+                    items: vec![InputItem::Text {
+                        provenance_ref: None,
+                        origin: None,
+                        text: args.input,
+                    }],
+                },
+            }
+        };
         let context_ref = invocation.execution_context_ref.as_ref().ok_or_else(|| {
             AgentApiError::invalid_request("subagent invocation is missing its execution context")
         })?;
@@ -258,11 +314,11 @@ impl SubagentService {
                 context.version
             )));
         }
-        if context.agent_profile_id != args.agent {
+        if context.agent_profile_id != call.profile {
             return self
                 .rejected(format!(
-                    "agent {} does not match the admitted agent {}",
-                    args.agent, context.agent_profile_id
+                    "{noun} {} does not match the admitted {noun} {}",
+                    call.profile, context.agent_profile_id
                 ))
                 .await;
         }
@@ -284,13 +340,13 @@ impl SubagentService {
             ),
             None => (parent_session_id.clone(), 1, context.grant_limits),
         };
-        let profile_id = match ProfileId::try_new(args.agent.clone()) {
+        let profile_id = match ProfileId::try_new(call.profile.clone()) {
             Ok(profile_id) => profile_id,
             Err(error) => {
                 return self
                     .rejected(format!(
-                        "invalid agent profile id {:?}: {error}",
-                        args.agent
+                        "invalid {noun} profile id {:?}: {error}",
+                        call.profile
                     ))
                     .await;
             }
@@ -299,13 +355,73 @@ impl SubagentService {
             Ok(profile) => profile,
             Err(error) if is_not_found(&error) => {
                 return self
-                    .rejected(format!("agent profile does not exist: {profile_id}"))
+                    .rejected(format!("{noun} profile does not exist: {profile_id}"))
                     .await;
             }
             Err(error) => return Err(error),
         };
+        // The grant lists each profile under its kind, but a profile can be
+        // edited into the other kind after the grant was admitted.
+        if profile.document.program.is_some() != kind.is_program() {
+            return self
+                .rejected(format!(
+                    "{profile_id} is no longer {} profile",
+                    if kind.is_program() {
+                        "a program"
+                    } else {
+                        "an agent"
+                    }
+                ))
+                .await;
+        }
+        // The profile is applied inline so the child runs the revision that
+        // is pinned on its origin, not whatever the registry holds later,
+        // with any `inherit` attachment resolved against the parent
+        // environment captured at admission.
+        let document = resolve_inherited_environment(
+            profile.document.clone(),
+            context.parent_active_environment_id.as_deref(),
+        );
+        // Checked again when the child's run starts; checking it here keeps a
+        // bad input from taking a slot in the tree.
+        if let (
+            RunStartSource::Program { input, .. },
+            Some(api::ProgramSpec {
+                input_schema: Some(schema),
+                ..
+            }),
+        ) = (&call.run, &profile.document.program)
+            && let Err(error) = jsonschema::validate(schema, input)
+        {
+            return self
+                .rejected(format!(
+                    "program {profile_id} input does not satisfy its input schema: {error}"
+                ))
+                .await;
+        }
+        if kind.is_program() {
+            let parent_config = self.runtime.session_config(&parent_session_id).await?;
+            if let Some(excess) = crate::subagent_grants::excess_grant(
+                document
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.features.as_ref()),
+                parent_config
+                    .as_ref()
+                    .and_then(|config| config.features.as_ref()),
+            ) {
+                return self
+                    .rejected_for(
+                        "grant_exceeded",
+                        format!(
+                            "program {profile_id} asks for {excess}, which its caller does not hold"
+                        ),
+                    )
+                    .await;
+            }
+        }
         let child_session_id = child_session_id(&start.execution_id);
-        let display_name = args.label.clone().or_else(|| {
+        let display_name = call.label.clone().or_else(|| {
             profile
                 .display_name
                 .clone()
@@ -362,13 +478,10 @@ impl SubagentService {
             }
             Err(error) => return Err(api_projection::map_session_store_error(error)),
         }
-        // The profile is applied inline so the child runs the revision that
-        // was pinned on its origin, not whatever the registry holds later,
-        // with any `inherit` attachment resolved against the parent
-        // environment captured at admission. A profile that cannot be
-        // applied (a missing binding, ...) is a rejected delegation the
-        // parent must see, not an activity retry: a retried start finds the
-        // child workflow already running and would skip the profile.
+        // A profile that cannot be applied (a missing binding, ...) is a
+        // rejected delegation the parent must see, not an activity retry: a
+        // retried start finds the child workflow already running and would
+        // skip the profile. A program child keeps its profile's identity.
         if let Err(error) = self
             .runtime
             .start_session(
@@ -377,19 +490,18 @@ impl SubagentService {
                     profile: Box::new(InlineAgentProfile {
                         display_name: profile.display_name.clone(),
                         description: profile.description.clone(),
-                        document: resolve_inherited_environment(
-                            profile.document.clone(),
-                            context.parent_active_environment_id.as_deref(),
-                        ),
+                        document,
                     }),
                 },
+                kind.is_program()
+                    .then(|| (profile_id.clone(), profile.revision)),
             )
             .await
         {
             if is_caller_error(&error) {
                 let _ = self.close(child_session_id.as_str()).await;
                 return self
-                    .rejected(format!("agent {profile_id} could not be started: {error}"))
+                    .rejected(format!("{noun} {profile_id} could not be started: {error}"))
                     .await;
             }
             return Err(error);
@@ -398,28 +510,37 @@ impl SubagentService {
             "subagent_run_{}",
             digest_suffix(&start.execution_id)
         ));
-        let run_id = self
+        // A run the child refuses (a program input outside its schema, ...)
+        // is the caller's to see, like a profile that cannot be applied.
+        let run_id = match self
             .runtime
             .start_run(
                 &child_session_id,
-                vec![InputItem::Text {
-                    provenance_ref: None,
-                    origin: None,
-                    text: args.input,
-                }],
+                call.run,
                 submission_id,
                 vec![RunTerminalNotifyIntent {
                     holder_workflow_id: start.execution_id.clone(),
                     token: reply_promise_id.as_str().to_owned(),
                 }],
             )
-            .await?;
+            .await
+        {
+            Ok(run_id) => run_id,
+            Err(error) if is_caller_error(&error) => {
+                let _ = self.close(child_session_id.as_str()).await;
+                return self
+                    .rejected(format!("{noun} {profile_id} could not run: {error}"))
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         let run_id = parse_api_run_id(&run_id)?;
         Ok(SubagentPrepareActivityResult::Prepared {
             child: SubagentChildRef {
                 session_id: child_session_id.as_str().to_owned(),
                 run_id,
                 agent_profile_id: profile_id.as_str().to_owned(),
+                program: kind.is_program(),
             },
             deadline_ms: limits.deadline_ms,
         })
@@ -499,6 +620,9 @@ impl SubagentService {
         child: SubagentChildRef,
         terminal: SubagentTerminal,
     ) -> Result<PromiseResolution, AgentApiError> {
+        if child.program {
+            return self.resolve_program(child, terminal).await;
+        }
         let (status, output, error, attachments) = match terminal {
             SubagentTerminal::Run {
                 status,
@@ -588,6 +712,93 @@ impl SubagentService {
         })
     }
 
+    /// A program child's result is its output, already checked against its
+    /// output schema; otherwise the call fails with why.
+    async fn resolve_program(
+        &self,
+        child: SubagentChildRef,
+        terminal: SubagentTerminal,
+    ) -> Result<PromiseResolution, AgentApiError> {
+        let (status, error, failure) = match terminal {
+            SubagentTerminal::Run {
+                status: RunStatus::Completed,
+                output: Some(output),
+                ..
+            } => {
+                self.close(&child.session_id).await?;
+                return Ok(PromiseResolution::Resolved {
+                    payload_ref: Some(output.content_ref),
+                });
+            }
+            SubagentTerminal::Run {
+                status,
+                failure_message_ref,
+                ..
+            } => {
+                let failure = match failure_message_ref.as_ref() {
+                    Some(failure_ref) => Some(self.read_failure(failure_ref).await?),
+                    None => None,
+                };
+                let error = failure
+                    .as_ref()
+                    .and_then(|failure| failure.get("error"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                match status {
+                    RunStatus::Cancelled => (
+                        SubagentResultStatus::Cancelled,
+                        error.or_else(|| Some("program run was cancelled".to_owned())),
+                        failure,
+                    ),
+                    _ => (
+                        SubagentResultStatus::Failed,
+                        error.or_else(|| Some("program run failed".to_owned())),
+                        failure,
+                    ),
+                }
+            }
+            SubagentTerminal::Deadline => (
+                SubagentResultStatus::Deadline,
+                Some("program run exceeded the grant deadline".to_owned()),
+                None,
+            ),
+        };
+        let failure = ProgramChildFailure {
+            program: child.agent_profile_id.clone(),
+            session_id: child.session_id.clone(),
+            run_id: Some(format!("run_{}", child.run_id)),
+            status,
+            error,
+            failure,
+        };
+        let error_ref = self
+            .blobs
+            .put_bytes(serde_json::to_vec(&failure).map_err(|error| {
+                AgentApiError::internal(format!("encode program child failure: {error}"))
+            })?)
+            .await
+            .map_err(|error| AgentApiError::internal(error.to_string()))?;
+        self.close(&child.session_id).await?;
+        Ok(PromiseResolution::Failed {
+            error_ref: Some(error_ref),
+        })
+    }
+
+    /// A program run's failure document, or its text when it is not JSON.
+    async fn read_failure(&self, blob_ref: &BlobRef) -> Result<serde_json::Value, AgentApiError> {
+        let bytes = self
+            .blobs
+            .read_bytes(blob_ref)
+            .await
+            .map_err(|error| AgentApiError::internal(error.to_string()))?;
+        Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(truncate_utf8(
+                String::from_utf8_lossy(&bytes).into_owned(),
+                MAX_SUBAGENT_OUTPUT_BYTES,
+            ))
+        }))
+    }
+
     /// Force-close the child; an already-closed or missing child is fine.
     pub async fn close(&self, session_id: &str) -> Result<(), AgentApiError> {
         let session_id = SessionId::try_new(session_id.to_owned())
@@ -603,10 +814,28 @@ impl SubagentService {
         &self,
         message: String,
     ) -> Result<SubagentPrepareActivityResult, AgentApiError> {
+        self.rejection(serde_json::json!({ "error": message }))
+            .await
+    }
+
+    /// A rejection the caller can tell apart by `reason`.
+    async fn rejected_for(
+        &self,
+        reason: &str,
+        message: String,
+    ) -> Result<SubagentPrepareActivityResult, AgentApiError> {
+        self.rejection(serde_json::json!({ "error": message, "reason": reason }))
+            .await
+    }
+
+    async fn rejection(
+        &self,
+        document: serde_json::Value,
+    ) -> Result<SubagentPrepareActivityResult, AgentApiError> {
         let error_ref = self
             .blobs
             .put_bytes(
-                serde_json::to_vec(&serde_json::json!({ "error": message }))
+                serde_json::to_vec(&document)
                     .map_err(|error| AgentApiError::internal(error.to_string()))?,
             )
             .await
@@ -642,6 +871,13 @@ impl SubagentService {
         };
         Ok(truncate_utf8(text, MAX_SUBAGENT_OUTPUT_BYTES))
     }
+}
+
+/// What a child-session call asks for, whichever tool made it.
+struct ChildCall {
+    profile: String,
+    label: Option<String>,
+    run: RunStartSource,
 }
 
 /// Generic `await` argument evaluation shared by the session tool runtime.
@@ -785,7 +1021,8 @@ mod tests {
     };
     use temporal_workflow::{SubagentChildRef, SubagentTerminal};
     use tools::subagents::{
-        AGENT_RUN_WORKFLOW_SEMANTIC_TYPE, AGENT_RUN_WORKFLOW_TOOL_ID, SubagentResultEnvelope,
+        AGENT_RUN_WORKFLOW_SEMANTIC_TYPE, AGENT_RUN_WORKFLOW_TOOL_ID,
+        PROGRAM_RUN_WORKFLOW_SEMANTIC_TYPE, PROGRAM_RUN_WORKFLOW_TOOL_ID, SubagentResultEnvelope,
         SubagentResultStatus,
     };
 
@@ -795,7 +1032,7 @@ mod tests {
 
     type StartedRun = (
         String,
-        Vec<InputItem>,
+        RunStartSource,
         SubmissionId,
         Vec<RunTerminalNotifyIntent>,
     );
@@ -807,7 +1044,10 @@ mod tests {
         start_session_error: Mutex<Option<AgentApiError>>,
         close_error: Mutex<Option<AgentApiError>>,
         started_sessions: Mutex<Vec<(String, ProfileSource)>>,
+        pinned_from: Mutex<Vec<Option<(ProfileId, u64)>>>,
         started_runs: Mutex<Vec<StartedRun>>,
+        start_run_error: Mutex<Option<AgentApiError>>,
+        parent_config: Mutex<Option<api::SessionConfig>>,
         closed: Mutex<Vec<(String, bool)>>,
         media: Mutex<Vec<MediaDescriptor>>,
     }
@@ -835,6 +1075,30 @@ mod tests {
             );
             Arc::new(runtime)
         }
+
+        /// A program profile whose config grants `features`.
+        fn with_program(profile_id: &str, revision: u64, features: serde_json::Value) -> Arc<Self> {
+            let runtime = Self::with_profile(profile_id, revision);
+            let mut profiles = runtime.profiles.lock().unwrap();
+            let profile = profiles.get_mut(profile_id).expect("profile");
+            profile.document.program = Some(api::ProgramSpec {
+                source: api::ProgramSource::Text {
+                    text: "export default { run(input) { return input; } };".to_owned(),
+                },
+                semantics_version: 1,
+                input_schema: None,
+                output_schema: None,
+                limits: None,
+                requires: Vec::new(),
+                approvals: None,
+            });
+            profile.document.config = Some(api::SessionConfig {
+                features: Some(serde_json::from_value(features).expect("features")),
+                ..Default::default()
+            });
+            drop(profiles);
+            runtime
+        }
     }
 
     #[async_trait]
@@ -852,6 +1116,7 @@ mod tests {
             &self,
             session_id: &SessionId,
             profile: ProfileSource,
+            pinned_from: Option<(ProfileId, u64)>,
         ) -> Result<(), AgentApiError> {
             if let Some(error) = self.start_session_error.lock().unwrap().clone() {
                 return Err(error);
@@ -860,23 +1125,34 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((session_id.as_str().to_owned(), profile));
+            self.pinned_from.lock().unwrap().push(pinned_from);
             Ok(())
         }
 
         async fn start_run(
             &self,
             session_id: &SessionId,
-            input: Vec<InputItem>,
+            source: RunStartSource,
             submission_id: SubmissionId,
             notify_on_terminal: Vec<RunTerminalNotifyIntent>,
         ) -> Result<String, AgentApiError> {
+            if let Some(error) = self.start_run_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             self.started_runs.lock().unwrap().push((
                 session_id.as_str().to_owned(),
-                input,
+                source,
                 submission_id,
                 notify_on_terminal,
             ));
             Ok("run_1".to_owned())
+        }
+
+        async fn session_config(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<api::SessionConfig>, AgentApiError> {
+            Ok(self.parent_config.lock().unwrap().clone())
         }
 
         async fn close_session(
@@ -1008,6 +1284,49 @@ mod tests {
                     reply_promise(),
                 )])),
             },
+        }
+    }
+
+    /// A start for `program_run` of `program` by `parent`, admitted for it.
+    async fn program_start_args(
+        blobs: &InMemoryBlobStore,
+        execution_id: &str,
+        program: &str,
+    ) -> WorkflowToolStartArgs {
+        let mut start = start_args(
+            blobs,
+            execution_id,
+            "parent",
+            program,
+            program,
+            SubagentLimits::default(),
+        )
+        .await;
+        start.invocation.tool_id = WorkflowToolId::new(PROGRAM_RUN_WORKFLOW_TOOL_ID);
+        start.invocation.semantic_type = PROGRAM_RUN_WORKFLOW_SEMANTIC_TYPE.to_owned();
+        start.invocation.arguments_ref = blobs
+            .put_bytes(
+                serde_json::to_vec(&serde_json::json!({
+                    "program": program,
+                    "input": { "claim": "x" },
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("put arguments");
+        start
+    }
+
+    async fn rejection(
+        blobs: &InMemoryBlobStore,
+        result: SubagentPrepareActivityResult,
+    ) -> serde_json::Value {
+        match result {
+            SubagentPrepareActivityResult::Rejected { error_ref } => {
+                serde_json::from_slice(&blobs.read_bytes(&error_ref).await.expect("read"))
+                    .expect("decode rejection")
+            }
+            SubagentPrepareActivityResult::Prepared { .. } => panic!("expected a rejection"),
         }
     }
 
@@ -1172,11 +1491,13 @@ mod tests {
         assert_eq!(runs[0].0, child.session_id);
         assert_eq!(
             runs[0].1,
-            vec![InputItem::Text {
-                provenance_ref: None,
-                origin: None,
-                text: "review the change".to_owned()
-            }]
+            RunStartSource::Input {
+                items: vec![InputItem::Text {
+                    provenance_ref: None,
+                    origin: None,
+                    text: "review the change".to_owned()
+                }]
+            }
         );
         assert_eq!(
             runs[0].3,
@@ -1473,7 +1794,207 @@ mod tests {
             session_id: "agent_child".to_owned(),
             run_id: 5,
             agent_profile_id: "reviewer".to_owned(),
+            program: false,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_child_is_pinned_to_its_profile_and_runs_its_json_input() {
+        let runtime =
+            FakeChildRuntime::with_program("checker", 4, serde_json::json!({ "timers": {} }));
+        *runtime.parent_config.lock().unwrap() = Some(api::SessionConfig {
+            features: Some(
+                serde_json::from_value(serde_json::json!({ "timers": {}, "web": { "fetch": {} } }))
+                    .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let h = harness(runtime).await;
+        let start = program_start_args(&h.blobs, "wte:c", "checker").await;
+        let (child, _) = prepared(h.service.prepare(start, 10).await.expect("prepare"));
+        assert!(child.program);
+        assert_eq!(child.agent_profile_id, "checker");
+        assert_eq!(
+            *h.runtime.pinned_from.lock().unwrap(),
+            [Some((ProfileId::new("checker"), 4))],
+            "the child program records the profile revision it was copied from"
+        );
+        let runs = h.runtime.started_runs.lock().unwrap().clone();
+        assert_eq!(
+            runs[0].1,
+            RunStartSource::Program {
+                input: serde_json::json!({ "claim": "x" }),
+                input_defaults: None,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_child_that_asks_for_more_than_its_caller_holds_is_never_created() {
+        let runtime =
+            FakeChildRuntime::with_program("checker", 1, serde_json::json!({ "timers": {} }));
+        let h = harness(runtime).await;
+        let start = program_start_args(&h.blobs, "wte:c", "checker").await;
+        let refused = rejection(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert_eq!(refused["reason"], "grant_exceeded");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("the timers feature")),
+            "{refused}"
+        );
+        assert!(h.runtime.started_sessions.lock().unwrap().is_empty());
+        let children = h
+            .sessions
+            .load_session(&child_session_id("wte:c"))
+            .await
+            .expect("load");
+        assert!(children.is_none(), "no tree slot was taken");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_call_naming_an_agent_or_refused_by_its_child_is_rejected() {
+        // The listed program was edited into an agent profile.
+        let runtime = FakeChildRuntime::with_profile("checker", 1);
+        let h = harness(runtime).await;
+        let start = program_start_args(&h.blobs, "wte:c", "checker").await;
+        let message = rejection_message(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert!(
+            message.contains("is no longer a program profile"),
+            "{message}"
+        );
+
+        // The child refuses the input (outside its input schema, ...).
+        let runtime = FakeChildRuntime::with_program("checker", 1, serde_json::json!({}));
+        *runtime.start_run_error.lock().unwrap() = Some(AgentApiError::invalid_request(
+            "program input does not satisfy the program's input schema",
+        ));
+        let h = harness(runtime).await;
+        let start = program_start_args(&h.blobs, "wte:d", "checker").await;
+        let message = rejection_message(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert!(message.contains("could not run"), "{message}");
+        assert_eq!(
+            h.runtime.closed.lock().unwrap().as_slice(),
+            [(child_session_id("wte:d").as_str().to_owned(), true)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_input_outside_its_schema_is_refused_before_a_child_exists() {
+        let runtime = FakeChildRuntime::with_program("checker", 1, serde_json::json!({}));
+        runtime
+            .profiles
+            .lock()
+            .unwrap()
+            .get_mut("checker")
+            .and_then(|profile| profile.document.program.as_mut())
+            .expect("program")
+            .input_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["claim"],
+            "properties": { "claim": { "type": "integer" } },
+        }));
+        let h = harness(runtime).await;
+        let start = program_start_args(&h.blobs, "wte:c", "checker").await;
+        let message = rejection_message(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert!(
+            message.contains("does not satisfy its input schema"),
+            "{message}"
+        );
+        assert!(h.runtime.started_sessions.lock().unwrap().is_empty());
+        assert!(
+            h.sessions
+                .load_session(&child_session_id("wte:c"))
+                .await
+                .expect("load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_child_resolves_to_its_output_or_fails_with_its_failure() {
+        let runtime = Arc::new(FakeChildRuntime::default());
+        let h = harness(runtime).await;
+        let child = SubagentChildRef {
+            program: true,
+            agent_profile_id: "checker".to_owned(),
+            ..child_ref()
+        };
+        let output_ref = h
+            .blobs
+            .put_bytes(br#"{"verdict":"ok"}"#.to_vec())
+            .await
+            .unwrap();
+        let resolved = h
+            .service
+            .resolve(
+                child.clone(),
+                SubagentTerminal::Run {
+                    status: RunStatus::Completed,
+                    output: Some(harness::ContentRef {
+                        content_ref: output_ref.clone(),
+                        media_type: Some("application/json".to_owned()),
+                        provider_kind: None,
+                    }),
+                    failure_message_ref: None,
+                },
+            )
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved,
+            PromiseResolution::Resolved {
+                payload_ref: Some(output_ref)
+            }
+        );
+
+        let failure_ref = h
+            .blobs
+            .put_bytes(
+                br#"{"status":"threw","error":"no sources","report_ref":"sha256:r"}"#.to_vec(),
+            )
+            .await
+            .unwrap();
+        let failed = h
+            .service
+            .resolve(
+                child,
+                SubagentTerminal::Run {
+                    status: RunStatus::Failed,
+                    output: None,
+                    failure_message_ref: Some(failure_ref),
+                },
+            )
+            .await
+            .expect("resolve");
+        let PromiseResolution::Failed {
+            error_ref: Some(error_ref),
+        } = failed
+        else {
+            panic!("expected a failure: {failed:?}");
+        };
+        let failure: ProgramChildFailure =
+            serde_json::from_slice(&h.blobs.read_bytes(&error_ref).await.unwrap()).unwrap();
+        assert_eq!(failure.status, SubagentResultStatus::Failed);
+        assert_eq!(failure.error.as_deref(), Some("no sources"));
+        assert_eq!(failure.failure.as_ref().unwrap()["status"], "threw");
+        assert_eq!(h.runtime.closed.lock().unwrap().len(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]

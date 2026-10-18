@@ -380,6 +380,7 @@ mod tests {
             session_id: "agent_child".to_owned(),
             run_id: 1,
             agent_profile_id: "reviewer".to_owned(),
+            program: false,
         }
     }
 
