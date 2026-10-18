@@ -325,15 +325,17 @@ pub struct ProgramChildFailure {
 
 pub const SUBAGENT_CATALOG_SCHEMA_VERSION: &str = "lightspeed.subagents.catalog.v1";
 
-/// The agent menu as the model sees it: the grant's allowlist joined with
-/// the current profile records. Published as a generic `Catalog` context
-/// entry and refreshed like the skill catalog (before each run on an idle
-/// session, and on idle API reads), so description edits land at the next
-/// run while the pinned profile revision still governs each child.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The agent and program menu as the model sees it: the grant's lists
+/// joined with the current profile records. Published as a generic `Catalog`
+/// context entry and refreshed like the skill catalog (before each run on an
+/// idle session, and on idle API reads), so description edits land at the
+/// next run while the pinned profile revision still governs each child.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentCatalogSnapshot {
     pub schema_version: String,
     pub agents: Vec<SubagentCatalogAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<SubagentCatalogProgram>,
     pub limits: SubagentLimits,
 }
 
@@ -349,11 +351,33 @@ pub struct SubagentCatalogAgent {
     pub revision: Option<u64>,
 }
 
+/// A program on the menu, with the schemas its input and output follow.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentCatalogProgram {
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Absent when the listed profile no longer exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+}
+
 impl SubagentCatalogSnapshot {
-    pub fn new(agents: Vec<SubagentCatalogAgent>, limits: SubagentLimits) -> Self {
+    pub fn new(
+        agents: Vec<SubagentCatalogAgent>,
+        programs: Vec<SubagentCatalogProgram>,
+        limits: SubagentLimits,
+    ) -> Self {
         Self {
             schema_version: SUBAGENT_CATALOG_SCHEMA_VERSION.to_owned(),
             agents,
+            programs,
             limits,
         }
     }

@@ -8,7 +8,8 @@ use tools::catalog::{
     clear_catalog_command,
 };
 use tools::subagents::{
-    SubagentCatalogAgent, SubagentCatalogSnapshot, prepare_subagent_catalog_publication,
+    SubagentCatalogAgent, SubagentCatalogProgram, SubagentCatalogSnapshot,
+    prepare_subagent_catalog_publication,
 };
 use tools::{
     environment::projection::{
@@ -357,5 +358,30 @@ pub async fn subagent_catalog_snapshot(
             revision: record.as_ref().map(|profile| profile.revision),
         });
     }
-    SubagentCatalogSnapshot::new(agents, subagents.limits)
+    let mut programs = Vec::with_capacity(subagents.programs.len());
+    for program in &subagents.programs {
+        let record = match (
+            profiles,
+            api::ProfileId::try_new(program.profile_id.clone()),
+        ) {
+            (Some(profiles), Ok(profile_id)) => profiles.read_agent_profile(&profile_id).await.ok(),
+            _ => None,
+        };
+        let spec = record
+            .as_ref()
+            .and_then(|profile| profile.document.program.as_ref());
+        programs.push(SubagentCatalogProgram {
+            profile_id: program.profile_id.clone(),
+            display_name: record
+                .as_ref()
+                .and_then(|profile| profile.display_name.clone()),
+            description: record
+                .as_ref()
+                .and_then(|profile| profile.description.clone()),
+            revision: record.as_ref().map(|profile| profile.revision),
+            input_schema: spec.and_then(|spec| spec.input_schema.clone()),
+            output_schema: spec.and_then(|spec| spec.output_schema.clone()),
+        });
+    }
+    SubagentCatalogSnapshot::new(agents, programs, subagents.limits)
 }

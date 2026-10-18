@@ -43,8 +43,9 @@ use tools::human_input::{
 
 /// The model of the child agents programs start. A brief `CHECK <word>` is
 /// answered `checked <word>`; one containing `FAIL` fails the child's run. A
-/// program session never plans a model turn, so a request without a brief
-/// is a bug.
+/// brief `PROGRAM <profile> <claim>` calls `program_run` with that claim and
+/// answers with what came back. A program session never plans a model turn,
+/// so a request without a brief is a bug.
 struct ChildAgentModel {
     blobs: Arc<dyn BlobStore>,
 }
@@ -77,6 +78,109 @@ impl ChildAgentModel {
             })
     }
 
+    /// `program_run` of `<profile> <claim>`, then the tool result as the
+    /// answer.
+    async fn call_program(
+        &self,
+        request: &LlmGenerationRequest,
+        script: &str,
+    ) -> Result<LlmGenerationResult, CoreAgentIoError> {
+        let mut facts = harness::LlmGenerationFacts {
+            duration_ms: None,
+            provider_response_id: None,
+            finish: harness::LlmFinish::Stop,
+            usage: None,
+            tool_calls: Vec::new(),
+            approval_requests: Vec::new(),
+            context_token_estimate: None,
+        };
+        let answered = request
+            .request
+            .context
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| matches!(entry.kind, harness::ContextEntryKind::ToolResult { .. }));
+        let (kind, text, provider_kind) = match answered {
+            Some(result) => {
+                let result = self
+                    .blobs
+                    .read_text(&result.content.content_ref)
+                    .await
+                    .map_err(|error| CoreAgentIoError::Failed {
+                        message: error.to_string(),
+                    })?;
+                (
+                    harness::ContextEntryKind::Message {
+                        role: harness::ContextMessageRole::Assistant,
+                    },
+                    serde_json::to_vec(
+                        &json!([{ "type": "text", "text": format!("program said {result}") }]),
+                    )
+                    .expect("text blocks"),
+                    harness::ANTHROPIC_MESSAGES_TEXT_BLOCKS_PROVIDER_KIND,
+                )
+            }
+            None => {
+                let mut words = script.split_whitespace();
+                let program = words.next().unwrap_or_default();
+                let claim = words.next().unwrap_or_default();
+                let tool_name = tools::subagents::PROGRAM_RUN_TOOL_NAME;
+                let tool_id =
+                    test_support::scripted_tool_id(request, tool_name).ok_or_else(|| {
+                        CoreAgentIoError::Failed {
+                            message: format!("{tool_name} is not offered to this agent"),
+                        }
+                    })?;
+                let arguments = serde_json::to_vec(&json!({
+                    "program": program,
+                    "input": { "claim": claim },
+                }))
+                .expect("arguments");
+                let call_id =
+                    harness::ToolCallId::new(format!("program_call_{}", request.turn_id.as_u64()));
+                let arguments_ref = self.put(arguments.clone()).await?;
+                facts.finish = harness::LlmFinish::ToolCalls;
+                facts.tool_calls.push(harness::ObservedToolCall {
+                    call_id: call_id.clone(),
+                    tool_id: Some(tool_id),
+                    tool_name: harness::ToolName::new(tool_name),
+                    provider_kind: Some("program-script".to_owned()),
+                    arguments_ref,
+                    native_call_ref: None,
+                });
+                (
+                    harness::ContextEntryKind::ToolCall {
+                        call_id,
+                        name: harness::ToolName::new(tool_name),
+                    },
+                    arguments,
+                    "program-script",
+                )
+            }
+        };
+        let content_ref = self.put(text).await?;
+        Ok(LlmGenerationResult {
+            run_id: request.run_id,
+            turn_id: request.turn_id,
+            status: harness::LlmGenerationStatus::Succeeded,
+            failure_ref: None,
+            context_entries: vec![harness::ContextEntryInput {
+                kind,
+                content: harness::ContentRef {
+                    content_ref,
+                    media_type: Some("application/json".to_owned()),
+                    provider_kind: Some(provider_kind.to_owned()),
+                },
+                preview: None,
+                origin: None,
+                provenance_ref: None,
+                token_estimate: None,
+            }],
+            facts,
+        })
+    }
+
     async fn put(&self, bytes: Vec<u8>) -> Result<BlobRef, CoreAgentIoError> {
         self.blobs
             .put_bytes(bytes)
@@ -94,6 +198,9 @@ impl CoreAgentLlm for ChildAgentModel {
         request: LlmGenerationRequest,
     ) -> Result<LlmGenerationResult, CoreAgentIoError> {
         let brief = self.brief(&request).await?;
+        if let Some(script) = brief.strip_prefix("PROGRAM ") {
+            return self.call_program(&request, script).await;
+        }
         let facts = harness::LlmGenerationFacts {
             duration_ms: None,
             provider_response_id: None,
@@ -4151,6 +4258,131 @@ async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result
                 })
                 .await;
             for profile_id in [profile_id, checker, greedy] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn an_agent_runs_a_program_from_its_catalog() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let checker = api::ProfileId::new(format!("live_checker_{suffix}"));
+            let mut checker_profile = program_profile(&checker, CHECKER_PROGRAM, &[]);
+            checker_profile.description = Some("Checks one claim.".to_owned());
+            api.create_profile(api::ProfileCreateParams {
+                profile: checker_profile,
+            })
+            .await?;
+            // The agent holds what the program asks for (timers) and lists it.
+            let agent = api::ProfileId::new(format!("live_agent_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: api::AgentProfileInput {
+                    profile_id: agent.clone(),
+                    display_name: Some("Live agent".to_owned()),
+                    description: None,
+                    document: api::ProfileDocument {
+                        program: None,
+                        metadata: Default::default(),
+                        config: Some(api::SessionConfig {
+                            features: Some(api::FeaturesConfig {
+                                timers: Some(api::TimersFeature {
+                                    version: api::CURRENT_FEATURE_VERSION,
+                                }),
+                                subagents: Some(api::SubagentsFeature {
+                                    version: api::CURRENT_FEATURE_VERSION,
+                                    agents: Vec::new(),
+                                    programs: vec![api::SubagentProgramRef {
+                                        profile_id: checker.clone(),
+                                    }],
+                                    max_depth: 2,
+                                    max_descendants: 4,
+                                    max_concurrent: 4,
+                                    deadline_ms: 120_000,
+                                }),
+                                ..api::FeaturesConfig::default()
+                            }),
+                            ..api::SessionConfig::default()
+                        }),
+                        instructions: Some(api::ProfileInstructions::Text {
+                            text: "You are a scripted agent.".to_owned(),
+                        }),
+                        retention: None,
+                    },
+                },
+            })
+            .await?;
+            start_program_session(&api, &session_id, &agent).await?;
+            let run = api
+                .start_run(api::RunStartParams {
+                    notify_on_terminal: None,
+                    submission_id: None,
+                    session_id: session_id.to_string(),
+                    source: api::RunStartSource::Input {
+                        items: vec![api::InputItem::Text {
+                            provenance_ref: None,
+                            origin: None,
+                            text: format!("PROGRAM {checker} sky"),
+                        }],
+                    },
+                    config: None,
+                })
+                .await?
+                .result
+                .run;
+            let run = support::live::wait_for_terminal_run_with_timeout(
+                &api,
+                &session_id,
+                &run.id,
+                Duration::from_secs(120),
+            )
+            .await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let answer =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            let answer = answer[0]["text"].as_str().expect("answer text");
+            let said: Value = serde_json::from_str(
+                answer
+                    .strip_prefix("program said ")
+                    .expect("the agent quotes the program"),
+            )?;
+            assert_eq!(
+                said,
+                json!({"claim": "sky", "slept": 0, "verdict": "supported"})
+            );
+
+            // The agent's catalog lists the program with its input schema.
+            let view = read_session_view(&api, &session_id).await?;
+            let catalog = view
+                .active_context
+                .entries
+                .iter()
+                .find(|entry| entry.key.as_deref() == Some("runtime.catalog.subagents"))
+                .expect("sub-agent catalog entry");
+            let catalog = store
+                .read_text(&BlobRef::parse(catalog.content.content_ref.clone())?)
+                .await?;
+            assert!(
+                catalog.contains(&format!("- {checker}"))
+                    && catalog.contains("Checks one claim.")
+                    && catalog
+                        .contains(r#"input schema: {"properties":{"claim":{"type":"string"}}"#),
+                "{catalog}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [agent, checker] {
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
             }
