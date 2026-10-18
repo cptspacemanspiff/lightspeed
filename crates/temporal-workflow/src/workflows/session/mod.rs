@@ -88,6 +88,10 @@ pub struct AgentSessionWorkflow {
     confirmed_workflow_starts: BTreeSet<String>,
     workflow_start_backoffs: BTreeMap<String, (u32, u64)>,
     cancelled_workflow_executions: BTreeSet<String>,
+    /// Whether owed execution cancels wake the loop and hold back
+    /// continue-as-new, decided once per execution by
+    /// `EXECUTION_CANCELS_BEFORE_ROLLOVER_PATCH` (see `execution_cancels_owed`).
+    execution_cancels_before_rollover: bool,
     pending_promise_cancellations: Vec<PendingPromiseCancellation>,
     promise_source_polls: BTreeMap<String, PromiseSourcePoll>,
     run_submissions: BTreeMap<u64, Option<SubmissionId>>,
@@ -122,6 +126,7 @@ impl Default for AgentSessionWorkflow {
             confirmed_workflow_starts: BTreeSet::new(),
             workflow_start_backoffs: BTreeMap::new(),
             cancelled_workflow_executions: BTreeSet::new(),
+            execution_cancels_before_rollover: false,
             pending_promise_cancellations: Vec::new(),
             promise_source_polls: BTreeMap::new(),
             run_submissions: BTreeMap::new(),

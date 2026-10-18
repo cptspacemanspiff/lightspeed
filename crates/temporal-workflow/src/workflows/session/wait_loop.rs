@@ -2,6 +2,10 @@ use super::*;
 use crate::workflows::WorkflowContextExt as _;
 
 pub(super) const ACTIVE_RUN_ROLLOVER_PATCH: &str = "p105_active_run_rollover_v1";
+/// Executions with this marker send owed execution cancels before they
+/// continue as new (`workflow_starts::execution_cancels_owed`).
+pub(super) const EXECUTION_CANCELS_BEFORE_ROLLOVER_PATCH: &str =
+    "execution_cancels_before_rollover_v1";
 
 pub(super) async fn wait_for_workflow_work(ctx: &mut WorkflowContext<AgentSessionWorkflow>) {
     let now = workflow_time_ms(ctx);
@@ -60,6 +64,7 @@ pub(super) fn workflow_state_has_immediate_work(state: &AgentSessionWorkflow) ->
         || awaits::has_satisfied_await(state)
         || promise_sources::has_immediate_work(state)
         || workflow_starts::has_immediate_work(state)
+        || workflow_starts::execution_cancels_owed(state)
         || workflow_state_needs_core_drive_for_state(state)
 }
 
@@ -133,7 +138,9 @@ pub(super) fn history_rollover_due(
 /// clocks whose original deadlines are not log-derived. Parked awaits and
 /// promise-source polls are reconstructed from durable promise/run state.
 /// Confirmed starts and issued execution cancellations may be retried safely
-/// because their workflow execution identities are stable.
+/// because their workflow execution identities are stable. Owed cancels are
+/// sent first (where patched): the next execution's memory may no longer
+/// hold the finished call they belong to.
 pub(super) fn workflow_state_allows_continue_as_new(state: &AgentSessionWorkflow) -> bool {
     state.ready
         && scoped_calls::is_quiescent(state)
@@ -145,6 +152,7 @@ pub(super) fn workflow_state_allows_continue_as_new(state: &AgentSessionWorkflow
         && state.pending_source_resolutions.is_empty()
         && state.pending_promise_cancellations.is_empty()
         && state.workflow_start_backoffs.is_empty()
+        && !workflow_starts::execution_cancels_owed(state)
         && state.cancelling_watchdog.is_none()
 }
 

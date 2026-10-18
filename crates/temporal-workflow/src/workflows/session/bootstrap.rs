@@ -54,7 +54,11 @@ pub(super) async fn initialize(
     )?;
     let run_submissions = loaded.run_submissions;
     let head = loaded.head;
+    // Executions that started before this patch replay without it.
+    let execution_cancels_before_rollover =
+        ctx.patched(wait_loop::EXECUTION_CANCELS_BEFORE_ROLLOVER_PATCH);
     ctx.state_mut(|state| {
+        state.execution_cancels_before_rollover = execution_cancels_before_rollover;
         state.universe_id = Some(args.universe_id);
         state.session_id = Some(args.session_id.clone());
         state.core_state = core_state;

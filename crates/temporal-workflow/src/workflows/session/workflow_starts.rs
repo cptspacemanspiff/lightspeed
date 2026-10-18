@@ -222,42 +222,7 @@ async fn terminal_start_failure(
 pub(super) async fn process_execution_cancels(
     ctx: &mut WorkflowContext<AgentSessionWorkflow>,
 ) -> anyhow::Result<()> {
-    let due = ctx.state(|state| {
-        state
-            .core_state
-            .workflow_tools
-            .start_requests
-            .values()
-            .filter_map(|invocation| {
-                let promises = invocation.completion_promises.as_ref()?;
-                let all_terminal = promises.values().all(|promise_id| {
-                    state
-                        .core_state
-                        .promises
-                        .promises
-                        .get(promise_id)
-                        .is_some_and(|promise| promise.status.is_terminal())
-                });
-                if !all_terminal {
-                    return None;
-                }
-                let binding = state
-                    .core_state
-                    .workflow_tools
-                    .bindings
-                    .get(&invocation.tool_id)?;
-                let harness::WorkflowToolTarget::Start { start } = &binding.target else {
-                    return None;
-                };
-                let execution_id = harness::workflow_tool_execution_id(
-                    &invocation.invocation_id,
-                    &start.recipe_fingerprint,
-                );
-                (!state.cancelled_workflow_executions.contains(&execution_id))
-                    .then_some(execution_id)
-            })
-            .collect::<Vec<_>>()
-    });
+    let due = ctx.state(|state| due_execution_cancels(state).collect::<Vec<_>>());
     for execution_id in due {
         if let Err(error) = ctx
             .execute_activity(
@@ -281,4 +246,51 @@ pub(super) async fn process_execution_cancels(
         });
     }
     Ok(())
+}
+
+/// Started executions whose keyed promises have all settled and that this
+/// execution has not yet cancelled.
+fn due_execution_cancels(state: &AgentSessionWorkflow) -> impl Iterator<Item = String> + '_ {
+    state
+        .core_state
+        .workflow_tools
+        .start_requests
+        .values()
+        .filter_map(|invocation| {
+            let promises = invocation.completion_promises.as_ref()?;
+            let all_terminal = promises.values().all(|promise_id| {
+                state
+                    .core_state
+                    .promises
+                    .promises
+                    .get(promise_id)
+                    .is_some_and(|promise| promise.status.is_terminal())
+            });
+            if !all_terminal {
+                return None;
+            }
+            let binding = state
+                .core_state
+                .workflow_tools
+                .bindings
+                .get(&invocation.tool_id)?;
+            let harness::WorkflowToolTarget::Start { start } = &binding.target else {
+                return None;
+            };
+            let execution_id = harness::workflow_tool_execution_id(
+                &invocation.invocation_id,
+                &start.recipe_fingerprint,
+            );
+            (!state.cancelled_workflow_executions.contains(&execution_id)).then_some(execution_id)
+        })
+}
+
+/// Whether a settled call's execution still waits for its cancel, in an
+/// execution that sends such cancels before a handoff. The memory the next
+/// execution loads leaves finished calls behind, so it could no longer
+/// find these; the loop wakes to send them and continue-as-new waits.
+/// Sending a cancel never blocks: a failed one is recorded and counted
+/// as sent.
+pub(super) fn execution_cancels_owed(state: &AgentSessionWorkflow) -> bool {
+    state.execution_cancels_before_rollover && due_execution_cancels(state).next().is_some()
 }

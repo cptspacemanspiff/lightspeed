@@ -954,8 +954,14 @@ fn bound_dispatch_controls_push_delivery_independently_of_completion() {
     assert_eq!(workflow.pending_emissions.len(), 2);
 }
 
-#[test]
-fn start_intents_recompute_pending_start_work_from_durable_state() {
+/// A session holding one started-execution workflow call (`launch_job`) whose
+/// reply promise is pending.
+fn workflow_with_started_call() -> (
+    AgentSessionWorkflow,
+    harness::WorkflowToolInvocationId,
+    harness::PromiseId,
+    String,
+) {
     let mut workflow = AgentSessionWorkflow {
         universe_id: Some(test_universe()),
         session_id: Some(SessionId::new("child_session")),
@@ -1060,6 +1066,13 @@ fn start_intents_recompute_pending_start_work_from_durable_state() {
         },
     );
 
+    (workflow, invocation_id, promise_id, execution_id)
+}
+
+#[test]
+fn start_intents_recompute_pending_start_work_from_durable_state() {
+    let (mut workflow, invocation_id, promise_id, _) = workflow_with_started_call();
+
     // A durable start intent with a pending keyed promise is immediate
     // start work — recomputed from state, so replay and continue-as-new
     // rebuild it without transport bookkeeping.
@@ -1109,6 +1122,43 @@ fn start_intents_recompute_pending_start_work_from_durable_state() {
         poll.next_check_at_ms > 1_000,
         "recovery poll is a slow backstop"
     );
+}
+
+#[test]
+fn owed_execution_cancels_wake_the_loop_and_hold_back_continue_as_new() {
+    let (mut workflow, invocation_id, promise_id, execution_id) = workflow_with_started_call();
+    workflow.ready = true;
+    workflow.execution_cancels_before_rollover = true;
+    workflow
+        .confirmed_workflow_starts
+        .insert(invocation_id.as_str().to_owned());
+
+    // A call still waiting for its reply owes no cancel.
+    assert!(!workflow_starts::execution_cancels_owed(&workflow));
+    assert!(wait_loop::workflow_state_allows_continue_as_new(&workflow));
+
+    // Once the reply settles, the execution is owed its cancel: the loop
+    // wakes to send it, and continue-as-new waits until it has.
+    workflow
+        .core_state
+        .promises
+        .promises
+        .get_mut(&promise_id)
+        .expect("promise")
+        .status = PromiseStatus::Resolved;
+    assert!(workflow_starts::execution_cancels_owed(&workflow));
+    assert!(wait_loop::workflow_state_has_immediate_work(&workflow));
+    assert!(!wait_loop::workflow_state_allows_continue_as_new(&workflow));
+
+    workflow.cancelled_workflow_executions.insert(execution_id);
+    assert!(!workflow_starts::execution_cancels_owed(&workflow));
+    assert!(wait_loop::workflow_state_allows_continue_as_new(&workflow));
+    workflow.cancelled_workflow_executions.clear();
+
+    // An execution replaying without the patch behaves as before.
+    workflow.execution_cancels_before_rollover = false;
+    assert!(!workflow_starts::execution_cancels_owed(&workflow));
+    assert!(wait_loop::workflow_state_allows_continue_as_new(&workflow));
 }
 
 #[test]
