@@ -6,6 +6,10 @@ pub(super) const ACTIVE_RUN_ROLLOVER_PATCH: &str = "p105_active_run_rollover_v1"
 /// continue as new (`workflow_starts::execution_cancels_owed`).
 pub(super) const EXECUTION_CANCELS_BEFORE_ROLLOVER_PATCH: &str =
     "execution_cancels_before_rollover_v1";
+/// Executions with this marker hold a code-tool request that arrives while
+/// they load the session (`scoped_calls::loaded`) instead of refusing it.
+pub(super) const CODE_TOOL_REQUESTS_WAIT_FOR_LOAD_PATCH: &str =
+    "code_tool_requests_wait_for_load_v1";
 
 pub(super) async fn wait_for_workflow_work(ctx: &mut WorkflowContext<AgentSessionWorkflow>) {
     let now = workflow_time_ms(ctx);

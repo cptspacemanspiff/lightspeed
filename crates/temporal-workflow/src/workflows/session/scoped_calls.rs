@@ -63,6 +63,19 @@ fn enqueue(state: &mut AgentSessionWorkflow, request: Request) -> Result<u64, Co
     Ok(ticket)
 }
 
+/// Wait until this execution has loaded the session. Each execution starts
+/// by loading it (a continued one too), and a request that arrives first is
+/// decided once the load is done, as any other, rather than refused as not
+/// ready: its sender would take the refusal for the request's outcome.
+/// Executions from before the patch refuse it.
+async fn loaded(ctx: &mut WorkflowContext<AgentSessionWorkflow>) {
+    if !ctx.state(|state| state.initialized)
+        && ctx.patched(wait_loop::CODE_TOOL_REQUESTS_WAIT_FOR_LOAD_PATCH)
+    {
+        ctx.wait_for_state(|state| state.initialized).await;
+    }
+}
+
 async fn await_admission(
     ctx: &WorkflowContext<AgentSessionWorkflow>,
     ticket: u64,
@@ -83,6 +96,7 @@ pub(super) async fn open(
     request: crate::OpenCodeToolScopeRequest,
 ) -> crate::CodeToolScopeResult {
     let execution_id = request.execution_id.clone();
+    loaded(ctx).await;
     let ticket = ctx.state_mut(|state| enqueue(state, Request::Open(request)))?;
     let admitted = await_admission(ctx, ticket).await;
     ctx.state_mut(|state| state.code_tools.waiters -= 1);
@@ -98,6 +112,7 @@ pub(super) async fn invoke(
         execution_id: request.execution_id.clone(),
         request_id: request.request_id.clone(),
     };
+    loaded(ctx).await;
     let ticket = ctx.state_mut(|state| enqueue(state, Request::Invoke(request)))?;
     let admitted = await_admission(ctx, ticket).await;
     let result = if let Err(error) = admitted {
@@ -137,6 +152,7 @@ pub(super) async fn close(
     request: crate::CloseCodeToolScopeRequest,
 ) -> crate::CodeToolScopeResult {
     let execution_id = request.execution_id.clone();
+    loaded(ctx).await;
     let ticket = ctx.state_mut(|state| enqueue(state, Request::Close(request)))?;
     let admitted = await_admission(ctx, ticket).await;
     ctx.state_mut(|state| state.code_tools.waiters -= 1);
@@ -148,6 +164,7 @@ pub(super) async fn cancel(
     ctx: &mut WorkflowContext<AgentSessionWorkflow>,
     request: crate::CancelCodeToolRequest,
 ) -> crate::CodeToolCancelResult {
+    loaded(ctx).await;
     let ticket = ctx.state_mut(|state| enqueue(state, Request::Cancel(request.clone())))?;
     let admitted = await_admission(ctx, ticket).await;
     ctx.state_mut(|state| state.code_tools.waiters -= 1);

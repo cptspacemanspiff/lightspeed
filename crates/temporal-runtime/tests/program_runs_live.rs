@@ -424,7 +424,14 @@ async fn with_program_workers_and_client(
         temporalio_client::Client,
     ) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
-    with_program_workers_losing(input_timeouts, ProgramHistoryLimits::default(), None, body).await
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            input_timeouts,
+            ..Default::default()
+        },
+        body,
+    )
+    .await
 }
 
 /// [`with_program_workers_and_client`] whose program worker uses `history`.
@@ -437,16 +444,33 @@ async fn with_program_workers_history(
         temporalio_client::Client,
     ) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
-    with_program_workers_losing(InputTimeouts::default(), history, None, body).await
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            history,
+            ..Default::default()
+        },
+        body,
+    )
+    .await
 }
 
-/// [`with_program_workers_and_client`] whose program worker, given `lost`,
-/// runs [`LosesFirstAdmit`] or [`LosesFirstClose`] in place of the real
-/// activity.
-async fn with_program_workers_losing(
+/// How [`with_program_workers_setup`] sets up the workers and the API.
+#[derive(Default)]
+struct ProgramWorkerSetup {
     input_timeouts: InputTimeouts,
     history: ProgramHistoryLimits,
+    /// The program worker runs [`LosesFirstAdmit`] or [`LosesFirstClose`]
+    /// in place of the real activity.
     lost: Option<LostResult>,
+    /// The history length at which sessions started through the API
+    /// continue as new.
+    session_continue_as_new_events: Option<u32>,
+}
+
+/// [`with_program_workers_and_client`] with the workers and API `setup`
+/// describes.
+async fn with_program_workers_setup(
+    setup: ProgramWorkerSetup,
     body: impl FnOnce(
         Arc<GatewayAgentApi>,
         Arc<store_pg::PgStore>,
@@ -454,6 +478,12 @@ async fn with_program_workers_losing(
         temporalio_client::Client,
     ) -> ProgramTestBody,
 ) -> anyhow::Result<()> {
+    let ProgramWorkerSetup {
+        input_timeouts,
+        history,
+        lost,
+        session_continue_as_new_events,
+    } = setup;
     let _lock = LIVE_TEST_LOCK.lock().await;
     require_storage_live_env()?;
     let store = pg_store_from_env().await?;
@@ -490,13 +520,14 @@ async fn with_program_workers_losing(
             ))
         },
         move |client, queue, session_id| async move {
-            let api = Arc::new(
-                GatewayAgentApi::builder(client.clone(), store.clone())
-                    .with_task_queue(queue)
-                    .with_program_task_queue(program_queue.clone())
-                    .with_input_timeouts(input_timeouts)
-                    .build(),
-            );
+            let mut builder = GatewayAgentApi::builder(client.clone(), store.clone())
+                .with_task_queue(queue)
+                .with_program_task_queue(program_queue.clone())
+                .with_input_timeouts(input_timeouts);
+            if let Some(events) = session_continue_as_new_events {
+                builder = builder.with_continue_as_new_history_threshold(events);
+            }
+            let api = Arc::new(builder.build());
             let activities = ProgramWorkerActivities::for_universe(live_universe_id()?, api.clone())
                 .with_history_limits(history);
             let runtime = worker_runtime()?;
@@ -1465,10 +1496,11 @@ const OWN_CANCEL_PROGRAM: &str = r#"
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
 async fn a_program_cancels_its_own_call_and_a_lost_cancel_is_sent_again() -> anyhow::Result<()> {
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    with_program_workers_losing(
-        InputTimeouts::default(),
-        ProgramHistoryLimits::default(),
-        Some(LostResult::Admit(attempts.clone())),
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            lost: Some(LostResult::Admit(attempts.clone())),
+            ..Default::default()
+        },
         |api, store, session_id, _| {
             Box::pin(async move {
                 let profile_id =
@@ -2244,10 +2276,11 @@ const SLEEPING_PROGRAM: &str = r#"
 async fn a_lost_admission_result_is_admitted_again_without_calling_the_tool_twice()
 -> anyhow::Result<()> {
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    with_program_workers_losing(
-        InputTimeouts::default(),
-        ProgramHistoryLimits::default(),
-        Some(LostResult::Admit(attempts.clone())),
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            lost: Some(LostResult::Admit(attempts.clone())),
+            ..Default::default()
+        },
         |api, store, session_id, client| {
             Box::pin(async move {
                 let fixture = McpFixture::start().await?;
@@ -2452,6 +2485,87 @@ async fn a_program_acknowledges_the_outcomes_it_collected_in_earlier_workflow_ta
                     scope.acknowledged,
                     scope.recorded()
                 );
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_run_keeps_going_while_its_session_continues_as_new() -> anyhow::Result<()> {
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            // The session continues as new whenever it can, so the program's
+            // calls keep arriving while a new execution loads the session.
+            session_continue_as_new_events: Some(1),
+            ..Default::default()
+        },
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        SEQUENTIAL_SLEEPS_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "continued", "sleeps": 12}),
+                )
+                .await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                let state = programs::session_state(&store, &session_id).await?;
+                let execution_id = programs::program_execution_id(&state)?;
+                if run.status != api::RunStatus::Completed {
+                    let snapshot = client
+                        .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(
+                            execution_id.clone(),
+                        )
+                        .query(
+                            temporal_workflow::ProgramRunWorkflow::snapshot,
+                            (),
+                            temporalio_client::WorkflowQueryOptions::default(),
+                        )
+                        .await;
+                    anyhow::bail!(
+                        "the run did not complete: {:?}\nprogram: {snapshot:?}",
+                        state.runs.completed.last()
+                    );
+                }
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                assert_eq!(output, json!({"claim": "continued", "slept": 12}));
+                assert_eq!(state.code_tools.scopes[&execution_id].calls.len(), 12);
+                // The session did continue as new during the run.
+                let session = client
+                    .get_workflow_handle::<temporal_workflow::AgentSessionWorkflow>(
+                        temporal_workflow::compose_workflow_id(live_universe_id()?, &session_id),
+                    );
+                let events = session
+                    .fetch_history(Default::default())
+                    .into_events()
+                    .await?;
+                assert!(
+                    continued_from(&events).is_some(),
+                    "the session's current execution continued another"
+                );
+
                 let _ = api
                     .close_session(api::SessionCloseParams {
                         session_id: session_id.to_string(),
@@ -2730,10 +2844,11 @@ async fn large_program_values_travel_by_reference_and_replay() -> anyhow::Result
 #[ignore = "requires local Temporal and PostgreSQL, and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1; run serially"]
 async fn a_lost_close_result_closes_again_and_keeps_one_context() -> anyhow::Result<()> {
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    with_program_workers_losing(
-        InputTimeouts::default(),
-        ProgramHistoryLimits::default(),
-        Some(LostResult::Close(attempts.clone())),
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            lost: Some(LostResult::Close(attempts.clone())),
+            ..Default::default()
+        },
         |api, store, session_id, client| {
             Box::pin(async move {
                 let fixture = McpFixture::start().await?;
