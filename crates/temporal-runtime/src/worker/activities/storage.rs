@@ -76,16 +76,23 @@ pub(super) async fn create_or_load_session(
             "session checkpoint write failed after bootstrap"
         );
     }
+    // The checkpoint keeps the complete state for the gateway and other
+    // readers. The workflow starts from the work in progress, so what it
+    // loads stops growing with the session's age.
+    let mut run_submissions = reduced.run_submissions;
     let (core_state, replayed_event_count) = if fresh_session {
         (None, 0)
     } else {
-        (Some(reduced.core_state), reduced.replayed_event_count)
+        let mut core_state = reduced.core_state;
+        harness::trim_for_handoff(&mut core_state);
+        retain_kept_run_submissions(&core_state, &mut run_submissions);
+        (Some(core_state), reduced.replayed_event_count)
     };
 
     let result = CreateOrLoadSessionResult {
         record,
         core_state,
-        run_submissions: reduced.run_submissions,
+        run_submissions,
         head,
         fresh_session,
         replayed_event_count,
@@ -93,6 +100,23 @@ pub(super) async fn create_or_load_session(
 
     guard_bootstrap_payload_size(&request.session_id, &result)?;
     Ok(result)
+}
+
+/// Keep the submission ids of the runs the trimmed state still holds.
+fn retain_kept_run_submissions(
+    state: &harness::CoreAgentState,
+    run_submissions: &mut std::collections::BTreeMap<u64, Option<harness::SubmissionId>>,
+) {
+    let runs = &state.runs;
+    let kept: std::collections::BTreeSet<u64> = runs
+        .completed
+        .iter()
+        .map(|run| run.run_id)
+        .chain(runs.active.iter().map(|run| run.run_id))
+        .chain(runs.queued.iter().map(|run| run.run_id))
+        .map(RunId::as_u64)
+        .collect();
+    run_submissions.retain(|run_id, _| kept.contains(run_id));
 }
 
 /// Fail with a typed, diagnosable error if the compact bootstrap result would
@@ -1069,6 +1093,40 @@ mod tests {
         );
         // And it stays under the bootstrap budget.
         assert!((result_bytes as u64) < temporal_workflow::DEFAULT_BOOTSTRAP_PAYLOAD_BUDGET_BYTES,);
+    }
+
+    #[test]
+    fn a_trimmed_load_keeps_submission_ids_only_for_the_runs_it_holds() {
+        let mut state = harness::CoreAgentState::new();
+        state.runs.completed = (1..=3)
+            .map(|run_id| {
+                serde_json::from_value(serde_json::json!({
+                    "run_id": run_id,
+                    "status": "completed",
+                    "submission_id": null,
+                    "source": { "type": "input", "input": [] },
+                    "first_seq": 1,
+                    "terminal_seq": 2,
+                    "accepted_at_ms": 0,
+                    "completed_at_ms": 0,
+                    "output": null,
+                    "failure": null,
+                }))
+                .expect("run record")
+            })
+            .collect();
+        // As if the trim had left run 1 behind; run 4 was never held.
+        state.runs.completed.remove(0);
+        let mut run_submissions = (1..=4)
+            .map(|run_id| {
+                (
+                    run_id,
+                    Some(harness::SubmissionId::new(format!("s{run_id}"))),
+                )
+            })
+            .collect();
+        retain_kept_run_submissions(&state, &mut run_submissions);
+        assert_eq!(run_submissions.keys().copied().collect::<Vec<_>>(), [2, 3]);
     }
 
     /// The size guard fires with a typed error when the reduced result would

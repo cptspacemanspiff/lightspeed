@@ -2375,7 +2375,7 @@ async fn workflow_tool_start_survives_continue_as_new() -> anyhow::Result<()> {
 
     run_with_plugin_worker_opts(
         Some(30),
-        |_client, api, blobs, session_id, plugin_queue| async move {
+        |client, api, blobs, session_id, plugin_queue| async move {
             let recipe = serde_json::to_vec(&WorkflowToolRecipeV1 {
                 workflow_type: "TestSlowStartPluginWorkflow".to_owned(),
                 task_queue: plugin_queue,
@@ -2479,10 +2479,109 @@ async fn workflow_tool_start_survives_continue_as_new() -> anyhow::Result<()> {
                     ..
                 } if resolved == &promise_id
             )));
+
+            // A handoff after the run ends leaves the settled call behind: the
+            // session log above keeps it, while the memory the load hands the
+            // new execution holds neither its record nor its promise. An idle
+            // session does not reach the history threshold, so plain runs
+            // (answered at once) drive the next handoff.
+            let handle = live_workflow_handle(&client, &session_id)?;
+            let mut loaded = None;
+            for _ in 0..3 {
+                let plain = api
+                    .start_run(RunStartParams {
+                        notify_on_terminal: None,
+                        submission_id: None,
+                        session_id: session_id.as_str().to_owned(),
+                        source: RunStartSource::Input {
+                            items: vec![InputItem::Text {
+                                provenance_ref: None,
+                                origin: None,
+                                text: "hello".to_owned(),
+                            }],
+                        },
+                        config: None,
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("start plain run: {error:?}"))?;
+                wait_for_terminal_run_slow(&api, &session_id, &plain.result.run.id).await?;
+                // A load after the first run ended lists it as completed.
+                loaded = latest_session_load(&handle).await?.filter(|loaded| {
+                    loaded
+                        .pointer("/core_state/runs/completed")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|completed| !completed.is_empty())
+                });
+                if loaded.is_some() {
+                    break;
+                }
+            }
+            let loaded = loaded.ok_or_else(|| {
+                anyhow::anyhow!("the session did not continue as new after its first run ended")
+            })?;
+            let core_state = &loaded["core_state"];
+            assert!(
+                core_state
+                    .pointer("/workflow_tools/start_requests")
+                    .and_then(serde_json::Value::as_object)
+                    .is_none_or(serde_json::Map::is_empty),
+                "the load still carries the settled call: {}",
+                core_state["workflow_tools"]
+            );
+            assert!(
+                core_state
+                    .pointer(&format!("/promises/promises/{promise_id}"))
+                    .is_none(),
+                "the load still carries the settled call's promise"
+            );
             Ok(())
         },
     )
     .await
+}
+
+/// What the latest execution of a session's workflow loaded at its start:
+/// the result of its `create_or_load_session` activity, once recorded.
+async fn latest_session_load(
+    handle: &temporalio_client::WorkflowHandle<Client, AgentSessionWorkflow>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
+
+    let events = handle
+        .fetch_history(Default::default())
+        .into_events()
+        .await?;
+    let load = events.iter().find_map(|event| match &event.attributes {
+        Some(Attributes::ActivityTaskScheduledEventAttributes(scheduled))
+            if scheduled
+                .activity_type
+                .as_ref()
+                .map(|kind| kind.name.as_str())
+                == Some(temporal_workflow::ACTIVITY_CREATE_OR_LOAD_SESSION) =>
+        {
+            Some(event.event_id)
+        }
+        _ => None,
+    });
+    let Some(load) = load else {
+        return Ok(None);
+    };
+    events
+        .iter()
+        .find_map(|event| match &event.attributes {
+            Some(Attributes::ActivityTaskCompletedEventAttributes(completed))
+                if completed.scheduled_event_id == load =>
+            {
+                completed
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.payloads.first())
+            }
+            _ => None,
+        })
+        .map(|payload| serde_json::from_slice(&payload.data))
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// Run-terminal auto-cancel of a run-scoped keyed promise sends the

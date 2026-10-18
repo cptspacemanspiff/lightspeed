@@ -12,6 +12,7 @@ pub mod context;
 pub mod environment;
 pub mod error;
 pub mod event;
+pub mod handoff;
 pub mod ids;
 pub mod lifecycle;
 pub mod llm;
@@ -52,6 +53,7 @@ pub use environment::{
 };
 pub use error::*;
 pub use event::*;
+pub use handoff::{HANDOFF_COMPLETED_RUNS, trim_for_handoff};
 pub use ids::*;
 pub use lifecycle::{CoreAgentLifecycleEvent, CoreAgentStatus, LifecycleState};
 pub use llm::*;

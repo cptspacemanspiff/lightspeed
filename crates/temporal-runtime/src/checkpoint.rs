@@ -11,10 +11,7 @@ use harness::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use temporal_workflow::{
-    DEFAULT_BOOTSTRAP_PAYLOAD_BUDGET_BYTES, ReducedSession, reduce_session_entries,
-    reduce_session_entries_from,
-};
+use temporal_workflow::{ReducedSession, reduce_session_entries, reduce_session_entries_from};
 
 pub(crate) const SESSION_CHECKPOINT_FORMAT_VERSION: u32 = 1;
 pub(crate) const CHECKPOINT_TAIL_EVENT_THRESHOLD: u64 = 512;
@@ -23,6 +20,12 @@ pub(crate) const CHECKPOINT_APPEND_BATCH_BYTE_THRESHOLD: u64 = 2 * 1024 * 1024;
 pub(crate) const CHECKPOINT_TERMINAL_RUN_THRESHOLD: usize = 10;
 pub(crate) const CHECKPOINT_LARGE_RUN_EVENT_THRESHOLD: u64 = 100;
 const CHECKPOINT_READ_PAGE: usize = 512;
+/// Largest complete state a checkpoint stores. Checkpoints never cross a
+/// Temporal boundary: the session load hands its workflow a trimmed copy
+/// (`harness::trim_for_handoff`), so this bounds the read cost for the gateway
+/// and activities, not a Temporal payload. A larger state replays from the
+/// last checkpoint that fit.
+pub(crate) const CHECKPOINT_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct CheckpointReduction {
@@ -300,8 +303,8 @@ pub(crate) async fn write_checkpoint(
         run_submissions: reduced.run_submissions.clone(),
     })?;
     anyhow::ensure!(
-        bytes.len() as u64 <= DEFAULT_BOOTSTRAP_PAYLOAD_BUDGET_BYTES,
-        "checkpoint exceeds bootstrap payload budget"
+        bytes.len() as u64 <= CHECKPOINT_MAX_BYTES,
+        "checkpoint exceeds its size limit"
     );
     let byte_len = bytes.len() as u64;
     let state_ref = blobs.put_bytes(bytes).await?;
