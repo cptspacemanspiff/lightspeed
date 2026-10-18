@@ -46,6 +46,16 @@ pub struct ProgramRunWorkflow {
     /// The most handles withdrawn at the run's close the session has
     /// reported settled. The exit waits for all of them.
     withdrawals_settled: u64,
+    /// Recorded outcomes of this execution's scope already collected.
+    collected: u64,
+    /// What the program acknowledges to the session with each admission and
+    /// close: `collected` as it stood when the current workflow task began.
+    /// Those outcomes were collected in tasks already in history, so a replay
+    /// never collects them again and never re-sends a call issued before
+    /// them, and the session may stop holding them.
+    acknowledged: u64,
+    /// The history length of the workflow task `acknowledged` was taken in.
+    acknowledged_task: u32,
 }
 
 #[workflow_methods]
@@ -335,6 +345,8 @@ async fn hand_over(
                 state.snapshot.descriptor = Some(continuation.descriptor.clone());
                 state.recorded = 0;
                 state.withdrawals_settled = 0;
+                state.collected = 0;
+                state.acknowledged = 0;
             });
             Err(ProgramEnd::Terminal(interrupted(reason)))
         }
@@ -509,8 +521,6 @@ async fn run_program(
     // Completions for the next step, in the order this history received
     // them: admission rejections and collected outcomes.
     let mut ready = Vec::new();
-    // Recorded outcomes of the scope already collected.
-    let mut collected = 0u64;
     loop {
         let (requests, cancels, finished) = match step {
             program_engine::Step::Waiting { requests, cancels } => (requests, cancels, None),
@@ -529,6 +539,7 @@ async fn run_program(
                         descriptor: descriptor.clone(),
                         requests,
                         cancels,
+                        acknowledged: acknowledgement(ctx),
                     },
                     admission_options(),
                 ),
@@ -555,7 +566,7 @@ async fn run_program(
         if ready.is_empty() {
             ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Suspended);
             let progressed = ctx
-                .wait_for_state(move |state| state.holder_cancelled || state.recorded > collected);
+                .wait_for_state(|state| state.holder_cancelled || state.recorded > state.collected);
             let external_cancel = ctx.cancelled().fuse();
             futures::pin_mut!(progressed, external_cancel);
             select_biased! {
@@ -571,14 +582,14 @@ async fn run_program(
             }
             ctx.state_mut(|state| state.snapshot.phase = ProgramRunPhase::Running);
         }
-        if ctx.state(|state| state.recorded > collected) {
+        if ctx.state(|state| state.recorded > state.collected) {
             let page = ctx
                 .execute_local_activity(
                     WorkflowActivities::program_collect,
                     crate::ProgramCollectActivityRequest {
                         session_workflow_id: descriptor.session_workflow_id.clone(),
                         execution_id: descriptor.scope_id(),
-                        after: collected,
+                        after: ctx.state(|state| state.collected),
                         max_result_bytes: descriptor.limits.max_result_bytes,
                     },
                     collect_options(),
@@ -586,7 +597,7 @@ async fn run_program(
                 .await;
             match page {
                 Ok(page) => {
-                    collected += page.completions.len() as u64;
+                    count_collected(ctx, page.completions.len() as u64);
                     ready.extend(page.completions);
                 }
                 Err(_) => {
@@ -645,6 +656,7 @@ async fn settle(
                 execution_id: start.execution_id.clone(),
                 execution: ctx.state(|state| state.execution),
                 program_context,
+                acknowledged: acknowledgement(ctx),
             },
             conclude_options(),
         )
@@ -696,6 +708,40 @@ async fn conclude(
     match concluded {
         Ok(result) => ProgramRunTerminal::Completed { result },
         Err(_) => interrupted(ProgramRunInterruption::ActivityFailed),
+    }
+}
+
+/// The acknowledgement to send from the current workflow task
+/// (`ProgramRunWorkflow::acknowledge`).
+fn acknowledgement(ctx: &WorkflowContext<ProgramRunWorkflow>) -> u64 {
+    let task = ctx.history_length();
+    ctx.state_mut(|state| state.acknowledge(task))
+}
+
+fn count_collected(ctx: &WorkflowContext<ProgramRunWorkflow>, completions: u64) {
+    let task = ctx.history_length();
+    ctx.state_mut(|state| state.count_collected(task, completions));
+}
+
+impl ProgramRunWorkflow {
+    /// What to acknowledge from the workflow task with this history length:
+    /// what was collected when it began. The first call in a task fixes it,
+    /// and `count_collected` makes one before `collected` moves, so outcomes
+    /// collected in this task, whose markers history may not hold yet, are
+    /// never acknowledged in it. A collection can resolve in a later task
+    /// than the one that started it (a local activity outlasting its task),
+    /// hence the call at the change, not at the start.
+    fn acknowledge(&mut self, task: u32) -> u64 {
+        if self.acknowledged_task != task {
+            self.acknowledged_task = task;
+            self.acknowledged = self.collected;
+        }
+        self.acknowledged
+    }
+
+    fn count_collected(&mut self, task: u32, completions: u64) {
+        self.acknowledge(task);
+        self.collected += completions;
     }
 }
 
@@ -957,6 +1003,24 @@ mod tests {
             scope_progress(&start, &second, &progress(&start.execution_id)),
             None
         );
+    }
+
+    #[test]
+    fn a_task_acknowledges_only_what_earlier_tasks_collected() {
+        let mut state = ProgramRunWorkflow::default();
+        // The first task collects three; it acknowledges none of them.
+        assert_eq!(state.acknowledge(3), 0);
+        state.count_collected(3, 3);
+        assert_eq!(state.acknowledge(3), 0);
+        // The next task acknowledges them, and not the two it collects.
+        state.count_collected(8, 2);
+        assert_eq!(state.acknowledge(8), 3);
+        // A collection that started in one task and resolved in the next
+        // counts in the task it resolved in: that task's markers may not be
+        // in history yet, so it acknowledges what came before.
+        state.count_collected(13, 4);
+        assert_eq!((state.acknowledge(13), state.collected), (5, 9));
+        assert_eq!(state.acknowledge(18), 9);
     }
 
     #[test]

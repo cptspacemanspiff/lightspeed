@@ -395,6 +395,7 @@ impl CodeRunner {
                         request_id: request.request_id.clone(),
                         binding_id: request.binding_id,
                         arguments_ref,
+                        acknowledged: None,
                     },
                     Default::default(),
                 )
@@ -429,6 +430,7 @@ impl CodeRunner {
                             execution_id: execution_id.to_owned(),
                             cancel_pending: true,
                             program_context: None,
+                            acknowledged: None,
                         },
                         Default::default(),
                     )

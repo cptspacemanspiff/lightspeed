@@ -60,6 +60,11 @@ pub struct InvokeCodeToolRequest {
     pub request_id: String,
     pub binding_id: String,
     pub arguments_ref: BlobRef,
+    /// From a program run: the completions it had collected when the
+    /// workflow task sending this began. Its replays never ask for those
+    /// again, so the session may stop holding them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged: Option<u64>,
 }
 
 /// Close admission immediately. Cancellation additionally requests cleanup of
@@ -73,6 +78,9 @@ pub struct CloseCodeToolScopeRequest {
     /// written as the session's newest only if the run completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_context: Option<harness::ProgramContextInput>,
+    /// As on `InvokeCodeToolRequest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged: Option<u64>,
 }
 
 /// Cancel one call of a scope, or a promise its owner holds a handle to (an
@@ -488,6 +496,7 @@ mod tests {
             request_id: "request-a".to_owned(),
             binding_id: "binding-a".to_owned(),
             arguments_ref: BlobRef::from_bytes(b"{}"),
+            acknowledged: None,
         };
         let id = update_id(INVOKE_CODE_TOOL_UPDATE, &request);
         assert_eq!(id, update_id(INVOKE_CODE_TOOL_UPDATE, &request));

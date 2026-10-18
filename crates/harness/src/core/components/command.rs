@@ -153,6 +153,10 @@ pub enum CoreAgentCommand {
     },
     AdmitCodeToolCall {
         call: crate::CodeToolCallSpec,
+        /// A program's acknowledgement of the completions it has recorded
+        /// (`CodeToolScope::acknowledged`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acknowledged: Option<u64>,
     },
     CompleteCodeToolCall {
         origin: crate::CodeToolOrigin,
@@ -173,6 +177,9 @@ pub enum CoreAgentCommand {
         /// A program run's context, kept when its program returned.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program_context: Option<crate::ProgramContextInput>,
+        /// As on `AdmitCodeToolCall`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acknowledged: Option<u64>,
     },
     /// Copy a predecessor session's newest program context into a program
     /// session before its first run. Runtime-only: no public method sends it.

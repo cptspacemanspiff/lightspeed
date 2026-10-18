@@ -421,11 +421,13 @@ fn code_tool_vectors() -> Value {
             request_id: request_id.clone(),
             binding_id: binding_id.clone(),
             arguments_ref: BlobRef::from_bytes(b"{\"path\":\"note.txt\"}"),
+            acknowledged: None,
         },
         "closeRequest": CloseCodeToolScopeRequest {
             execution_id: execution_id.clone(),
             cancel_pending: true,
             program_context: None,
+            acknowledged: None,
         },
         "cancelRequest": CancelCodeToolRequest {
             execution_id: execution_id.clone(),

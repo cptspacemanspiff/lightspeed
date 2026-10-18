@@ -581,7 +581,12 @@ async fn admit_activity(
     heartbeating(&ctx, async {
         let api = activities.universes.api_for(universe_id).await?;
         match runner(&api)
-            .admit_step(&descriptor, request.requests, request.cancels)
+            .admit_step(
+                &descriptor,
+                request.requests,
+                request.cancels,
+                request.acknowledged,
+            )
             .await
         {
             Ok(rejected) => Ok(temporal_workflow::ProgramAdmitActivityResult { rejected }),
@@ -649,6 +654,7 @@ async fn close_activity(
                 &request.session_workflow_id,
                 &harness::program_scope_id(&request.execution_id, request.execution),
                 request.program_context,
+                request.acknowledged,
             )
             .await
             .map_err(retryable)
@@ -857,7 +863,7 @@ async fn finalize(
     };
     if scope.as_ref().is_some_and(|scope| !scope.closed) {
         let closed = runner
-            .close(&start.holder_workflow_id, &scope_id, None)
+            .close(&start.holder_workflow_id, &scope_id, None, 0)
             .await;
         cleanup_error = Some(match closed {
             Ok(_) => "scope closed without waiting for its outcomes".to_owned(),

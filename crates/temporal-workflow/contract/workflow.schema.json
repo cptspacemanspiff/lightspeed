@@ -460,6 +460,15 @@
       "additionalProperties": false,
       "description": "Close admission immediately. Cancellation additionally requests cleanup of\nadmitted work; closing a scope does not roll back any completed effects.",
       "properties": {
+        "acknowledged": {
+          "description": "As on `InvokeCodeToolRequest`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "cancel_pending": {
           "type": "boolean"
         },
@@ -1356,6 +1365,15 @@
       "additionalProperties": false,
       "description": "Small request forwarded by a trusted host after serializing guest arguments.\nIdentity is execution-local. Reusing it with different arguments or a\ndifferent binding is rejected by the session, including across RPC retries.",
       "properties": {
+        "acknowledged": {
+          "description": "From a program run: the completions it had collected when the\nworkflow task sending this began. Its replays never ask for those\nagain, so the session may stop holding them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "arguments_ref": {
           "type": "string"
         },

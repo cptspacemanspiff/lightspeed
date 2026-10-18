@@ -338,6 +338,7 @@ pub(super) async fn process_pending(
                         execution_id: request.execution_id,
                         cancel: request.cancel_pending,
                         program_context: request.program_context,
+                        acknowledged: request.acknowledged,
                     },
                 )
                 .await?
@@ -367,6 +368,7 @@ pub(super) async fn process_pending(
                 execution_id,
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         )
         .await?;
@@ -458,6 +460,7 @@ fn invocation_command(
             tool_name: binding.tool_name.clone(),
             arguments_ref: request.arguments_ref,
         },
+        acknowledged: request.acknowledged,
     })
 }
 
@@ -1362,6 +1365,7 @@ mod tests {
                 completed: Vec::new(),
                 completed_base: 0,
                 calls_dropped: 0,
+                acknowledged: 0,
                 program_context: None,
                 cancel_requested_calls: Default::default(),
                 withdrawn: Default::default(),
@@ -1416,6 +1420,7 @@ mod tests {
             request_id: "z-first".into(),
             binding_id: "z-first".into(),
             arguments_ref: BlobRef::from_bytes(b"{}"),
+            acknowledged: None,
         };
         assert!(invocation_command(&state, request.clone()).is_ok());
         assert_eq!(

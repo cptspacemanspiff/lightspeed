@@ -434,6 +434,12 @@ pub struct CodeToolScope {
     /// Admitted calls left out of `calls` the same way; all had outcomes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub calls_dropped: u64,
+    /// Completions the scope's program has acknowledged: it had collected
+    /// them when the workflow task it sent this from began, so its replays
+    /// never ask for them again and never re-send a call issued before
+    /// them. The highest acknowledgement received.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub acknowledged: u64,
     /// The program context a run-owned scope's program kept, passed when
     /// the scope closed. It is written only if the run completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -483,6 +489,24 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// An acknowledgement can cover only completions the scope has recorded.
+fn validate_acknowledgement(scope: &CodeToolScope, acknowledged: u64) -> Result<(), DomainError> {
+    if acknowledged > scope.recorded() {
+        return Err(invalid(
+            "acknowledgement covers completions the scope has not recorded",
+        ));
+    }
+    Ok(())
+}
+
+fn acknowledge(scope: &mut CodeToolScope, acknowledged: Option<u64>) -> Result<(), DomainError> {
+    if let Some(acknowledged) = acknowledged {
+        validate_acknowledgement(scope, acknowledged)?;
+        scope.acknowledged = scope.acknowledged.max(acknowledged);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeToolState {
     pub scopes: BTreeMap<String, CodeToolScope>,
@@ -497,6 +521,10 @@ pub enum CodeToolEvent {
     CallAdmitted {
         call: CodeToolCallSpec,
         promise_id_base: u64,
+        /// The program's acknowledgement sent with the call
+        /// (`CodeToolScope::acknowledged`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acknowledged: Option<u64>,
     },
     CallCompleted {
         origin: CodeToolOrigin,
@@ -518,6 +546,10 @@ pub enum CodeToolEvent {
         /// each to settle, like a call.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         withdrawn: Vec<crate::PromiseId>,
+        /// The program's acknowledgement sent with the close
+        /// (`CodeToolScope::acknowledged`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acknowledged: Option<u64>,
     },
     /// The scope's owner asked to cancel one call. The call stops the way
     /// its kind can and still records one outcome.
@@ -1060,6 +1092,7 @@ pub fn open_code_tool_scope_proposals(
 pub fn admit_code_tool_call_proposals(
     state: &CoreAgentState,
     call: CodeToolCallSpec,
+    acknowledged: Option<u64>,
 ) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
     if let Some(existing) = code_tool_call(state, &call.origin) {
         return if existing.spec == call {
@@ -1071,6 +1104,12 @@ pub fn admit_code_tool_call_proposals(
         };
     }
     validate_call(state, &call)?;
+    if let Some(acknowledged) = acknowledged {
+        validate_acknowledgement(
+            &state.code_tools.scopes[&call.origin.execution_id],
+            acknowledged,
+        )?;
+    }
     let promise_id_base = state
         .id_cursors
         .last_promise_id
@@ -1084,6 +1123,7 @@ pub fn admit_code_tool_call_proposals(
         CoreAgentEvent::CodeTool(CodeToolEvent::CallAdmitted {
             call,
             promise_id_base,
+            acknowledged,
         }),
     )])
 }
@@ -1568,6 +1608,7 @@ pub fn close_code_tool_scope_proposals(
     execution_id: String,
     cancel: bool,
     program_context: Option<crate::ProgramContextInput>,
+    acknowledged: Option<u64>,
 ) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
     let scope = state
         .code_tools
@@ -1586,6 +1627,9 @@ pub fn close_code_tool_scope_proposals(
     };
     if scope.closed && (!cancel || scope.cancel_requested) {
         return Ok(Vec::new());
+    }
+    if let Some(acknowledged) = acknowledged {
+        validate_acknowledgement(scope, acknowledged)?;
     }
     // A program run's exit withdraws the handles its program still holds
     // (opened input requests), as it cancels its calls. Detached handles
@@ -1607,6 +1651,7 @@ pub fn close_code_tool_scope_proposals(
             cancel,
             program_context,
             withdrawn: withdrawn.clone(),
+            acknowledged,
         }),
     )];
     if let crate::ScopeOwner::Run { run_id } = scope.spec.owner {
@@ -1878,6 +1923,7 @@ pub(crate) fn apply_code_tool_event(
                     completed: Vec::new(),
                     completed_base: 0,
                     calls_dropped: 0,
+                    acknowledged: 0,
                     program_context: None,
                     cancel_requested_calls: BTreeSet::new(),
                     withdrawn: BTreeSet::new(),
@@ -1887,6 +1933,7 @@ pub(crate) fn apply_code_tool_event(
         CodeToolEvent::CallAdmitted {
             call,
             promise_id_base,
+            acknowledged,
         } => {
             validate_call(state, call)?;
             if code_tool_call(state, &call.origin).is_some() {
@@ -1898,22 +1945,22 @@ pub(crate) fn apply_code_tool_event(
             let last = promise_id_base
                 .checked_add(CODE_TOOL_PROMISE_SLOTS - 1)
                 .ok_or_else(|| invalid("promise counter exhausted"))?;
-            state
+            let scope = state
                 .code_tools
                 .scopes
                 .get_mut(&call.origin.execution_id)
-                .expect("validated scope")
-                .calls
-                .insert(
-                    call.origin.request_id.clone(),
-                    CodeToolCall {
-                        spec: call.clone(),
-                        call_id: code_tool_call_id(&call.origin),
-                        promise_id_base: *promise_id_base,
-                        status: CodeToolCallStatus::Pending,
-                        completed_at_ms: None,
-                    },
-                );
+                .expect("validated scope");
+            acknowledge(scope, *acknowledged)?;
+            scope.calls.insert(
+                call.origin.request_id.clone(),
+                CodeToolCall {
+                    spec: call.clone(),
+                    call_id: code_tool_call_id(&call.origin),
+                    promise_id_base: *promise_id_base,
+                    status: CodeToolCallStatus::Pending,
+                    completed_at_ms: None,
+                },
+            );
             state.id_cursors.last_promise_id = last;
         }
         CodeToolEvent::CallCompleted {
@@ -2045,6 +2092,7 @@ pub(crate) fn apply_code_tool_event(
             cancel,
             program_context,
             withdrawn,
+            acknowledged,
         } => {
             let scope = state
                 .code_tools
@@ -2084,6 +2132,7 @@ pub(crate) fn apply_code_tool_event(
                 .scopes
                 .get_mut(execution_id)
                 .expect("validated scope");
+            acknowledge(scope, *acknowledged)?;
             scope.closed = true;
             scope.cancel_requested |= cancel;
             if program_context.is_some() {

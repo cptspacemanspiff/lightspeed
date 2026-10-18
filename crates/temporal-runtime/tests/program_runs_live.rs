@@ -358,7 +358,12 @@ impl LosesFirstAdmit {
         self.attempts.lock().expect("attempts lock").push(attempt);
         let rejected = self
             .runner
-            .admit_step(&request.descriptor, request.requests, request.cancels)
+            .admit_step(
+                &request.descriptor,
+                request.requests,
+                request.cancels,
+                request.acknowledged,
+            )
             .await
             .map_err(|error| {
                 ActivityError::application(ApplicationFailure::non_retryable(anyhow::anyhow!(
@@ -2399,6 +2404,60 @@ async fn each_sequential_call_adds_a_bounded_number_of_history_events() -> anyho
                     programs::event_counts(&one),
                     programs::event_counts(&many),
                 );
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_acknowledges_the_outcomes_it_collected_in_earlier_workflow_tasks()
+-> anyhow::Result<()> {
+    with_program_workers_and_client(
+        InputTimeouts::default(),
+        |api, store, session_id, _client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        SEQUENTIAL_SLEEPS_PROGRAM,
+                        &[("time.sleep", None)],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "acknowledged", "sleeps": 4}),
+                )
+                .await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let state = programs::session_state(&store, &session_id).await?;
+                let scope = &state.code_tools.scopes[&programs::program_execution_id(&state)?];
+                // Each sleep is collected in its own workflow task, and every
+                // admission and the close acknowledge what earlier tasks
+                // collected: never the outcome collected in the sending task.
+                assert_eq!(scope.recorded(), 4);
+                assert!(
+                    (1..scope.recorded()).contains(&scope.acknowledged),
+                    "acknowledged {} of {}",
+                    scope.acknowledged,
+                    scope.recorded()
+                );
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
                 Ok(())

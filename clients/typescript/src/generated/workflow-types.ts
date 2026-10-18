@@ -562,6 +562,10 @@ export interface ChatActivation {
  * via the `definition` "CloseCodeToolScopeRequest".
  */
 export interface CloseCodeToolScopeRequest {
+  /**
+   * As on `InvokeCodeToolRequest`.
+   */
+  acknowledged?: number | null;
   cancel_pending: boolean;
   execution_id: string;
   /**
@@ -871,6 +875,12 @@ export interface EmissionEnvelope {
  * via the `definition` "InvokeCodeToolRequest".
  */
 export interface InvokeCodeToolRequest {
+  /**
+   * From a program run: the completions it had collected when the
+   * workflow task sending this began. Its replays never ask for those
+   * again, so the session may stop holding them.
+   */
+  acknowledged?: number | null;
   arguments_ref: string;
   binding_id: string;
   execution_id: string;

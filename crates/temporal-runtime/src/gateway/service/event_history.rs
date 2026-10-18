@@ -133,6 +133,7 @@ mod tests {
                     cancel: false,
                     program_context: None,
                     withdrawn: Vec::new(),
+                    acknowledged: None,
                 }),
             })
             .unwrap();

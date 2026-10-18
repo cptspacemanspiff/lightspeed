@@ -10708,7 +10708,10 @@ mod tests {
         for call in [&first, &second] {
             log.extend(code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             ));
         }
         let request =
@@ -10725,7 +10728,8 @@ mod tests {
             drive
                 .admit_command(
                     CoreAgentCommand::AdmitCodeToolCall {
-                        call: first.clone()
+                        call: first.clone(),
+                        acknowledged: None,
                     },
                     100
                 )
@@ -10735,7 +10739,13 @@ mod tests {
         let mut conflict = first.clone();
         conflict.arguments_ref = BlobRef::from_bytes(b"different");
         assert!(matches!(
-            drive.admit_command(CoreAgentCommand::AdmitCodeToolCall { call: conflict }, 100),
+            drive.admit_command(
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: conflict,
+                    acknowledged: None
+                },
+                100
+            ),
             Err(CoreAgentDriveError::Command(CommandError::Rejected(_)))
         ));
         let result = completed_tool_result(&other).results.remove(0);
@@ -10842,7 +10852,10 @@ mod tests {
         let call = code_tool_spec("compact", "timer");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: call.clone(),
+                acknowledged: None,
+            },
         ));
         let request =
             crate::code_tool_request(drive.session_id(), drive.state(), "execution-1", "compact")
@@ -10965,7 +10978,10 @@ mod tests {
         for call in [&joined, &submit, &waiter] {
             log.extend(code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             ));
         }
         let mut promises = Vec::new();
@@ -11161,7 +11177,10 @@ mod tests {
         for call in [&joined, &submit] {
             code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             );
             let request = crate::code_tool_request(
                 drive.session_id(),
@@ -11188,13 +11207,15 @@ mod tests {
                 execution_id: "execution-1".into(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         );
         assert!(
             drive
                 .admit_command(
                     CoreAgentCommand::AdmitCodeToolCall {
-                        call: code_tool_spec("late", "local_echo")
+                        call: code_tool_spec("late", "local_echo"),
+                        acknowledged: None,
                     },
                     100
                 )
@@ -11278,20 +11299,28 @@ mod tests {
         forged.tool_name = ToolName::new("Bash");
         assert!(
             drive
-                .admit_command(CoreAgentCommand::AdmitCodeToolCall { call: forged }, 100)
+                .admit_command(
+                    CoreAgentCommand::AdmitCodeToolCall {
+                        call: forged,
+                        acknowledged: None
+                    },
+                    100
+                )
                 .is_err()
         );
         code_tool_commit(
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: code_tool_spec("1", "local_echo"),
+                acknowledged: None,
             },
         );
         assert!(
             drive
                 .admit_command(
                     CoreAgentCommand::AdmitCodeToolCall {
-                        call: code_tool_spec("2", "local_echo")
+                        call: code_tool_spec("2", "local_echo"),
+                        acknowledged: None,
                     },
                     100
                 )
@@ -11322,6 +11351,7 @@ mod tests {
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: submit.clone(),
+                acknowledged: None,
             },
         );
         let request =
@@ -11359,6 +11389,7 @@ mod tests {
                 &mut drive,
                 CoreAgentCommand::AdmitCodeToolCall {
                     call: code_tool_spec(&format!("joined-{index}"), "agent_run"),
+                    acknowledged: None,
                 },
             );
         }
@@ -11366,7 +11397,8 @@ mod tests {
             drive
                 .admit_command(
                     CoreAgentCommand::AdmitCodeToolCall {
-                        call: code_tool_spec("overflow", "agent_run")
+                        call: code_tool_spec("overflow", "agent_run"),
+                        acknowledged: None,
                     },
                     100
                 )
@@ -11387,7 +11419,10 @@ mod tests {
         for call in [&joined, &ordinary] {
             code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             );
         }
         let joined_request =
@@ -11445,6 +11480,7 @@ mod tests {
                 execution_id: "execution-1".into(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         ));
         let result = promise_tool_result(
@@ -11526,7 +11562,10 @@ mod tests {
             for call in [&pending, &joined, &finished] {
                 code_tool_commit(
                     &mut drive,
-                    CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                    CoreAgentCommand::AdmitCodeToolCall {
+                        call: call.clone(),
+                        acknowledged: None,
+                    },
                 );
             }
             let request = crate::code_tool_request(
@@ -11638,7 +11677,10 @@ mod tests {
             for call in [&joined, &submitted] {
                 code_tool_commit(
                     &mut drive,
-                    CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                    CoreAgentCommand::AdmitCodeToolCall {
+                        call: call.clone(),
+                        acknowledged: None,
+                    },
                 );
             }
             let joined_request = crate::code_tool_request(
@@ -11668,6 +11710,7 @@ mod tests {
                     execution_id: "execution-1".into(),
                     cancel: true,
                     program_context: None,
+                    acknowledged: None,
                 },
             );
             assert!(!drive.state().promises.promises.contains_key(&reply_id));
@@ -12246,6 +12289,7 @@ mod tests {
                 execution_id: execution_id.clone(),
                 cancel: true,
                 program_context: context.map(program_context_input),
+                acknowledged: None,
             },
         ));
         // The context is kept once, when the scope closes; a later one is
@@ -12257,6 +12301,7 @@ mod tests {
                         execution_id,
                         cancel: true,
                         program_context: Some(program_context_input(b"{\"late\":true}")),
+                        acknowledged: None,
                     },
                     at + 40,
                 )
@@ -12572,7 +12617,10 @@ mod tests {
         let call = scoped_call_spec(&execution_id, "1", "mcp_echo__hello");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: call.clone(),
+                acknowledged: None,
+            },
         ));
 
         // The dispatched call carries itself addressed to the approval tool,
@@ -12875,7 +12923,10 @@ mod tests {
         let echo = scoped_call_spec(&execution_id, "1", "local_echo");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: echo.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: echo.clone(),
+                acknowledged: None,
+            },
         ));
         let request =
             crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
@@ -12912,6 +12963,7 @@ mod tests {
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: child.clone(),
+                acknowledged: None,
             },
         ));
         let request =
@@ -12982,6 +13034,7 @@ mod tests {
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: pending.clone(),
+                acknowledged: None,
             },
         ));
         let action = drive
@@ -13020,6 +13073,7 @@ mod tests {
                 execution_id: execution_id.clone(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         ));
         log.extend(code_tool_commit(
@@ -13123,7 +13177,10 @@ mod tests {
         let call = scoped_call_spec(&execution_id, "1", "open");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: call.clone(),
+                acknowledged: None,
+            },
         ));
         let request =
             crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
@@ -13164,6 +13221,7 @@ mod tests {
                 execution_id: execution_id.clone(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         );
         assert!(entries.iter().any(|entry| matches!(
@@ -13306,7 +13364,10 @@ mod tests {
             let call = scoped_call_spec(&scope_id, "1", "open");
             log.extend(code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             ));
             let request =
                 crate::code_tool_request(drive.session_id(), drive.state(), &scope_id, "1")
@@ -13326,6 +13387,7 @@ mod tests {
                     execution_id: scope_id.clone(),
                     cancel: true,
                     program_context: None,
+                    acknowledged: None,
                 },
             ));
             assert!(
@@ -13466,7 +13528,10 @@ mod tests {
             let call = scoped_call_spec(&execution_id, &request_id, tool);
             log.extend(code_tool_commit(
                 drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             ));
             let request = crate::code_tool_request(
                 drive.session_id(),
@@ -13539,6 +13604,7 @@ mod tests {
                 execution_id: execution_id.clone(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         );
         assert!(entries.iter().any(|entry| matches!(
@@ -13669,7 +13735,10 @@ mod tests {
             let call = scoped_call_spec(&execution_id, request_id, "ask");
             log.extend(code_tool_commit(
                 &mut drive,
-                CoreAgentCommand::AdmitCodeToolCall { call: call.clone() },
+                CoreAgentCommand::AdmitCodeToolCall {
+                    call: call.clone(),
+                    acknowledged: None,
+                },
             ));
             let request = crate::code_tool_request(
                 drive.session_id(),
@@ -13703,6 +13772,7 @@ mod tests {
                 execution_id: execution_id.clone(),
                 cancel: true,
                 program_context: None,
+                acknowledged: None,
             },
         );
         let requested = entries
@@ -13878,7 +13948,10 @@ mod tests {
         let echo = scoped_call_spec(&execution_id, "1", "local_echo");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: echo.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: echo.clone(),
+                acknowledged: None,
+            },
         ));
         let entries = code_tool_commit(&mut drive, cancel("1"));
         assert!(matches!(
@@ -13916,6 +13989,7 @@ mod tests {
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: sleep.clone(),
+                acknowledged: None,
             },
         ));
         log.extend(code_tool_commit(
@@ -13966,7 +14040,10 @@ mod tests {
         let ask = scoped_call_spec(&execution_id, "3", "ask");
         log.extend(code_tool_commit(
             &mut drive,
-            CoreAgentCommand::AdmitCodeToolCall { call: ask.clone() },
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: ask.clone(),
+                acknowledged: None,
+            },
         ));
         let request =
             crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "3")
@@ -14043,6 +14120,115 @@ mod tests {
     }
 
     #[test]
+    fn a_program_acknowledges_only_recorded_outcomes_and_the_scope_keeps_the_highest() {
+        let session_id = SessionId::new("program-acknowledgement");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver: program_driver(),
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "local_echo"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.bindings.retain(|name, _| name == "local_echo");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let acknowledged =
+            |drive: &CoreAgentDrive| drive.state().code_tools.scopes[&execution_id].acknowledged;
+        let admit = |request_id: &str, acknowledged: Option<u64>| {
+            CoreAgentCommand::AdmitCodeToolCall {
+                call: scoped_call_spec(&execution_id, request_id, "local_echo"),
+                acknowledged,
+            }
+        };
+
+        // Nothing is recorded yet, so nothing can be acknowledged.
+        assert!(drive.admit_command(admit("1", Some(1)), 100).is_err());
+        log.extend(code_tool_commit(&mut drive, admit("1", Some(0))));
+        let request =
+            crate::code_tool_request(drive.session_id(), drive.state(), &execution_id, "1")
+                .unwrap();
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: scoped_call_spec(&execution_id, "1", "local_echo").origin,
+                result: completed_tool_result(&request).results.remove(0),
+            },
+        ));
+        // One outcome is recorded: acknowledging two is refused and records
+        // nothing; acknowledging one is recorded with the next admission.
+        assert!(drive.admit_command(admit("2", Some(2)), 100).is_err());
+        assert_eq!(acknowledged(&drive), 0);
+        let entries = code_tool_commit(&mut drive, admit("2", Some(1)));
+        assert!(matches!(
+            &entries[..],
+            [CoreAgentEntry {
+                event: CoreAgentEvent::CodeTool(crate::CodeToolEvent::CallAdmitted {
+                    acknowledged: Some(1),
+                    ..
+                }),
+                ..
+            }]
+        ));
+        log.extend(entries);
+        assert_eq!(acknowledged(&drive), 1);
+        // A later message can carry an older acknowledgement (one sent from
+        // an earlier workflow task); the scope keeps the highest.
+        log.extend(code_tool_commit(&mut drive, admit("3", Some(0))));
+        assert_eq!(acknowledged(&drive), 1);
+
+        // The close carries one too, checked the same way.
+        let close = |acknowledged: Option<u64>| CoreAgentCommand::CloseCodeToolScope {
+            execution_id: execution_id.clone(),
+            cancel: true,
+            program_context: None,
+            acknowledged,
+        };
+        assert!(drive.admit_command(close(Some(2)), 100).is_err());
+        log.extend(code_tool_commit(&mut drive, close(Some(1))));
+        assert_eq!(acknowledged(&drive), 1);
+        assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
     fn a_program_sleep_waits_for_its_deadline_alone_and_replays() {
         let session_id = SessionId::new("program-sleep");
         let mut drive =
@@ -14107,6 +14293,7 @@ mod tests {
             &mut drive,
             CoreAgentCommand::AdmitCodeToolCall {
                 call: sleep.clone(),
+                acknowledged: None,
             },
         ));
 

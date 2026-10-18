@@ -24,8 +24,8 @@ pub fn admit_command(
             crate::open_code_tool_scope_proposals(state, scope)
                 .map_err(command_rejection_from_domain)
         }
-        CoreAgentCommand::AdmitCodeToolCall { call } => {
-            crate::admit_code_tool_call_proposals(state, call)
+        CoreAgentCommand::AdmitCodeToolCall { call, acknowledged } => {
+            crate::admit_code_tool_call_proposals(state, call, acknowledged)
                 .map_err(command_rejection_from_domain)
         }
         CoreAgentCommand::CompleteCodeToolCall { origin, result } => {
@@ -58,8 +58,15 @@ pub fn admit_command(
             execution_id,
             cancel,
             program_context,
-        } => crate::close_code_tool_scope_proposals(state, execution_id, cancel, program_context)
-            .map_err(command_rejection_from_domain),
+            acknowledged,
+        } => crate::close_code_tool_scope_proposals(
+            state,
+            execution_id,
+            cancel,
+            program_context,
+            acknowledged,
+        )
+        .map_err(command_rejection_from_domain),
         CoreAgentCommand::CancelCodeTool {
             execution_id,
             target,

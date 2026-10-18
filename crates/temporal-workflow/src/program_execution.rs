@@ -281,6 +281,10 @@ pub struct ProgramAdmitActivityRequest {
     /// call from an earlier step, or a promise the program holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cancels: Vec<program_engine::HostCancel>,
+    /// The scope's outcomes the program had collected when the workflow
+    /// task sending this began, acknowledged with each admission.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub acknowledged: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -324,6 +328,9 @@ pub struct ProgramCloseActivityRequest {
     /// the close as the session's program context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_context: Option<serde_json::Value>,
+    /// As on `ProgramAdmitActivityRequest`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub acknowledged: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -104,11 +104,13 @@ impl ProgramRunner {
     /// completed program's state is kept with the close as the session's
     /// program context. Returns at once with what the exit must wait for;
     /// idempotent, so a lost result closes again and keeps one context.
+    /// `acknowledged` is the program's acknowledgement, as on `admit_step`.
     pub async fn close(
         &self,
         session_workflow_id: &str,
         scope_id: &str,
         program_context: Option<Value>,
+        acknowledged: u64,
     ) -> Result<ProgramCloseActivityResult, String> {
         let code_tools = CodeToolClient::new(self.client.clone(), session_workflow_id.to_owned());
         let mut context_error = None;
@@ -128,6 +130,7 @@ impl ProgramRunner {
                     execution_id: scope_id.to_owned(),
                     cancel_pending: true,
                     program_context,
+                    acknowledged: (acknowledged > 0).then_some(acknowledged),
                 },
                 Default::default(),
             )
@@ -258,18 +261,25 @@ impl ProgramRunner {
     /// Admit one step's requests to the execution's scope, in issue order, then
     /// send its cancels, and return the failures the program receives for
     /// requests not admitted. A transport failure is returned as an error so
-    /// the step is retried; admission and cancels are idempotent.
+    /// the step is retried; admission and cancels are idempotent. Each
+    /// admission carries `acknowledged`, the outcomes the program had
+    /// collected when its current workflow task began, which the session
+    /// need not hold for it any more.
     pub async fn admit_step(
         &self,
         descriptor: &ProgramRunDescriptor,
         requests: Vec<HostRequest>,
         cancels: Vec<HostCancel>,
+        acknowledged: u64,
     ) -> Result<Vec<HostCompletion>, AdmitStepError> {
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
         let mut rejected = Vec::new();
         for request in requests {
-            match self.admit(&code_tools, descriptor, request).await {
+            match self
+                .admit(&code_tools, descriptor, request, acknowledged)
+                .await
+            {
                 Ok(_) => {}
                 Err(Admission::Conflict(request_id)) => {
                     return Err(AdmitStepError::Diverged(request_id));
@@ -408,6 +418,7 @@ impl ProgramRunner {
         code_tools: &CodeToolClient,
         descriptor: &ProgramRunDescriptor,
         request: HostRequest,
+        acknowledged: u64,
     ) -> Result<String, Admission> {
         let request_id = request.request_id.clone();
         let admitted: Result<(), HostError> = async {
@@ -431,6 +442,7 @@ impl ProgramRunner {
                         request_id: request.request_id.clone(),
                         binding_id: request.binding_id,
                         arguments_ref,
+                        acknowledged: (acknowledged > 0).then_some(acknowledged),
                     },
                     Default::default(),
                 )
