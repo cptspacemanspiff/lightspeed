@@ -185,6 +185,18 @@ fn cancel_status(
                 execution_id: request.execution_id.clone(),
                 request_id: request_id.clone(),
             };
+            let left_out = state
+                .core_state
+                .code_tools
+                .scopes
+                .get(&request.execution_id)
+                .is_some_and(|scope| scope.left_out(request_id));
+            if left_out {
+                return Err(rejected(
+                    Rejection::Conflict,
+                    "the call finished and was acknowledged; its outcome is no longer held",
+                ));
+            }
             let call = harness::code_tool_call(&state.core_state, &origin)
                 .ok_or_else(|| rejected(Rejection::UnknownScope, "unknown code tool request"))?;
             match &call.status {
@@ -435,6 +447,12 @@ fn invocation_command(
             ));
         }
     } else {
+        if scope.left_out(&request.request_id) {
+            return Err(rejected(
+                Rejection::Conflict,
+                "request was admitted and acknowledged; it cannot be admitted again",
+            ));
+        }
         if scope.closed {
             return Err(rejected(
                 Rejection::ScopeClosed,
@@ -1382,6 +1400,7 @@ mod tests {
                 completed: Vec::new(),
                 completed_base: 0,
                 calls_dropped: 0,
+                dropped_max_request: 0,
                 acknowledged: 0,
                 program_context: None,
                 cancel_requested_calls: Default::default(),
@@ -1504,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_outcomes_are_read_by_absolute_position_after_a_handoff() {
+    fn a_handed_over_scope_reads_by_absolute_position_and_refuses_left_out_calls() {
         let mut state = AgentSessionWorkflow::default();
         let scope: harness::CodeToolScope = serde_json::from_value(serde_json::json!({
             "toolset_revision": 1,
@@ -1548,6 +1567,7 @@ mod tests {
             "completed": ["call-3"],
             "completed_base": 2,
             "calls_dropped": 2,
+            "dropped_max_request": 2,
         }))
         .expect("scope");
         state
@@ -1577,5 +1597,30 @@ mod tests {
             ["call-3"]
         );
         assert_eq!(page.next, 3);
+
+        // A left-out call sent again or cancelled is refused as a conflict;
+        // a new request is not.
+        let invoke = |request_id: &str| crate::InvokeCodeToolRequest {
+            execution_id: "wtx:run".to_owned(),
+            request_id: request_id.to_owned(),
+            binding_id: format!("binding:sha256:{:064x}", 1),
+            arguments_ref: BlobRef::from_bytes(b"{}"),
+            acknowledged: None,
+        };
+        let resent = invocation_command(&state, invoke("call-1")).unwrap_err();
+        assert_eq!(resent.kind, Rejection::Conflict);
+        let new = invocation_command(&state, invoke("call-4")).unwrap_err();
+        assert_eq!(new.kind, Rejection::PermissionDenied);
+        let cancelled = cancel_status(
+            &state,
+            &crate::CancelCodeToolRequest {
+                execution_id: "wtx:run".to_owned(),
+                target: harness::CodeToolCancelTarget::Call {
+                    request_id: "call-2".to_owned(),
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(cancelled.kind, Rejection::Conflict);
     }
 }

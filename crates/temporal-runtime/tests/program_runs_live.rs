@@ -2502,7 +2502,8 @@ async fn a_program_acknowledges_the_outcomes_it_collected_in_earlier_workflow_ta
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
-async fn a_program_run_keeps_going_while_its_session_continues_as_new() -> anyhow::Result<()> {
+async fn a_program_run_keeps_going_while_its_session_continues_as_new_and_drops_what_it_acknowledged()
+-> anyhow::Result<()> {
     with_program_workers_setup(
         ProgramWorkerSetup {
             // The session continues as new whenever it can, so the program's
@@ -2565,6 +2566,31 @@ async fn a_program_run_keeps_going_while_its_session_continues_as_new() -> anyho
                     continued_from(&events).is_some(),
                     "the session's current execution continued another"
                 );
+                // The run's report reads the session's memory at the end of
+                // the run: it counts all twelve calls and holds only those the
+                // program had not acknowledged by the last reload.
+                let snapshot = client
+                    .get_workflow_handle::<temporal_workflow::ProgramRunWorkflow>(execution_id)
+                    .query(
+                        temporal_workflow::ProgramRunWorkflow::snapshot,
+                        (),
+                        temporalio_client::WorkflowQueryOptions::default(),
+                    )
+                    .await?;
+                let Some(temporal_workflow::ProgramRunTerminal::Completed { result }) =
+                    snapshot.terminal
+                else {
+                    anyhow::bail!("the run completed: {snapshot:?}");
+                };
+                let report = read_json(&store, result.report_ref.as_str()).await?;
+                let scope = &report["scope"];
+                assert_eq!(
+                    (scope["admitted"].as_u64(), scope["recorded"].as_u64()),
+                    (Some(12), Some(12)),
+                    "{scope}"
+                );
+                let held = scope["calls"].as_object().map_or(0, |calls| calls.len());
+                assert!(held < 12, "a reload left acknowledged calls out: {scope}");
 
                 let _ = api
                     .close_session(api::SessionCloseParams {

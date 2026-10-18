@@ -14119,9 +14119,10 @@ mod tests {
         assert_replays_identically(&drive, &log);
     }
 
-    #[test]
-    fn a_program_acknowledges_only_recorded_outcomes_and_the_scope_keeps_the_highest() {
-        let session_id = SessionId::new("program-acknowledgement");
+    /// A program session whose active run has opened its scope with one
+    /// binding, `local_echo`. Returns the drive, its log and the scope id.
+    fn echo_program_scope(session: &str) -> (CoreAgentDrive, Vec<CoreAgentEntry>, String) {
+        let session_id = SessionId::new(session);
         let mut drive =
             CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
         let action = drive
@@ -14171,14 +14172,19 @@ mod tests {
             &mut drive,
             CoreAgentCommand::OpenCodeToolScope { scope },
         ));
+        (drive, log, execution_id)
+    }
+
+    #[test]
+    fn a_program_acknowledges_only_recorded_outcomes_and_the_scope_keeps_the_highest() {
+        let (mut drive, mut log, execution_id) = echo_program_scope("program-acknowledgement");
         let acknowledged =
             |drive: &CoreAgentDrive| drive.state().code_tools.scopes[&execution_id].acknowledged;
-        let admit = |request_id: &str, acknowledged: Option<u64>| {
-            CoreAgentCommand::AdmitCodeToolCall {
+        let admit =
+            |request_id: &str, acknowledged: Option<u64>| CoreAgentCommand::AdmitCodeToolCall {
                 call: scoped_call_spec(&execution_id, request_id, "local_echo"),
                 acknowledged,
-            }
-        };
+            };
 
         // Nothing is recorded yet, so nothing can be acknowledged.
         assert!(drive.admit_command(admit("1", Some(1)), 100).is_err());
@@ -14226,6 +14232,88 @@ mod tests {
         log.extend(code_tool_commit(&mut drive, close(Some(1))));
         assert_eq!(acknowledged(&drive), 1);
         assert_replays_identically(&drive, &log);
+    }
+
+    #[test]
+    fn a_handoff_that_leaves_out_acknowledged_calls_decides_as_the_full_state() {
+        let (mut drive, _, execution_id) = echo_program_scope("program-left-out");
+        let call = |request_id: &str| scoped_call_spec(&execution_id, request_id, "local_echo");
+        let admit =
+            |request_id: &str, acknowledged: Option<u64>| CoreAgentCommand::AdmitCodeToolCall {
+                call: call(request_id),
+                acknowledged,
+            };
+        let complete = |drive: &CoreAgentDrive, request_id: &str| {
+            let request = crate::code_tool_request(
+                drive.session_id(),
+                drive.state(),
+                &execution_id,
+                request_id,
+            )
+            .unwrap();
+            CoreAgentCommand::CompleteCodeToolCall {
+                origin: call(request_id).origin,
+                result: completed_tool_result(&request).results.remove(0),
+            }
+        };
+        for request_id in ["call-1", "call-2", "call-3"] {
+            code_tool_commit(&mut drive, admit(request_id, None));
+        }
+        for request_id in ["call-2", "call-1"] {
+            let command = complete(&drive, request_id);
+            code_tool_commit(&mut drive, command);
+        }
+        code_tool_commit(&mut drive, admit("call-4", Some(2)));
+
+        let full = drive.state().clone();
+        let mut trimmed = full.clone();
+        crate::trim_for_handoff(&mut trimmed);
+        let scope = &trimmed.code_tools.scopes[&execution_id];
+        assert_eq!(
+            scope.calls.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["call-3", "call-4"]
+        );
+        let mut drives = [full, trimmed].map(|state| {
+            let head = state.reduced_to.clone();
+            CoreAgentDrive::from_replayed(drive.session_id().clone(), state, head)
+        });
+
+        // A left-out call sent again appends nothing: the full state finds
+        // it and dedups, the trimmed one refuses it. Cancelling it is a
+        // no-op in both.
+        let [full, trimmed] = &mut drives;
+        let resent = full.admit_command(admit("call-1", Some(2)), 200).unwrap();
+        assert!(!matches!(resent, CoreAgentAction::AppendEvents { .. }));
+        assert!(
+            trimmed
+                .admit_command(admit("call-1", Some(2)), 200)
+                .is_err()
+        );
+        for drive in [&mut *full, &mut *trimmed] {
+            let cancel = CoreAgentCommand::CancelCodeTool {
+                execution_id: execution_id.clone(),
+                target: crate::CodeToolCancelTarget::Call {
+                    request_id: "call-2".to_owned(),
+                },
+            };
+            let cancelled = drive.admit_command(cancel, 200).unwrap();
+            assert!(!matches!(cancelled, CoreAgentAction::AppendEvents { .. }));
+        }
+        // Everything else is decided alike, with the same events.
+        let mut appended = drives.each_mut().map(|drive| {
+            let mut entries = Vec::new();
+            let command = complete(drive, "call-3");
+            entries.extend(code_tool_commit(drive, command));
+            entries.extend(code_tool_commit(drive, admit("call-5", Some(3))));
+            entries
+        });
+        let [full, trimmed] = &mut appended;
+        assert_eq!(full, trimmed);
+        let counts = drives.each_ref().map(|drive| {
+            let scope = &drive.state().code_tools.scopes[&execution_id];
+            (scope.admitted(), scope.recorded(), scope.acknowledged)
+        });
+        assert_eq!(counts, [(5, 3, 3); 2]);
     }
 
     #[test]

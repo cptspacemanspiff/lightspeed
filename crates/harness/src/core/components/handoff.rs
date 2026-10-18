@@ -24,7 +24,10 @@ pub const HANDOFF_COMPLETED_RUNS: usize = 100;
 /// Live runs (the active run and queued ones) and anything still in progress
 /// stay; what ended runs left finished goes.
 /// - A code-tool scope stays while its run is live or it still has work: it is
-///   open, a call has no outcome yet, or a withdrawn handle is pending.
+///   open, a call has no outcome yet, or a withdrawn handle is pending. A kept
+///   scope leaves out the finished calls its program acknowledged
+///   (`CodeToolScope::leave_out_acknowledged`): the program never asks for
+///   them again, and the scope refuses them if they are sent again.
 /// - A workflow-tool invocation stays while its run is live, a kept scope
 ///   names it as its parent, or one of its completion promises is pending. Its
 ///   delivery or start failure stays with it.
@@ -73,6 +76,9 @@ pub fn trim_for_handoff(state: &mut CoreAgentState) {
             || !scope.closed
             || scope.calls.values().any(|call| !call.status.is_terminal())
             || scope.withdrawn.iter().any(pending);
+        if keep {
+            scope.leave_out_acknowledged();
+        }
         if keep
             && let ScopeOwner::ModelInvocation {
                 parent_invocation_id,
@@ -400,9 +406,87 @@ mod tests {
         assert_eq!(state.id_cursors.last_promise_id, 6);
     }
 
+    /// The active run's program scope: calls 1 to 3 finished in the order
+    /// 2, 1, 3, call 4 is still running, and the program acknowledged
+    /// `acknowledged` completions.
+    fn acknowledged_scope(acknowledged: u64) -> crate::CodeToolScope {
+        let mut scope = scope(run_scope(151), false, completed_call());
+        let call = scope.calls["call-1"].clone();
+        for (number, status) in [
+            (2, completed_call()),
+            (3, completed_call()),
+            (4, json!({ "kind": "pending" })),
+        ] {
+            let mut call = call.clone();
+            call.spec.origin.request_id = format!("call-{number}");
+            call.status = serde_json::from_value(status).expect("status");
+            scope.calls.insert(format!("call-{number}"), call);
+        }
+        scope.completed = ["call-2", "call-1", "call-3"].map(str::to_owned).to_vec();
+        scope.cancel_requested_calls.insert("call-2".to_owned());
+        scope.acknowledged = acknowledged;
+        scope
+    }
+
+    #[test]
+    fn a_kept_scope_leaves_out_the_finished_calls_its_program_acknowledged() {
+        let mut state = session();
+        state
+            .code_tools
+            .scopes
+            .insert("program".to_owned(), acknowledged_scope(2));
+        trim_for_handoff(&mut state);
+
+        let scope = &state.code_tools.scopes["program"];
+        assert_eq!(
+            scope.calls.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["call-3", "call-4"],
+            "the first two completions go; the third, unacknowledged, and the running call stay"
+        );
+        assert_eq!(scope.completed, ["call-3"]);
+        assert!(scope.cancel_requested_calls.is_empty());
+        assert_eq!(
+            (scope.admitted(), scope.recorded(), scope.dropped_max_request),
+            (4, 3, 2),
+            "counts stay absolute"
+        );
+        assert!(scope.recorded_outcomes(1, 10).is_none());
+        assert_eq!(
+            scope
+                .recorded_outcomes(2, 10)
+                .expect("held")
+                .iter()
+                .map(|call| call.spec.origin.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["call-3"]
+        );
+        assert!(scope.left_out("call-1") && scope.left_out("call-2"));
+        assert!(!scope.left_out("call-3") && !scope.left_out("call-5"));
+
+        // Without an acknowledgement, nothing is left out.
+        let mut state = session();
+        state
+            .code_tools
+            .scopes
+            .insert("program".to_owned(), acknowledged_scope(0));
+        trim_for_handoff(&mut state);
+        assert_eq!(state.code_tools.scopes["program"], acknowledged_scope(0));
+    }
+
+    #[test]
+    fn only_program_request_ids_are_numbered() {
+        assert_eq!(crate::program_request_number("call-12"), Some(12));
+        for id in ["call-0", "call-012", "call-", "call-x", "12", "code-1"] {
+            assert_eq!(crate::program_request_number(id), None, "{id}");
+        }
+    }
+
     #[test]
     fn a_handoff_trims_what_a_reload_would_and_nothing_twice() {
         let mut once = session();
+        once.code_tools
+            .scopes
+            .insert("program".to_owned(), acknowledged_scope(2));
         trim_for_handoff(&mut once);
         let mut twice = once.clone();
         trim_for_handoff(&mut twice);

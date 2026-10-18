@@ -434,6 +434,11 @@ pub struct CodeToolScope {
     /// Admitted calls left out of `calls` the same way; all had outcomes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub calls_dropped: u64,
+    /// The highest program request number (`program_request_number`) among
+    /// the calls left out. A missing request at or below it was admitted and
+    /// acknowledged, so sending it again is refused rather than run twice.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_max_request: u64,
     /// Completions the scope's program has acknowledged: it had collected
     /// them when the workflow task it sent this from began, so its replays
     /// never ask for them again and never re-send a call issued before
@@ -483,10 +488,68 @@ impl CodeToolScope {
         self.completed_base
             .saturating_add(u64::try_from(self.completed.len()).unwrap_or(u64::MAX))
     }
+
+    /// Whether `request_id` names a call left out of memory: admitted,
+    /// finished and acknowledged.
+    pub fn left_out(&self, request_id: &str) -> bool {
+        !self.calls.contains_key(request_id)
+            && program_request_number(request_id)
+                .is_some_and(|number| number <= self.dropped_max_request)
+    }
+
+    /// Leave out the finished calls the scope's program acknowledged: the
+    /// first `acknowledged` completions. Counts and positions stay absolute.
+    /// Only calls with program request ids are left out, in completion
+    /// order, so `left_out` can tell them from requests never admitted.
+    pub(crate) fn leave_out_acknowledged(&mut self) {
+        let acknowledged = self.acknowledged.saturating_sub(self.completed_base);
+        let acknowledged = usize::try_from(acknowledged)
+            .unwrap_or(usize::MAX)
+            .min(self.completed.len());
+        let numbered = self.completed[..acknowledged]
+            .iter()
+            .take_while(|request_id| program_request_number(request_id).is_some())
+            .count();
+        for request_id in self.completed.drain(..numbered) {
+            let call = self.calls.remove(&request_id);
+            debug_assert!(call.is_some_and(|call| call.status.is_terminal()));
+            self.cancel_requested_calls.remove(&request_id);
+            self.calls_dropped += 1;
+            self.completed_base += 1;
+            self.dropped_max_request = self
+                .dropped_max_request
+                .max(program_request_number(&request_id).expect("numbered above"));
+        }
+    }
+}
+
+/// The number in a program's request id, `call-<n>`: the engine numbers a
+/// scope's calls from 1 in the order the program issues them, which is the
+/// order they are admitted in. Other ids (code mode's) have none.
+pub fn program_request_number(request_id: &str) -> Option<u64> {
+    let number = request_id.strip_prefix("call-")?;
+    let parsed = number.parse::<u64>().ok()?;
+    (parsed > 0 && parsed.to_string() == number).then_some(parsed)
 }
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+/// A call left out of memory was admitted and finished; admitting its
+/// request again would run it twice.
+fn refuse_left_out(state: &CoreAgentState, origin: &CodeToolOrigin) -> Result<(), DomainError> {
+    if state
+        .code_tools
+        .scopes
+        .get(&origin.execution_id)
+        .is_some_and(|scope| scope.left_out(&origin.request_id))
+    {
+        return Err(invalid(
+            "code tool request was admitted and acknowledged; it cannot be admitted again",
+        ));
+    }
+    Ok(())
 }
 
 /// An acknowledgement can cover only completions the scope has recorded.
@@ -1103,6 +1166,7 @@ pub fn admit_code_tool_call_proposals(
             ))
         };
     }
+    refuse_left_out(state, &call.origin)?;
     validate_call(state, &call)?;
     if let Some(acknowledged) = acknowledged {
         validate_acknowledgement(
@@ -1552,6 +1616,10 @@ pub fn cancel_code_tool_proposals(
         .ok_or_else(|| invalid("unknown code tool execution scope"))?;
     match target {
         CodeToolCancelTarget::Call { request_id } => {
+            // A call left out had finished: cancelling it records nothing.
+            if scope.left_out(request_id) {
+                return Ok(Vec::new());
+            }
             let call = scope
                 .calls
                 .get(request_id)
@@ -1923,6 +1991,7 @@ pub(crate) fn apply_code_tool_event(
                     completed: Vec::new(),
                     completed_base: 0,
                     calls_dropped: 0,
+                    dropped_max_request: 0,
                     acknowledged: 0,
                     program_context: None,
                     cancel_requested_calls: BTreeSet::new(),
@@ -1935,6 +2004,7 @@ pub(crate) fn apply_code_tool_event(
             promise_id_base,
             acknowledged,
         } => {
+            refuse_left_out(state, &call.origin)?;
             validate_call(state, call)?;
             if code_tool_call(state, &call.origin).is_some() {
                 return Err(invalid("duplicate code tool admission event"));
