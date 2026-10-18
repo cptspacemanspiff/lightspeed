@@ -144,8 +144,13 @@ missing authoritative events prevent it.
 
 The activity returns reduced state, its head, and the run-submission index to
 the workflow. It does not send the entire event history through the activity
-result. The same distinction lets a transcript reader load a bounded event
-range without reconstructing the full execution state first.
+result, and the state it returns covers only work still in progress: the
+active and queued runs, calls and promises that are still pending, detached
+promises, and the most recent completed runs. Finished calls and older run
+summaries stay in the log and in checkpoints, which keep the complete state
+for the gateway and other readers. The same distinction lets a transcript
+reader load a bounded event range without reconstructing the full execution
+state first.
 
 The [checkpoint loader](../../../crates/temporal-runtime/src/checkpoint.rs)
 validates checkpoints and checks that the required history is complete.
