@@ -9752,6 +9752,71 @@ mod tests {
         assert_eq!(rejection.kind, CommandRejectionKind::UnknownReference);
     }
 
+    #[test]
+    fn a_settled_promise_left_behind_takes_late_deliveries_and_cancels_as_no_ops() {
+        let session_id = SessionId::new("session-a");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let request = drive_to_single_tool_invocation(&mut drive);
+        let resumed = drive
+            .resume_tool_batch_outcome(
+                ToolBatchOutcome::completed(promise_tool_result(&request, "promise_1")),
+                90,
+            )
+            .expect("resume tool batch");
+        commit_action(&mut drive, resumed);
+        let resolve = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id: crate::PromiseId::new("promise_1"),
+                    resolution: crate::PromiseResolution::Resolved { payload_ref: None },
+                },
+                91,
+            )
+            .expect("resolve promise");
+        commit_action(&mut drive, resolve);
+
+        // A handoff leaves the settled promise behind.
+        let mut state = drive.state().clone();
+        state
+            .promises
+            .promises
+            .remove(&crate::PromiseId::new("promise_1"));
+        let head = drive.head().cloned();
+        let mut drive = CoreAgentDrive::from_replayed(session_id, state, head);
+
+        for command in [
+            CoreAgentCommand::ResolvePromise {
+                promise_id: crate::PromiseId::new("promise_1"),
+                resolution: crate::PromiseResolution::Failed { error_ref: None },
+            },
+            CoreAgentCommand::RequestPromiseCancel {
+                promise_id: crate::PromiseId::new("promise_1"),
+            },
+        ] {
+            let late = drive.admit_command(command, 92).expect("late command");
+            assert!(
+                !matches!(late, CoreAgentAction::AppendEvents { .. }),
+                "a promise left behind takes late commands as no-ops: {late:?}"
+            );
+        }
+
+        // An id past the cursor was never issued and is still refused.
+        let unknown = drive
+            .admit_command(
+                CoreAgentCommand::ResolvePromise {
+                    promise_id: crate::PromiseId::new("promise_99"),
+                    resolution: crate::PromiseResolution::Cancelled,
+                },
+                93,
+            )
+            .expect_err("unknown promise must be rejected");
+        let CoreAgentDriveError::Command(CommandError::Rejected(rejection)) = unknown else {
+            panic!("expected command rejection, got: {unknown:?}");
+        };
+        assert_eq!(rejection.kind, CommandRejectionKind::UnknownReference);
+    }
+
     fn install_test_tools(drive: &mut CoreAgentDrive, tool_names: &[&str]) {
         let tools = tool_names
             .iter()

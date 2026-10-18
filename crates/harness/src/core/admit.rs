@@ -801,6 +801,10 @@ pub fn admit_command(
             resolution,
         } => {
             let Some(promise) = state.promises.promises.get(&promise_id) else {
+                if issued_promise(state, &promise_id) {
+                    // Settled and left behind by a handoff; see `issued_promise`.
+                    return Ok(Vec::new());
+                }
                 return reject(
                     CommandRejectionKind::UnknownReference,
                     format!("unknown promise {promise_id}"),
@@ -828,6 +832,9 @@ pub fn admit_command(
         }
         CoreAgentCommand::RequestPromiseCancel { promise_id } => {
             if !state.promises.promises.contains_key(&promise_id) {
+                if issued_promise(state, &promise_id) {
+                    return Ok(Vec::new());
+                }
                 return reject(
                     CommandRejectionKind::UnknownReference,
                     format!("unknown promise {promise_id}"),
@@ -1051,6 +1058,16 @@ fn fail_pending_completion_promises(
             ));
         }
     }
+}
+
+/// Whether a promise missing from state is one this session numbered: its
+/// id is at or below the promise cursor. Memory loaded at a handoff keeps
+/// every pending promise and may leave settled ones behind, so such a
+/// promise has settled (or its reserved number was never used). A late
+/// delivery or cancel for it is a no-op, as it is for a settled promise
+/// still in state.
+fn issued_promise(state: &CoreAgentState, promise_id: &crate::PromiseId) -> bool {
+    promise_id.number() <= state.id_cursors.last_promise_id
 }
 
 fn require_no_active_or_queued_work(

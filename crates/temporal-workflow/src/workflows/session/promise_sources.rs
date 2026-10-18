@@ -264,7 +264,9 @@ pub(super) async fn process_pending_source_resolutions(
         let (authorized, reply_schema_ref) = ctx.state(|state| {
             let Some(promise) = state.core_state.promises.promises.get(&promise_id) else {
                 // Unknown promises fall through to ordinary admission,
-                // which rejects them with the standard funnel semantics.
+                // which rejects them with the standard funnel semantics,
+                // or ignores them when the session issued them (a settled
+                // promise its loaded memory left behind).
                 return (true, None);
             };
             let harness::PromiseSource::Workflow {
