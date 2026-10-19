@@ -522,15 +522,19 @@ enum Admission {
 const CONFLICT: &str = "conflict";
 
 /// A tool failure whose error is a `{ code, message }` document (an
-/// input request's `deadline_exceeded`, say) reaches the program with
-/// `code` as the error's kind, so it can be caught by kind.
+/// input request's `deadline_exceeded`, say), bare or under `error` (a bot
+/// tool's refusal, such as `bot.emit`'s `rate_limited`), reaches the program
+/// with `code` as the error's kind, so it can be caught by kind.
 fn structured_failure(error: HostError) -> HostError {
     if error.kind != "tool_failed" {
         return error;
     }
-    let Ok(document) = serde_json::from_str::<Value>(&error.message) else {
+    let Ok(mut document) = serde_json::from_str::<Value>(&error.message) else {
         return error;
     };
+    if let Some(inner) = document.get_mut("error").map(Value::take) {
+        document = inner;
+    }
     match (
         document.get("code").and_then(Value::as_str),
         document.get("message").and_then(Value::as_str),
@@ -637,6 +641,11 @@ mod tests {
         ));
         assert_eq!(deadline.kind, "deadline_exceeded");
         assert_eq!(deadline.message, "not answered in time");
+        let refused = structured_failure(failure(
+            r#"{"error":{"code":"rate_limited","message":"too many events"}}"#,
+        ));
+        assert_eq!(refused.kind, "rate_limited");
+        assert_eq!(refused.message, "too many events");
         for unchanged in [
             "plain text",
             r#"{"code":"Bad Code","message":"x"}"#,
