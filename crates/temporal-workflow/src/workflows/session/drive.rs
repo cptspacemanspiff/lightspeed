@@ -401,15 +401,25 @@ async fn queue_detached_promise_followups(
     ctx: &mut WorkflowContext<AgentSessionWorkflow>,
     entries: &[CoreAgentEntry],
 ) -> anyhow::Result<()> {
-    let followups = ctx.state(|state| {
+    let (followups, program) = ctx.state(|state| {
         if state.core_state.lifecycle.status != CoreAgentStatus::Open {
-            return Vec::new();
+            return (Vec::new(), false);
         }
-        entries
+        let followups = entries
             .iter()
             .filter_map(|entry| detached_promise_followup_for_entry(state, entry))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (followups, state.core_state.lifecycle.driver.is_program())
     });
+    // A program takes a detached handle back itself, in a later run
+    // (`input.handle`, `agent.handle`, `program.handle`). It has no model
+    // to tell, and a program session refuses the input run that would.
+    if program
+        && !followups.is_empty()
+        && ctx.patched(wait_loop::PROGRAM_SESSIONS_SKIP_DETACHED_FOLLOWUPS_PATCH)
+    {
+        return Ok(());
+    }
 
     for followup in followups {
         let summary_ref = put_detached_followup_blob(

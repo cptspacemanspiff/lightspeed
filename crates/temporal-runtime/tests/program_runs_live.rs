@@ -3430,6 +3430,103 @@ async fn a_detached_request_outlives_its_run_and_a_later_run_takes_it_back() -> 
     .await
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_detached_request_answered_between_runs_waits_for_the_run_that_takes_it_back()
+-> anyhow::Result<()> {
+    with_program_workers_setup(
+        ProgramWorkerSetup::default(),
+        |api, store, session_id, client| {
+            Box::pin(async move {
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: program_profile(
+                        &profile_id,
+                        DETACHING_PROGRAM,
+                        &[
+                            ("input.open", None),
+                            ("input.handle", None),
+                            ("promise.await", None),
+                            ("promise.detach", None),
+                        ],
+                    ),
+                })
+                .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(&api, &session_id, json!({ "claim": "keep" })).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                wait_for_requests(&api, &session_id, 1).await?;
+                let request_id = inbox_statuses(&api, &session_id)
+                    .await?
+                    .into_keys()
+                    .next()
+                    .expect("request");
+
+                // Answered while no run is going: the session records the
+                // answer and starts nothing.
+                api.answer_inbox_request(api::InboxRequestAnswerParams {
+                    request_id,
+                    approved: true,
+                    value: None,
+                    comment: None,
+                })
+                .await?;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    let state = programs::session_state(&store, &session_id).await?;
+                    if state.promises.promises.values().any(|promise| {
+                        promise.scope == harness::PromiseScope::Session
+                            && promise.status == harness::PromiseStatus::Resolved
+                    }) {
+                        break;
+                    }
+                    anyhow::ensure!(
+                        tokio::time::Instant::now() < deadline,
+                        "the answer never reached the session"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let status = support::live::live_workflow_handle(&client, &session_id)?
+                    .query(
+                        temporal_workflow::AgentSessionWorkflow::status,
+                        (),
+                        temporalio_client::WorkflowQueryOptions::default(),
+                    )
+                    .await?;
+                assert!(
+                    status.admission_failures.is_empty(),
+                    "{:?}",
+                    status.admission_failures
+                );
+                assert!(status.active_run.is_none(), "{:?}", status.active_run);
+
+                // The next run takes the answered request back.
+                let run =
+                    start_program_run(&api, &session_id, json!({ "claim": "answer" })).await?;
+                let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                assert_eq!(output["answer"]["approved"], json!(true), "{output}");
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
 /// Loops over three executions: each sleeps, records what it saw, and
 /// continues as new until the third completes the run, handing the next run
 /// how many runs have completed.
