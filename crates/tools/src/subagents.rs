@@ -45,6 +45,9 @@ pub const MAX_SUBAGENT_INPUT_BYTES: usize = 256 * 1024;
 pub const MAX_SUBAGENT_LABEL_BYTES: usize = 200;
 /// The most contracts one call's `env` may name.
 pub const MAX_CHILD_ENV_CONTRACTS: usize = 256;
+/// The most items one call's `media` may carry, as many as a run's input
+/// takes.
+pub const MAX_CHILD_MEDIA: usize = 8;
 
 /// Who calls a child-session tool. A program may narrow what an agent child
 /// holds with `env`; a model hands the child its profile's grants, and a
@@ -206,6 +209,35 @@ pub struct AgentCallArgs {
     /// calling program holds. Omitted, the child keeps its profile's grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<String>>,
+    /// Program callers only: stored images or documents the child sees
+    /// after the brief, in its first message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Vec<ChildMedia>>,
+}
+
+/// A stored image or document handed to a child agent with its brief. The
+/// child's run admits it as run input does: the type must be one a run
+/// accepts and the blob within its size.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildMedia {
+    /// Full content reference (`sha256:…`) of a blob in this universe.
+    #[serde(rename = "ref")]
+    pub blob_ref: String,
+    /// Its media type, such as `image/jpeg` or `application/pdf`.
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ChildMedia {
+    /// An `image/*` type is shown as an image, anything else as a document.
+    pub fn is_image(&self) -> bool {
+        self.mime
+            .trim()
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+    }
 }
 
 impl AgentCallArgs {
@@ -226,7 +258,8 @@ impl AgentCallArgs {
             });
         }
         validate_label(self.label.as_deref())?;
-        validate_env(self.env.as_deref())
+        validate_env(self.env.as_deref())?;
+        validate_media(self.media.as_deref())
     }
 }
 
@@ -334,6 +367,35 @@ fn validate_env(env: Option<&[String]>) -> ToolResult<()> {
         }
         if !seen.insert(contract) {
             return invalid(format!("env names {contract} twice"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_media(media: Option<&[ChildMedia]>) -> ToolResult<()> {
+    let Some(media) = media else {
+        return Ok(());
+    };
+    let invalid = |message: String| Err(ToolError::InvalidRequest { message });
+    if media.len() > MAX_CHILD_MEDIA {
+        return invalid(format!("media may carry at most {MAX_CHILD_MEDIA} items"));
+    }
+    for item in media {
+        if !item.blob_ref.starts_with("sha256:") {
+            return invalid(format!(
+                "media ref must be a full sha256: content reference, not {}",
+                item.blob_ref
+            ));
+        }
+        if item.mime.trim().is_empty() {
+            return invalid(format!("media {} needs its mime type", item.blob_ref));
+        }
+        if let Some(name) = &item.name
+            && (name.trim().is_empty() || name.len() > MAX_SUBAGENT_LABEL_BYTES)
+        {
+            return invalid(format!(
+                "media name must be non-empty and at most {MAX_SUBAGENT_LABEL_BYTES} bytes"
+            ));
         }
     }
     Ok(())
@@ -578,6 +640,27 @@ pub fn subagent_tool_definition(
             "maxItems": MAX_CHILD_ENV_CONTRACTS,
             "description": "The contracts the child may use, each one this program holds. Omitted, the child keeps its profile's grants."
         });
+        input_schema["properties"]["media"] = json!({
+            "type": "array",
+            "maxItems": MAX_CHILD_MEDIA,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "Full content reference (sha256:…) of a stored image or document, such as an MCP result's blobRef."
+                    },
+                    "mime": {
+                        "type": "string",
+                        "description": "Its media type, such as image/jpeg or application/pdf."
+                    },
+                    "name": {"type": "string"}
+                },
+                "required": ["ref", "mime"],
+                "additionalProperties": false
+            },
+            "description": "Images or documents the child sees after the brief, in its first message."
+        });
     }
     let definition =
         crate::runtime::FunctionDefinition::new(kind.tool_name(), description, input_schema);
@@ -715,6 +798,60 @@ mod tests {
         .validate()
         .expect_err("env on a program call");
         assert!(refused.to_string().contains("own permissions"), "{refused}");
+    }
+
+    #[test]
+    fn only_a_program_calling_an_agent_is_offered_media_and_each_item_is_a_blob() {
+        for kind in [
+            SubagentToolKind::Run,
+            SubagentToolKind::Spawn,
+            SubagentToolKind::ProgramRun,
+            SubagentToolKind::ProgramSpawn,
+        ] {
+            let property = |caller| {
+                subagent_tool_definition(kind, caller)
+                    .expect("definition")
+                    .input_schema["properties"]
+                    .get("media")
+                    .cloned()
+            };
+            assert_eq!(property(ChildCaller::Model), None, "{kind:?}");
+            assert_eq!(
+                property(ChildCaller::Program).is_some(),
+                !kind.is_program(),
+                "{kind:?}"
+            );
+        }
+        let args = |media: Value| {
+            serde_json::from_value::<AgentCallArgs>(
+                json!({ "agent": "checker", "input": "x", "media": media }),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|args| args.validate().map_err(|error| error.to_string()))
+        };
+        args(json!([
+            { "ref": "sha256:ab", "mime": "image/jpeg", "name": "screen-0.jpg" },
+            { "ref": "sha256:cd", "mime": "application/pdf" }
+        ]))
+        .expect("an image and a document");
+        let image = |mime: &str| ChildMedia {
+            blob_ref: "sha256:ab".to_owned(),
+            mime: mime.to_owned(),
+            name: None,
+        };
+        assert!(image("IMAGE/PNG").is_image());
+        assert!(!image("application/pdf").is_image());
+        let too_many = (0..=MAX_CHILD_MEDIA)
+            .map(|_| json!({ "ref": "sha256:ab", "mime": "image/png" }))
+            .collect::<Vec<_>>();
+        for media in [
+            json!([{ "ref": "screen-0.jpg", "mime": "image/jpeg" }]),
+            json!([{ "ref": "sha256:ab", "mime": " " }]),
+            json!([{ "ref": "sha256:ab", "mime": "image/png", "kind": "image" }]),
+            Value::Array(too_many),
+        ] {
+            assert!(args(media.clone()).is_err(), "{media}");
+        }
     }
 
     #[test]

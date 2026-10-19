@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use api::{
-    AgentApiError, AgentApiService, AgentProfile, InlineAgentProfile, InputItem, ProfileId,
-    ProfileSource, RunStartSource, SessionCloseParams, SessionReadParams,
+    AgentApiError, AgentApiService, AgentProfile, InlineAgentProfile, InputItem, MediaKind,
+    ProfileId, ProfileSource, RunStartSource, SessionCloseParams, SessionReadParams,
 };
 use async_trait::async_trait;
 use harness::{
@@ -297,6 +297,7 @@ impl SubagentService {
                 profile: args.program,
                 label: args.label,
                 env: None,
+                media: false,
                 run: RunStartSource::Program {
                     input: args.input,
                     input_defaults: None,
@@ -307,17 +308,30 @@ impl SubagentService {
             if let Err(error) = args.validate() {
                 return self.rejected(error.to_string()).await;
             }
+            let media = args.media.unwrap_or_default();
+            let mut items = vec![InputItem::Text {
+                provenance_ref: None,
+                origin: None,
+                text: args.input,
+            }];
+            let handed_media = !media.is_empty();
+            items.extend(media.into_iter().map(|media| InputItem::Media {
+                origin: None,
+                kind: if media.is_image() {
+                    MediaKind::Image
+                } else {
+                    MediaKind::Document
+                },
+                blob_ref: media.blob_ref,
+                mime: media.mime,
+                name: media.name,
+            }));
             ChildCall {
                 profile: args.agent,
                 label: args.label,
                 env: args.env,
-                run: RunStartSource::Input {
-                    items: vec![InputItem::Text {
-                        provenance_ref: None,
-                        origin: None,
-                        text: args.input,
-                    }],
-                },
+                media: handed_media,
+                run: RunStartSource::Input { items },
             }
         };
         let context_ref = invocation.execution_context_ref.as_ref().ok_or_else(|| {
@@ -432,14 +446,23 @@ impl SubagentService {
         // reaches the child. An agent child may use what the calling
         // program named in `env`, resolved against the contracts its run
         // holds, or else the list the parent was itself given.
+        // `media` is a program caller's too: a model briefs its child in text.
+        let held = if call.env.is_some() || call.media {
+            self.runtime
+                .program_contracts(&parent_session_id, context.parent_run_id)
+                .await?
+        } else {
+            None
+        };
+        if call.media && held.is_none() {
+            return self
+                .rejected("only a program can hand a child media".to_owned())
+                .await;
+        }
         let env = match &call.env {
             _ if kind.is_program() => None,
             Some(names) => {
-                let Some(held) = self
-                    .runtime
-                    .program_contracts(&parent_session_id, context.parent_run_id)
-                    .await?
-                else {
+                let Some(held) = held else {
                     return self
                         .rejected(
                             "only a program can narrow a child's capabilities with env".to_owned(),
@@ -961,6 +984,8 @@ struct ChildCall {
     label: Option<String>,
     /// The contracts the calling program narrowed the child to.
     env: Option<Vec<String>>,
+    /// Whether the brief carries `media`, which only a program may hand.
+    media: bool,
     run: RunStartSource,
 }
 
@@ -1325,6 +1350,7 @@ mod tests {
                     input: "review the change".to_owned(),
                     label: Some("reviewer: change".to_owned()),
                     env: None,
+                    media: None,
                 })
                 .unwrap(),
             )
@@ -2672,6 +2698,82 @@ mod tests {
                 .await
                 .expect("load")
                 .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_hands_its_child_media_after_the_brief_and_a_model_cannot() {
+        let runtime = FakeChildRuntime::with_profile("checker", 1);
+        *runtime.parent_contracts.lock().unwrap() = Some(vec![delegated("agent.run")]);
+        let h = harness(runtime).await;
+        let arguments = serde_json::json!({
+            "agent": "checker",
+            "input": "Look at this screen.",
+            "media": [
+                { "ref": "sha256:aa", "mime": "image/jpeg", "name": "screen-0.jpg" },
+                { "ref": "sha256:bb", "mime": "application/pdf" }
+            ]
+        });
+        let start = start_args(
+            &h.blobs,
+            "wte:a",
+            "parent",
+            "checker",
+            "checker",
+            SubagentLimits::default(),
+        )
+        .await;
+        let start = with_arguments(&h.blobs, start, arguments.clone()).await;
+        prepared(h.service.prepare(start, 10).await.expect("prepare"));
+        let source = h.runtime.started_runs.lock().unwrap()[0].1.clone();
+        let RunStartSource::Input { items } = &source else {
+            panic!("an agent child starts from input: {source:?}");
+        };
+        assert_eq!(
+            items.as_slice(),
+            [
+                InputItem::Text {
+                    provenance_ref: None,
+                    origin: None,
+                    text: "Look at this screen.".to_owned(),
+                },
+                InputItem::Media {
+                    origin: None,
+                    blob_ref: "sha256:aa".to_owned(),
+                    mime: "image/jpeg".to_owned(),
+                    kind: MediaKind::Image,
+                    name: Some("screen-0.jpg".to_owned()),
+                },
+                InputItem::Media {
+                    origin: None,
+                    blob_ref: "sha256:bb".to_owned(),
+                    mime: "application/pdf".to_owned(),
+                    kind: MediaKind::Document,
+                    name: None,
+                },
+            ]
+        );
+
+        // A model drives the parent: it briefs its child in text only.
+        *h.runtime.parent_contracts.lock().unwrap() = None;
+        let start = start_args(
+            &h.blobs,
+            "wte:b",
+            "parent",
+            "checker",
+            "checker",
+            SubagentLimits::default(),
+        )
+        .await;
+        let start = with_arguments(&h.blobs, start, arguments).await;
+        let message = rejection_message(
+            &h.blobs,
+            h.service.prepare(start, 11).await.expect("prepare"),
+        )
+        .await;
+        assert!(
+            message.contains("only a program can hand a child media"),
+            "{message}"
         );
     }
 

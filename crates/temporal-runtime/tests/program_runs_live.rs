@@ -45,8 +45,9 @@ use tools::human_input::{
 /// answered `checked <word>`; one containing `FAIL` fails the child's run. A
 /// brief `PROGRAM <profile> <claim>` calls `program_run` with that claim and
 /// answers with what came back; `TOOLS` is answered with the ids of the
-/// tools the child was offered, comma-separated. A program session never
-/// plans a model turn, so a request without a brief is a bug.
+/// tools the child was offered, comma-separated, and `MEDIA` with the types
+/// of the images and documents that came with the brief. A program session
+/// never plans a model turn, so a request without a brief is a bug.
 struct ChildAgentModel {
     blobs: Arc<dyn BlobStore>,
 }
@@ -59,12 +60,7 @@ impl ChildAgentModel {
             .entries
             .iter()
             .rev()
-            .find(|entry| {
-                entry.kind
-                    == harness::ContextEntryKind::Message {
-                        role: harness::ContextMessageRole::User,
-                    }
-            })
+            .find(|entry| is_user_message(entry) && is_text(entry))
             .ok_or_else(|| CoreAgentIoError::Failed {
                 message: format!(
                     "program sessions must not generate; run {} turn {}",
@@ -192,6 +188,17 @@ impl ChildAgentModel {
     }
 }
 
+fn is_user_message(entry: &harness::ContextEntry) -> bool {
+    entry.kind
+        == harness::ContextEntryKind::Message {
+            role: harness::ContextMessageRole::User,
+        }
+}
+
+fn is_text(entry: &harness::ContextEntry) -> bool {
+    entry.content.media_type.as_deref() == Some("text/plain")
+}
+
 #[async_trait]
 impl CoreAgentLlm for ChildAgentModel {
     async fn generate(
@@ -221,7 +228,17 @@ impl CoreAgentLlm for ChildAgentModel {
                 facts,
             });
         }
-        let text = if brief.trim() == "TOOLS" {
+        let text = if brief.trim() == "MEDIA" {
+            request
+                .request
+                .context
+                .entries
+                .iter()
+                .filter(|entry| is_user_message(entry) && !is_text(entry))
+                .filter_map(|entry| entry.content.media_type.as_deref())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else if brief.trim() == "TOOLS" {
             let mut offered = request
                 .request
                 .tools
@@ -4805,6 +4822,113 @@ async fn a_program_hands_its_children_only_what_it_names_in_env() -> anyhow::Res
                 })
                 .await;
             for profile_id in [profile_id, agent, checker] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Stores a one-pixel PNG and hands it to a child agent with its brief, then
+/// hands it again under a type no run accepts.
+const MEDIA_PROGRAM: &str = r#"
+    const PNG = [137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,10,73,68,65,84,120,156,99,0,1,0,0,5,0,1,13,10,45,180,0,0,0,0,73,69,78,68,174,66,96,130];
+    export default {
+        async run(input, env) {
+            const stored = await env.blob.put({ bytes: PNG, media_type: "image/png" });
+            const media = [{ ref: stored.content_ref, mime: "image/png", name: "dot.png" }];
+            const seen = await env.agent.run({ agent: input.agent, input: "MEDIA", media });
+            let refused = null;
+            try {
+                await env.agent.run({ agent: input.agent, input: "MEDIA", media: [{ ref: stored.content_ref, mime: "image/tiff" }] });
+            } catch (error) {
+                refused = [error.kind, error.message.includes("could not run")];
+            }
+            return { claim: input.claim, slept: 0, seen: seen.output, refused };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_hands_a_child_agent_an_image_with_its_brief() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let agent = api::ProfileId::new(format!("live_child_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: api::AgentProfileInput {
+                    profile_id: agent.clone(),
+                    display_name: Some("Live child".to_owned()),
+                    description: None,
+                    document: api::ProfileDocument {
+                        program: None,
+                        metadata: Default::default(),
+                        config: None,
+                        instructions: Some(api::ProfileInstructions::Text {
+                            text: "You are a scripted child agent.".to_owned(),
+                        }),
+                        retention: None,
+                    },
+                },
+            })
+            .await?;
+            let profile_id = api::ProfileId::new(format!("live_program_{suffix}"));
+            let mut profile = program_profile(
+                &profile_id,
+                MEDIA_PROGRAM,
+                &[("agent.run", None), ("blob.put", None)],
+            );
+            profile.document.config = Some(api::SessionConfig {
+                features: Some(serde_json::from_value(json!({
+                    "subagents": {
+                        "agents": [{ "profileId": agent.as_str() }],
+                        "maxDepth": 1,
+                        "maxPerRun": 4,
+                        "maxConcurrent": 2,
+                        "deadlineMs": 120000,
+                    },
+                }))?),
+                ..api::SessionConfig::default()
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "media", "agent": agent.as_str()}),
+            )
+            .await?;
+            let run = support::live::wait_for_terminal_run_with_timeout(
+                &api,
+                &session_id,
+                &run.id,
+                Duration::from_secs(120),
+            )
+            .await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            // The child's model saw the image after the brief.
+            assert_eq!(output["seen"], json!("image/png"), "{output}");
+            // The child's run refuses a type no run accepts, and the call
+            // fails without a child left running.
+            assert_eq!(
+                output["refused"],
+                json!(["agent_rejected", true]),
+                "{output}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [profile_id, agent] {
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
             }
