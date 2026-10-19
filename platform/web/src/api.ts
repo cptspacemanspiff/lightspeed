@@ -14,6 +14,7 @@ import type {
   ContextEntryView,
   ContextCompactionView,
   RunSummaryView,
+  SessionDriverView,
   RunStatus,
   EnvironmentCredentialSourceView,
   EnvironmentCredentialView,
@@ -497,6 +498,8 @@ export interface SessionView {
   activeContext?: { compaction?: ContextCompactionView | null };
   management?: SessionManagement | null;
   origin?: SessionOrigin | null;
+  /// What drives the session's runs; absent for the model loop.
+  driver?: SessionDriverView;
   /// Bounded newest-first run summary page. Authoritative for recent run
   /// state; the event tail is the live, incremental transcript view.
   runs?: SessionRunView[];

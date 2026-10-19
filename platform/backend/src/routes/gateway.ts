@@ -361,6 +361,14 @@ const mcpOAuthFlowStartSchema = z.object({
   audience: z.string().trim().min(1).optional(),
 });
 
+/// A program run's JSON input; the program's input schema checks it.
+const programRunSchema = z.object({
+  input: z.unknown(),
+  submissionId: z.string().min(1).max(200),
+});
+
+const PROGRAM_CALL_STATUSES = ["pending", "waiting", "succeeded", "failed", "cancelled"] as const;
+
 const mcpServerAuthDiscoverSchema = z.object({
   serverUrl: z.string().trim().url(),
 });
@@ -833,6 +841,80 @@ export function gatewayRoutes(ctx: AppContext) {
       });
       const run = response.result.run;
       return c.json({ run: { id: run.id, status: run.status } });
+    });
+  });
+
+  /// One program run from JSON input. Returns the accepted run at once, like
+  /// a message; its calls and outcome are read as it goes.
+  app.post("/:id/sessions/:sessionId/program-runs", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const body = await parseBody(c, programRunSchema);
+    if (!body.ok) {
+      return body.response;
+    }
+    return withGateway(c, async () => {
+      const client = engineClientFor(ctx, access);
+      const response = await client.call("session/runs/start", {
+        sessionId: c.req.param("sessionId"),
+        source: { type: "program" as const, input: body.data.input ?? null },
+        submissionId: body.data.submissionId,
+      });
+      const run = response.result.run;
+      return c.json({ run: { id: run.id, status: run.status } });
+    });
+  });
+
+  /// A newest-first page of run summaries, after the page `session/read`
+  /// returns.
+  app.get("/:id/sessions/:sessionId/runs", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const cursor = c.req.query("cursor") || undefined;
+    const limitRaw = Number(c.req.query("limit") ?? 20);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, limitRaw), 100) : 20;
+    return withGateway(c, async () => {
+      const client = engineClientFor(ctx, access);
+      const response = await client.call("session/runs/list", {
+        sessionId: c.req.param("sessionId"),
+        limit,
+        ...(cursor ? { cursor } : {}),
+      });
+      return c.json({
+        runs: response.result.runs ?? [],
+        nextCursor: response.result.nextCursor ?? null,
+      });
+    });
+  });
+
+  /// A page of a program run's calls, oldest first, with its call counts.
+  app.get("/:id/sessions/:sessionId/runs/:runId/calls", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const cursor = c.req.query("cursor") || undefined;
+    const limitRaw = Number(c.req.query("limit") ?? 50);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, limitRaw), 200) : 50;
+    const status = PROGRAM_CALL_STATUSES.find((value) => value === c.req.query("status"));
+    return withGateway(c, async () => {
+      const client = engineClientFor(ctx, access);
+      const response = await client.call("session/runs/calls/list", {
+        sessionId: c.req.param("sessionId"),
+        runId: c.req.param("runId"),
+        limit,
+        ...(cursor ? { cursor } : {}),
+        ...(status ? { status } : {}),
+      });
+      return c.json({
+        calls: response.result.calls ?? [],
+        nextCursor: response.result.nextCursor ?? null,
+        counts: response.result.counts,
+      });
     });
   });
 

@@ -4,6 +4,7 @@ import { useDictationAvailability } from "@/lib/use-dictation";
 import { ShareSessionDialog, SharingMark, useCanShareSession, useSessionOwner } from "@/components/session/sharing";
 import { ActivityDot, activityLabel } from "@/components/activity-dot";
 import { SessionActionsMenu } from "@/components/session/session-actions-menu";
+import { isProgramDriver, ProgramPanel } from "@/components/session/program-panel";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   type InfiniteData,
@@ -2033,6 +2034,20 @@ export function SessionDetail({
             onConfigure={!embedded && canConfigure ? () => setSettingsOpen(true) : undefined} />
         ) : undefined}
       />
+      {isProgramDriver(session.data?.driver) ? (
+        <ProgramPanel
+          universeId={universeId}
+          slug={slug}
+          sessionId={sessionId}
+          driver={session.data.driver}
+          runRevision={runRevision}
+          canControl={canControl}
+          closed={closed}
+          sessionHref={sessionHref ?? ((target) => `/u/${slug}/sessions/${target}`)}
+          loadFullText={loadFullText}
+        />
+      ) : (
+      <>
       <TranscriptLinksContext.Provider value={transcriptLinks}>
       <MessageScrollerProvider key={`${universeId}/${sessionId}`} autoScroll defaultScrollPosition="end">
         <TranscriptMotionProvider sections={displaySections} pendingKeys={visiblePendingSteers.map((steer) => steer.id)} ready={tail.phase === "live"} historyRevision={tail.historyRevision}>
@@ -2170,6 +2185,8 @@ export function SessionDetail({
         onSend={(message, mode) => void send(message, mode)}
         onStop={() => void stop()}
       />
+      </>
+      )}
       {!embedded && permissions.can("read") && (
         <SessionSettingsDialog
           universeId={universeId}

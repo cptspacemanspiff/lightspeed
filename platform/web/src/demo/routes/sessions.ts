@@ -445,6 +445,36 @@ export function sessionRoutes(store: DemoStore): Hono {
     return c.json({ run: { id: run.id, status: run.status } });
   });
 
+  /// The demo has no program sessions: their runs are refused, and a run
+  /// made no program calls.
+  app.post("/:id/sessions/:sessionId/program-runs", (c) => {
+    const found = lookup(c);
+    if (!found) return notFound(c, "not found in engine");
+    return conflict(c, "program sessions accept only program runs; the demo has none");
+  });
+
+  app.get("/:id/sessions/:sessionId/runs", (c) => {
+    const found = lookup(c);
+    if (!found) return notFound(c, "not found in engine");
+    const limit = intQuery(c, "limit", 20);
+    const cursor = c.req.query("cursor");
+    const older = [...(found.session.view.runs ?? [])]
+      .sort((a, b) => Number(b.id.slice(4)) - Number(a.id.slice(4)))
+      .filter((run) => !cursor || Number(run.id.slice(4)) < Number(cursor.slice(4)));
+    const runs = older.slice(0, limit);
+    return c.json({ runs, nextCursor: older.length > limit ? runs[runs.length - 1]!.id : null });
+  });
+
+  app.get("/:id/sessions/:sessionId/runs/:runId/calls", (c) => {
+    const found = lookup(c);
+    if (!found) return notFound(c, "not found in engine");
+    return c.json({
+      calls: [],
+      nextCursor: null,
+      counts: { total: 0, pending: 0, waiting: 0, succeeded: 0, failed: 0, cancelled: 0 },
+    });
+  });
+
   app.post("/:id/sessions/:sessionId/runs/:runId/cancel", (c) => {
     const found = lookup(c);
     if (!found) return notFound(c, "not found in engine");
