@@ -1190,8 +1190,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             },
             "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
               "default": 16,
-              "description": "Lifetime total of sessions ever created under the root.",
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -2308,8 +2317,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             },
             "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
               "default": 16,
-              "description": "Lifetime total of sessions ever created under the root.",
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5165,8 +5183,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             },
             "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
               "default": 16,
-              "description": "Lifetime total of sessions ever created under the root.",
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -7610,8 +7637,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             },
             "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
               "default": 16,
-              "description": "Lifetime total of sessions ever created under the root.",
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -8996,8 +9032,17 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
               "type": "integer"
             },
             "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
               "default": 16,
-              "description": "Lifetime total of sessions ever created under the root.",
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"

@@ -55,10 +55,15 @@ pub(crate) fn subagent_catalog_text(catalog: &SubagentCatalogSnapshot) -> String
             }
         }
     }
+    let lifetime = catalog
+        .limits
+        .max_descendants
+        .map(|max| format!(", {max} in total"))
+        .unwrap_or_default();
     text.push_str(&format!(
-        "\nLimits for this session\'s tree: depth {}, {} descendants in total, {} running at once, {} s per child.",
+        "\nLimits for this session\'s tree: depth {}, {} new children per run of its root{lifetime}, {} running at once, {} s per child.",
         catalog.limits.max_depth,
-        catalog.limits.max_descendants,
+        catalog.limits.max_per_run,
         catalog.limits.max_concurrent,
         catalog.limits.deadline_ms / 1_000,
     ));
@@ -118,11 +123,18 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("output schema: any JSON"));
-        assert!(text.contains("depth 2, 16 descendants"));
+        assert!(
+            text.contains("depth 2, 16 new children per run of its root, 4 running at once"),
+            "{text}"
+        );
     }
 
     #[test]
     fn catalog_text_lists_agents_descriptions_and_limits() {
+        let limits = harness::SubagentLimits {
+            max_descendants: Some(40),
+            ..harness::SubagentLimits::default()
+        };
         let catalog = SubagentCatalogSnapshot::new(
             vec![
                 SubagentCatalogAgent {
@@ -139,13 +151,16 @@ mod tests {
                 },
             ],
             Vec::new(),
-            harness::SubagentLimits::default(),
+            limits,
         );
         let text = subagent_catalog_text(&catalog);
         assert!(text.contains("- reviewer (Reviewer)"));
         assert!(text.contains("Reviews a PR for correctness."));
         assert!(text.contains("currently missing"));
-        assert!(text.contains("depth 2, 16 descendants"));
+        assert!(
+            text.contains("depth 2, 16 new children per run of its root, 40 in total, 4 running"),
+            "{text}"
+        );
         assert!(text.contains(AGENT_RUN_TOOL_NAME));
         let mut changed = catalog.clone();
         changed.agents[0].revision = Some(99);

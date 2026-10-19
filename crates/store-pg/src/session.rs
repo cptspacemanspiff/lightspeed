@@ -610,9 +610,7 @@ impl SessionStore for PgStore {
                 )
                 .await?;
             }
-            let counts =
-                origin_counts_in_tx(&mut tx, self.config.universe_id, &origin.root_session_id)
-                    .await?;
+            let counts = origin_counts_in_tx(&mut tx, self.config.universe_id, origin).await?;
             check_origin_limits(origin, counts)?;
         }
         let origin_columns = OriginColumns::from_origin(request.origin.as_ref())?;
@@ -1457,22 +1455,25 @@ impl OriginColumns {
     }
 }
 
+/// The root-scoped counts for creating a session with `origin`.
 async fn origin_counts_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     universe_id: Uuid,
-    root_session_id: &SessionId,
+    origin: &SessionOrigin,
 ) -> Result<SessionOriginCounts, SessionStoreError> {
     let row = sqlx::query(
         r#"
         SELECT
             count(*) AS descendants,
-            count(*) FILTER (WHERE lifecycle_status <> 'closed') AS open_descendants
+            count(*) FILTER (WHERE lifecycle_status <> 'closed') AS open_descendants,
+            count(*) FILTER (WHERE origin_json->>'root_run_id' = $3) AS in_root_run
         FROM sessions
         WHERE universe_id = $1 AND origin_root_session_id = $2 AND deleted_at_ms IS NULL
         "#,
     )
     .bind(universe_id)
-    .bind(root_session_id.as_str())
+    .bind(origin.root_session_id.as_str())
+    .bind(origin.root_run_id.map(|run_id| run_id.to_string()))
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| session_sql_error("count session origin descendants", error))?;
@@ -1482,9 +1483,13 @@ async fn origin_counts_in_tx(
     let open_descendants = row
         .try_get::<i64, _>("open_descendants")
         .map_err(|error| session_sql_error("decode open descendant count", error))?;
+    let in_root_run = row
+        .try_get::<i64, _>("in_root_run")
+        .map_err(|error| session_sql_error("decode root run count", error))?;
     Ok(SessionOriginCounts {
         descendants: u64::try_from(descendants).unwrap_or(u64::MAX),
         open_descendants: u64::try_from(open_descendants).unwrap_or(u64::MAX),
+        in_root_run: u64::try_from(in_root_run).unwrap_or(u64::MAX),
     })
 }
 

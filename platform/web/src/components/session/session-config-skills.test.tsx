@@ -249,7 +249,7 @@ it("hides sub-agent limits by default and preserves overrides while collapsed", 
   const before = JSON.stringify(current);
   await act(async () => button.click());
   expect(button.getAttribute("aria-expanded")).toBe("true");
-  expect(container.querySelectorAll('input[type="number"]')).toHaveLength(4);
+  expect(container.querySelectorAll('input[type="number"]')).toHaveLength(5);
   expect(JSON.stringify(current)).toBe(before);
   await input("Max depth", "4");
   expect(current).toHaveProperty("features.subagents.maxDepth", 4);

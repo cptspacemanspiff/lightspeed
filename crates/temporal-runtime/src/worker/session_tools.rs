@@ -4102,7 +4102,8 @@ mod tests {
         let tools = SessionTools::new(blobs.clone(), Arc::new(TestCatalog::default()));
         let limits = harness::SubagentLimits {
             max_depth: 1,
-            max_descendants: 3,
+            max_descendants: Some(3),
+            max_per_run: 3,
             max_concurrent: 2,
             deadline_ms: 45_000,
         };

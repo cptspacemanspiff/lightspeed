@@ -361,7 +361,7 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
     if (name === "subagents") {
       const agents = subagentProfileIds(feature.agents);
       next.agents = agents.map((profileId) => ({ profileId }));
-      for (const key of ["maxDepth", "maxDescendants", "maxConcurrent", "deadlineMs"] as const) {
+      for (const key of ["maxDepth", "maxPerRun", "maxDescendants", "maxConcurrent", "deadlineMs"] as const) {
         const value = parseNumber(numberString(feature[key]));
         if (value !== undefined && value > 0) next[key] = value;
       }
@@ -1690,7 +1690,8 @@ function SubagentFields({
   const agents = subagentProfileIds(feature.agents);
   const limits = [
     { key: "maxDepth", label: "Max depth", placeholder: "2", hint: "How deep sub-agents may nest below this session." },
-    { key: "maxDescendants", label: "Max descendants", placeholder: "16", hint: "Lifetime total of sub-agent sessions under the root." },
+    { key: "maxPerRun", label: "Max per run", placeholder: "16", hint: "Sub-agent sessions created across the tree during one run of the root." },
+    { key: "maxDescendants", label: "Max descendants", placeholder: "No limit", hint: "Lifetime total of sub-agent sessions under the root; no limit when empty." },
     { key: "maxConcurrent", label: "Max concurrent", placeholder: "4", hint: "Open sub-agent sessions under the root at once." },
     { key: "deadlineMs", label: "Deadline (ms)", placeholder: "3600000", hint: "Per-child run deadline; at most 24 hours." },
   ] as const;

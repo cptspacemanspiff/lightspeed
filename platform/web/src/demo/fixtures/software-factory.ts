@@ -310,7 +310,7 @@ function lineageChild(session: SessionRecord): SessionSummaryView {
 // Profiles
 // ---------------------------------------------------------------------------
 
-const SUBAGENT_LIMITS = { maxDepth: 2, maxDescendants: 6, maxConcurrent: 2, deadlineMs: 20 * MINUTE_MS };
+const SUBAGENT_LIMITS = { maxDepth: 2, maxDescendants: 6, maxPerRun: 6, maxConcurrent: 2, deadlineMs: 20 * MINUTE_MS };
 
 const INTAKE_INSTRUCTIONS = [
   "You turn Linear issues that are ready to build into specs the planner can split into tasks.",
@@ -449,7 +449,7 @@ const REVIEWER_CONFIG: Record<string, unknown> = {
   features: {
     environments: { environments: [{ environmentId: ENV.ci, default: true, access: "exec" }] },
     mcp: { servers: [{ serverId: "github" }] },
-    subagents: { agents: [{ profileId: PROFILE.explorer }], maxDepth: 1, maxDescendants: 4, maxConcurrent: 2, deadlineMs: 15 * MINUTE_MS },
+    subagents: { agents: [{ profileId: PROFILE.explorer }], maxDepth: 1, maxDescendants: 4, maxPerRun: 4, maxConcurrent: 2, deadlineMs: 15 * MINUTE_MS },
     web: { fetch: {} },
   },
 };

@@ -2489,6 +2489,7 @@ fn subagents_feature_to_api(
             .collect::<Result<Vec<_>, AgentApiError>>()?,
         max_depth: subagents.limits.max_depth,
         max_descendants: subagents.limits.max_descendants,
+        max_per_run: subagents.limits.max_per_run,
         max_concurrent: subagents.limits.max_concurrent,
         deadline_ms: subagents.limits.deadline_ms,
     })
@@ -2524,6 +2525,7 @@ pub fn subagent_limits_to_api(limits: harness::SubagentLimits) -> api::SubagentL
     api::SubagentLimitsView {
         max_depth: limits.max_depth,
         max_descendants: limits.max_descendants,
+        max_per_run: limits.max_per_run,
         max_concurrent: limits.max_concurrent,
         deadline_ms: limits.deadline_ms,
     }
@@ -5097,7 +5099,8 @@ mod tests {
                     }],
                     limits: harness::SubagentLimits {
                         max_depth: 3,
-                        max_descendants: 10,
+                        max_descendants: Some(10),
+                        max_per_run: 10,
                         max_concurrent: 2,
                         deadline_ms: 120_000,
                     },
@@ -5186,7 +5189,8 @@ mod tests {
                                 .expect("valid profile id"),
                         }],
                         max_depth: 3,
-                        max_descendants: 10,
+                        max_descendants: Some(10),
+                        max_per_run: 10,
                         max_concurrent: 2,
                         deadline_ms: 120_000,
                     }),
@@ -5227,6 +5231,7 @@ mod tests {
             parent_run_id: 7,
             root_session_id: harness::SessionId::new("root"),
             depth: 2,
+            root_run_id: None,
             invocation_id: "wti_1".to_owned(),
             profile_id: "reviewer".to_owned(),
             profile_revision: 4,

@@ -433,7 +433,7 @@ export interface SessionOrigin {
   depth: number;
   invocationId: string;
   agent: { profileId: string; revision: number };
-  limits: { maxDepth: number; maxDescendants: number; maxConcurrent: number; deadlineMs: number };
+  limits: { maxDepth: number; maxDescendants?: number; maxPerRun: number; maxConcurrent: number; deadlineMs: number };
 }
 
 export interface SessionSummary {

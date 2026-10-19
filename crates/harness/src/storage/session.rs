@@ -75,6 +75,12 @@ pub struct SessionOrigin {
     pub root_session_id: SessionId,
     /// Absolute depth from the root (a root's direct child is depth 1).
     pub depth: u32,
+    /// The run of the root this session was created under: the parent's
+    /// run for the root's own children, else the parent's `root_run_id`.
+    /// `maxPerRun` counts the sessions created under one. Absent on
+    /// sessions created before it was recorded, which no run counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_run_id: Option<u64>,
     pub invocation_id: String,
     pub profile_id: String,
     pub profile_revision: u64,
@@ -95,6 +101,7 @@ pub enum SessionOriginKind {
 pub enum SessionOriginLimit {
     MaxDepth,
     MaxDescendants,
+    MaxPerRun,
     MaxConcurrent,
 }
 
@@ -103,6 +110,7 @@ impl std::fmt::Display for SessionOriginLimit {
         f.write_str(match self {
             Self::MaxDepth => "maxDepth",
             Self::MaxDescendants => "maxDescendants",
+            Self::MaxPerRun => "maxPerRun",
             Self::MaxConcurrent => "maxConcurrent",
         })
     }
@@ -110,11 +118,13 @@ impl std::fmt::Display for SessionOriginLimit {
 
 /// Root-scoped counts a store checks before reserving a delegated session.
 /// `descendants` is lifetime (closed sessions included); `open_descendants`
-/// excludes closed ones. Both exclude the root itself.
+/// excludes closed ones; `in_root_run` counts those created under the new
+/// session's `root_run_id`. All exclude the root itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionOriginCounts {
     pub descendants: u64,
     pub open_descendants: u64,
+    pub in_root_run: u64,
 }
 
 /// Shared reservation rule for every session store: the child row is the
@@ -137,11 +147,20 @@ pub fn check_origin_limits(
             u64::from(origin.depth),
         ));
     }
-    if counts.descendants >= u64::from(origin.limits.max_descendants) {
+    if let Some(max_descendants) = origin.limits.max_descendants
+        && counts.descendants >= u64::from(max_descendants)
+    {
         return Err(exceeded(
             SessionOriginLimit::MaxDescendants,
-            u64::from(origin.limits.max_descendants),
+            u64::from(max_descendants),
             counts.descendants,
+        ));
+    }
+    if origin.root_run_id.is_some() && counts.in_root_run >= u64::from(origin.limits.max_per_run) {
+        return Err(exceeded(
+            SessionOriginLimit::MaxPerRun,
+            u64::from(origin.limits.max_per_run),
+            counts.in_root_run,
         ));
     }
     if counts.open_descendants >= u64::from(origin.limits.max_concurrent) {
@@ -683,7 +702,7 @@ impl SessionStore for InMemorySessionStore {
             }
             check_origin_limits(
                 origin,
-                in_memory_origin_counts(&inner, &origin.root_session_id),
+                in_memory_origin_counts(&inner, &origin.root_session_id, origin.root_run_id),
             )?;
         }
         let retention_root_session_id = request
@@ -1221,18 +1240,23 @@ impl SessionStore for InMemorySessionStore {
 fn in_memory_origin_counts(
     inner: &InMemorySessionStoreInner,
     root_session_id: &SessionId,
+    root_run_id: Option<u64>,
 ) -> SessionOriginCounts {
     let mut counts = SessionOriginCounts::default();
     for record in inner.records.values() {
-        if record
+        let Some(origin) = record
             .origin
             .as_ref()
-            .is_some_and(|origin| &origin.root_session_id == root_session_id)
-        {
-            counts.descendants += 1;
-            if record.lifecycle_status != SessionLifecycleStatus::Closed {
-                counts.open_descendants += 1;
-            }
+            .filter(|origin| &origin.root_session_id == root_session_id)
+        else {
+            continue;
+        };
+        counts.descendants += 1;
+        if record.lifecycle_status != SessionLifecycleStatus::Closed {
+            counts.open_descendants += 1;
+        }
+        if root_run_id.is_some() && origin.root_run_id == root_run_id {
+            counts.in_root_run += 1;
         }
     }
     counts
@@ -1836,6 +1860,7 @@ mod tests {
             parent_run_id: 1,
             root_session_id: SessionId::new(root),
             depth,
+            root_run_id: None,
             invocation_id: format!("wti:sha256:{}", "a".repeat(64)),
             profile_id: "reviewer".to_owned(),
             profile_revision: 1,
@@ -1887,7 +1912,8 @@ mod tests {
             .expect("create root");
         let limits = SubagentLimits {
             max_depth: 2,
-            max_descendants: 3,
+            max_descendants: Some(3),
+            max_per_run: 3,
             max_concurrent: 2,
             deadline_ms: 1_000,
         };
@@ -1957,6 +1983,65 @@ mod tests {
                 .expect("load")
                 .is_none(),
             "a refused reservation leaves no row"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn in_memory_session_store_counts_each_run_of_the_root_across_the_tree() {
+        let store = InMemorySessionStore::new();
+        store
+            .create_session(CreateSession {
+                metadata: Default::default(),
+                session_id: SessionId::new("root"),
+                display_name: None,
+                origin: None,
+                delete_after_close_ms: None,
+                created_at_ms: 1,
+            })
+            .await
+            .expect("create root");
+        // No lifetime limit: only runs are counted.
+        let limits = SubagentLimits {
+            max_depth: 2,
+            max_descendants: None,
+            max_per_run: 2,
+            max_concurrent: 10,
+            deadline_ms: 1_000,
+        };
+        let in_run = |parent: &str, depth: u32, run: Option<u64>| SessionOrigin {
+            root_run_id: run,
+            ..subagent_origin(parent, "root", depth, limits)
+        };
+        create_delegated(&store, "run1-a", in_run("root", 1, Some(1)))
+            .await
+            .expect("first child of run 1");
+        // A grandchild counts against the run of the root it was made under.
+        create_delegated(&store, "run1-b", in_run("run1-a", 2, Some(1)))
+            .await
+            .expect("grandchild in run 1");
+        let refused = create_delegated(&store, "run1-c", in_run("root", 1, Some(1)))
+            .await
+            .expect_err("third session of run 1");
+        assert_eq!(
+            refused,
+            SessionStoreError::OriginLimitExceeded {
+                root_session_id: SessionId::new("root"),
+                limit: SessionOriginLimit::MaxPerRun,
+                max: 2,
+                actual: 2,
+            }
+        );
+        // The next run starts with none, and sessions recorded without a
+        // run never count.
+        for (session_id, run) in [("run2-a", Some(2)), ("run2-b", Some(2)), ("old", None)] {
+            create_delegated(&store, session_id, in_run("root", 1, run))
+                .await
+                .expect(session_id);
+        }
+        assert!(
+            create_delegated(&store, "run2-c", in_run("root", 1, Some(2)))
+                .await
+                .is_err()
         );
     }
 
@@ -2289,6 +2374,7 @@ mod tests {
                             parent_run_id: 1,
                             root_session_id: SessionId::new(parent),
                             depth: 1,
+                            root_run_id: None,
                             invocation_id: format!("call-{id}"),
                             profile_id: "child".into(),
                             profile_revision: 1,

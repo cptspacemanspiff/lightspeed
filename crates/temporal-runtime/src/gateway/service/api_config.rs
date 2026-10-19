@@ -270,6 +270,7 @@ fn features_from_api(
                 limits: harness::SubagentLimits {
                     max_depth: subagents.max_depth,
                     max_descendants: subagents.max_descendants,
+                    max_per_run: subagents.max_per_run,
                     max_concurrent: subagents.max_concurrent,
                     deadline_ms: subagents.deadline_ms,
                 },

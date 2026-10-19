@@ -356,6 +356,7 @@ describe("sub-agent feature config", () => {
         subagents: {
           agents: [{ profileId: "primary" }],
           maxDepth: 3,
+          maxPerRun: 8,
           maxDescendants: 24,
           maxConcurrent: 6,
           deadlineMs: 7_200_000,

@@ -93,8 +93,10 @@ export const PROFILE_CONFIG_REFERENCE = `// Every field is optional — omit any
       "maxConcurrent": 0,
       // A child at depth \`d\` may spawn only while \`d + 1 <= maxDepth\`.
       "maxDepth": 0,
-      // Lifetime total of sessions ever created under the root.
+      // Lifetime total of sessions ever created under the root, closed ones included. No lifetime limit when omitted; \`maxPerRun\` still bounds each run.
       "maxDescendants": 0,
+      // Sessions created under the root during one run of the root, counted across the whole tree (children of children included).
+      "maxPerRun": 0,
       // The program menu. Every id must name an existing program profile (one with a \`program\`); a child program runs once with the caller's input and returns its output.
       "programs": [{
         // (required when this object is present)

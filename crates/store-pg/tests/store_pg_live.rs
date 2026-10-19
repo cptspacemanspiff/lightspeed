@@ -410,7 +410,8 @@ async fn pg_live_clone_copies_resources_and_links_sessions() {
     // Sub-agent lineage: the child row is the root-scoped reservation.
     let limits = harness::SubagentLimits {
         max_depth: 1,
-        max_descendants: 2,
+        max_descendants: Some(2),
+        max_per_run: 2,
         max_concurrent: 1,
         deadline_ms: 1_000,
     };
@@ -420,6 +421,7 @@ async fn pg_live_clone_copies_resources_and_links_sessions() {
         parent_run_id: 1,
         root_session_id: peer_id.clone(),
         depth,
+        root_run_id: None,
         invocation_id: invocation.to_owned(),
         profile_id: "reviewer".to_owned(),
         profile_revision: 3,

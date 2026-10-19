@@ -2618,9 +2618,16 @@ export interface SubagentsFeature {
    */
   maxDepth?: number;
   /**
-   * Lifetime total of sessions ever created under the root.
+   * Lifetime total of sessions ever created under the root, closed ones
+   * included. No lifetime limit when omitted; `maxPerRun` still bounds
+   * each run.
    */
-  maxDescendants?: number;
+  maxDescendants?: number | null;
+  /**
+   * Sessions created under the root during one run of the root, counted
+   * across the whole tree (children of children included).
+   */
+  maxPerRun?: number;
   /**
    * The program menu. Every id must name an existing program profile (one
    * with a `program`); a child program runs once with the caller's input
@@ -2908,7 +2915,8 @@ export interface SubagentLimitsView {
   deadlineMs: number;
   maxConcurrent: number;
   maxDepth: number;
-  maxDescendants: number;
+  maxDescendants?: number | null;
+  maxPerRun: number;
 }
 /**
  * Effective tree-owned retention for a session. Forks and delegated children

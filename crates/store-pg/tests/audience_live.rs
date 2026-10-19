@@ -67,6 +67,7 @@ async fn create(store: &PgStore, id: &str, parent: Option<&str>) {
                 parent_run_id: 1,
                 root_session_id: SessionId::new(parent),
                 depth: 1,
+                root_run_id: None,
                 invocation_id: format!("call-{id}"),
                 profile_id: "child".into(),
                 profile_revision: 1,

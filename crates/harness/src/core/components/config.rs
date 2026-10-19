@@ -474,9 +474,14 @@ pub struct SubagentLimits {
     /// A child at depth `d` may spawn only while `d + 1 <= max_depth`.
     #[serde(default = "default_subagent_max_depth")]
     pub max_depth: u32,
-    /// Lifetime total of sessions ever created under the root.
-    #[serde(default = "default_subagent_max_descendants")]
-    pub max_descendants: u32,
+    /// Lifetime total of sessions ever created under the root; no lifetime
+    /// limit when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_descendants: Option<u32>,
+    /// Sessions created under the root during one run of the root, across
+    /// the whole tree.
+    #[serde(default = "default_subagent_max_per_run")]
+    pub max_per_run: u32,
     /// Open sessions under the root, excluding the root itself.
     #[serde(default = "default_subagent_max_concurrent")]
     pub max_concurrent: u32,
@@ -486,7 +491,7 @@ pub struct SubagentLimits {
 }
 
 pub const SUBAGENT_DEFAULT_MAX_DEPTH: u32 = 2;
-pub const SUBAGENT_DEFAULT_MAX_DESCENDANTS: u32 = 16;
+pub const SUBAGENT_DEFAULT_MAX_PER_RUN: u32 = 16;
 pub const SUBAGENT_DEFAULT_MAX_CONCURRENT: u32 = 4;
 pub const SUBAGENT_DEFAULT_DEADLINE_MS: u64 = 60 * 60 * 1_000;
 /// Hard bound the execution binding enforces; a grant's `deadline_ms` may
@@ -497,7 +502,8 @@ impl Default for SubagentLimits {
     fn default() -> Self {
         Self {
             max_depth: SUBAGENT_DEFAULT_MAX_DEPTH,
-            max_descendants: SUBAGENT_DEFAULT_MAX_DESCENDANTS,
+            max_descendants: None,
+            max_per_run: SUBAGENT_DEFAULT_MAX_PER_RUN,
             max_concurrent: SUBAGENT_DEFAULT_MAX_CONCURRENT,
             deadline_ms: SUBAGENT_DEFAULT_DEADLINE_MS,
         }
@@ -505,11 +511,16 @@ impl Default for SubagentLimits {
 }
 
 impl SubagentLimits {
-    /// Element-wise minimum: the effective limits of a nested grant.
+    /// Element-wise minimum: the effective limits of a nested grant. A
+    /// lifetime limit either side sets bounds the result.
     pub fn attenuated_by(self, outer: SubagentLimits) -> Self {
         Self {
             max_depth: self.max_depth.min(outer.max_depth),
-            max_descendants: self.max_descendants.min(outer.max_descendants),
+            max_descendants: match (self.max_descendants, outer.max_descendants) {
+                (Some(inner), Some(outer)) => Some(inner.min(outer)),
+                (inner, outer) => inner.or(outer),
+            },
+            max_per_run: self.max_per_run.min(outer.max_per_run),
             max_concurrent: self.max_concurrent.min(outer.max_concurrent),
             deadline_ms: self.deadline_ms.min(outer.deadline_ms),
         }
@@ -520,8 +531,8 @@ fn default_subagent_max_depth() -> u32 {
     SUBAGENT_DEFAULT_MAX_DEPTH
 }
 
-fn default_subagent_max_descendants() -> u32 {
-    SUBAGENT_DEFAULT_MAX_DESCENDANTS
+fn default_subagent_max_per_run() -> u32 {
+    SUBAGENT_DEFAULT_MAX_PER_RUN
 }
 
 fn default_subagent_max_concurrent() -> u32 {
@@ -987,9 +998,13 @@ fn validate_subagents_feature(subagents: &SubagentsFeature) -> Result<(), Domain
         }
     }
     let limits = &subagents.limits;
-    if limits.max_depth == 0 || limits.max_descendants == 0 || limits.max_concurrent == 0 {
+    if limits.max_depth == 0
+        || limits.max_descendants == Some(0)
+        || limits.max_per_run == 0
+        || limits.max_concurrent == 0
+    {
         return Err(DomainError::InvariantViolation(
-            "subagents limits maxDepth, maxDescendants, and maxConcurrent must be at least 1"
+            "subagents limits maxDepth, maxDescendants, maxPerRun, and maxConcurrent must be at least 1"
                 .to_owned(),
         ));
     }
@@ -1977,6 +1992,37 @@ mod tests {
                 Err(DomainError::InvariantViolation(_))
             ));
         }
+    }
+
+    #[test]
+    fn nested_subagent_limits_take_the_smaller_and_any_lifetime_limit() {
+        let outer = SubagentLimits {
+            max_descendants: Some(10),
+            max_per_run: 8,
+            ..SubagentLimits::default()
+        };
+        let inner = SubagentLimits {
+            max_per_run: 20,
+            ..SubagentLimits::default()
+        };
+        let nested = inner.attenuated_by(outer);
+        assert_eq!((nested.max_descendants, nested.max_per_run), (Some(10), 8));
+        let unlimited = SubagentLimits::default().attenuated_by(SubagentLimits::default());
+        assert_eq!(unlimited.max_descendants, None);
+        let tighter = SubagentLimits {
+            max_descendants: Some(3),
+            ..SubagentLimits::default()
+        };
+        assert_eq!(tighter.attenuated_by(outer).max_descendants, Some(3));
+        // An old record's explicit lifetime limit still reads back.
+        let recorded: SubagentLimits = serde_json::from_value(serde_json::json!({
+            "max_depth": 2, "max_descendants": 16, "max_concurrent": 4, "deadline_ms": 1000,
+        }))
+        .expect("limits");
+        assert_eq!(
+            (recorded.max_descendants, recorded.max_per_run),
+            (Some(16), SUBAGENT_DEFAULT_MAX_PER_RUN)
+        );
     }
 
     #[test]

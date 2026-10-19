@@ -332,13 +332,19 @@ impl SubagentService {
             .ok_or_else(|| {
                 AgentApiError::not_found(format!("parent session not found: {parent_session_id}"))
             })?;
-        let (root_session_id, depth, limits) = match parent.origin.as_ref() {
+        let (root_session_id, root_run_id, depth, limits) = match parent.origin.as_ref() {
             Some(origin) => (
                 origin.root_session_id.clone(),
+                origin.root_run_id,
                 origin.depth.saturating_add(1),
                 context.grant_limits.attenuated_by(origin.limits),
             ),
-            None => (parent_session_id.clone(), 1, context.grant_limits),
+            None => (
+                parent_session_id.clone(),
+                Some(context.parent_run_id),
+                1,
+                context.grant_limits,
+            ),
         };
         let profile_id = match ProfileId::try_new(call.profile.clone()) {
             Ok(profile_id) => profile_id,
@@ -433,6 +439,7 @@ impl SubagentService {
             parent_run_id: context.parent_run_id,
             root_session_id,
             depth,
+            root_run_id,
             invocation_id: invocation.invocation_id.as_str().to_owned(),
             profile_id: profile_id.as_str().to_owned(),
             profile_revision: profile.revision,
@@ -1614,7 +1621,8 @@ mod tests {
         let runtime = FakeChildRuntime::with_profile("reviewer", 1);
         let h = harness(runtime).await;
         let limits = SubagentLimits {
-            max_descendants: 1,
+            max_descendants: Some(1),
+            max_per_run: 1,
             ..SubagentLimits::default()
         };
         let first = start_args(&h.blobs, "wte:a", "parent", "reviewer", "reviewer", limits).await;
@@ -1635,6 +1643,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn prepare_counts_the_children_of_one_run_of_the_root() {
+        let runtime = FakeChildRuntime::with_profile("reviewer", 1);
+        let h = harness(runtime).await;
+        let limits = SubagentLimits {
+            max_per_run: 1,
+            ..SubagentLimits::default()
+        };
+        let first = start_args(&h.blobs, "wte:a", "parent", "reviewer", "reviewer", limits).await;
+        let second = start_args(&h.blobs, "wte:b", "parent", "reviewer", "reviewer", limits).await;
+
+        let (child, _) = prepared(h.service.prepare(first, 100).await.expect("first prepare"));
+        let origin = h
+            .sessions
+            .load_session(&SessionId::new(&child.session_id))
+            .await
+            .expect("load")
+            .expect("child")
+            .origin
+            .expect("origin");
+        assert_eq!(
+            origin.root_run_id,
+            Some(origin.parent_run_id),
+            "the root's own child is made under the root's run"
+        );
+        let result = h
+            .service
+            .prepare(second, 101)
+            .await
+            .expect("second prepare");
+        let message = rejection_message(&h.blobs, result).await;
+        assert!(message.contains("maxPerRun"), "{message}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn prepare_attenuates_the_grant_by_the_parents_origin() {
         let runtime = FakeChildRuntime::with_profile("reviewer", 1);
         let h = harness(runtime).await;
@@ -1642,7 +1684,8 @@ mod tests {
         // counts as one open descendant of `root` itself.
         let parent_limits = SubagentLimits {
             max_depth: 3,
-            max_descendants: 2,
+            max_descendants: Some(2),
+            max_per_run: 2,
             max_concurrent: 2,
             deadline_ms: 5_000,
         };
@@ -1668,6 +1711,7 @@ mod tests {
                     parent_run_id: 1,
                     root_session_id: SessionId::new("root"),
                     depth: 1,
+                    root_run_id: Some(7),
                     invocation_id: format!("wti:sha256:{}", "c".repeat(64)),
                     profile_id: "planner".to_owned(),
                     profile_revision: 1,
@@ -1705,10 +1749,16 @@ mod tests {
         assert_eq!(origin.parent_session_id.as_str(), "mid");
         assert_eq!(origin.depth, 2);
         assert_eq!(
+            origin.root_run_id,
+            Some(7),
+            "a grandchild counts against the root's run its parent was made under"
+        );
+        assert_eq!(
             origin.limits,
             SubagentLimits {
                 max_depth: 2,
-                max_descendants: 2,
+                max_descendants: Some(2),
+                max_per_run: 2,
                 max_concurrent: 2,
                 deadline_ms: 5_000,
             }
