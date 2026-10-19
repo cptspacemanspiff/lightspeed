@@ -772,6 +772,16 @@ mod tests {
     }
 
     #[test]
+    fn the_bot_emit_contract_names_the_declared_emit_tool() {
+        let emit = bots::tools::bot_tool_spec(bots::tools::BOT_EMIT_TOOL_ID).expect("emit spec");
+        assert_eq!(emit.name, tools::program::contracts::BOT_EMIT_TOOL_NAME);
+        assert_eq!(
+            tools::program::contracts::definition("bot.emit").map(|definition| definition.tool_id),
+            Some(emit.name)
+        );
+    }
+
+    #[test]
     fn gates_follow_the_fresh_row_not_the_declaration() {
         let ungranted = bot(false, false);
         for tool in [

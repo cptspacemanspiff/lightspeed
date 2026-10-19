@@ -105,11 +105,13 @@ impl SessionPreparationService {
 
     /// The tool contracts a program session with this configuration offers.
     /// MCP contracts are listed from the servers only `with_mcp`, since
-    /// that reaches every attached server.
+    /// that reaches every attached server. `declared` are tools the
+    /// session's owner declares for it (a bot's `bot_emit`).
     pub(crate) async fn program_contracts(
         &self,
         session_config: &SessionConfig,
         with_mcp: bool,
+        declared: &[harness::ToolSpec],
     ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
         let mut config = Self::session_toolset_config(
             session_config,
@@ -131,6 +133,7 @@ impl SessionPreparationService {
                     .map(|kind| kind.tool_spec(tools::subagents::ChildCaller::Program)),
             );
         }
+        tools.extend(declared.iter().cloned());
         let mut contracts = tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
             .await
             .map_err(|e| AgentApiError::internal(format!("bind program contracts: {e}")))?;

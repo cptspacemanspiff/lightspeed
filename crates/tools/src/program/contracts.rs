@@ -30,7 +30,9 @@ macro_rules! contracts {
 
 /// Every contract, one tool each. Built-in tools keep their logical ids; the
 /// promise controls take the `promise` family. Of the workflow-backed tools
-/// the input and child-session tools have contracts yet (jobs do not).
+/// the input and child-session tools have contracts yet (jobs do not), and
+/// of the tools a session's owner declares, a bot's `bot_emit`: declared
+/// tools are named by their function name.
 const CONTRACTS: &[ContractDefinition] = contracts! {
     "blob.info" => "blob.info",
     "blob.read" => "blob.read",
@@ -76,7 +78,12 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "program.spawn" => crate::subagents::PROGRAM_SPAWN_TOOL_ID,
     "agent.handle" => crate::subagents::AGENT_HANDLE_TOOL_ID,
     "program.handle" => crate::subagents::PROGRAM_HANDLE_TOOL_ID,
+    "bot.emit" => BOT_EMIT_TOOL_NAME,
 };
+
+/// The function name of a bot's `bot_emit` tool, which the `bots` crate
+/// declares on a bot's sessions when its `emit` grant is on.
+pub const BOT_EMIT_TOOL_NAME: &str = "bot_emit";
 
 /// Every contract a program can require, in name order.
 pub fn definitions() -> impl Iterator<Item = &'static ContractDefinition> {

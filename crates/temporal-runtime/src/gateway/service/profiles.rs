@@ -371,7 +371,7 @@ impl GatewayAgentApi {
             }
         }
         let available = self
-            .program_contracts_for(&params.program.requires, &session_config)
+            .program_contracts_for(&params.program.requires, &session_config, &[])
             .await?;
         tools::program::contracts::pin_requirements(
             &available,
@@ -425,7 +425,7 @@ impl GatewayAgentApi {
         let session_config = self.session_config_for_start(params.config).await?;
         let mut contracts = self
             .preparation_service()
-            .program_contracts(&session_config, with_mcp)
+            .program_contracts(&session_config, with_mcp, &[])
             .await?
             .iter()
             .map(program_contract_view)
@@ -434,12 +434,13 @@ impl GatewayAgentApi {
         Ok(api::ProgramContractsListResponse { contracts })
     }
 
-    /// The contracts a session with this configuration offers, reaching the
-    /// MCP servers only when one is required.
+    /// The contracts a session with this configuration and these declared
+    /// tools offers, reaching the MCP servers only when one is required.
     async fn program_contracts_for(
         &self,
         requires: &[api::ProgramContractRequirement],
         session_config: &SessionConfig,
+        declared: &[harness::ToolSpec],
     ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
         if requires.is_empty() {
             return Ok(Vec::new());
@@ -450,24 +451,26 @@ impl GatewayAgentApi {
                 .starts_with(&format!("{}.", tools::program::contracts::MCP_FAMILY))
         });
         self.preparation_service()
-            .program_contracts(session_config, with_mcp)
+            .program_contracts(session_config, with_mcp, declared)
             .await
     }
 
     /// Pin a program's required contracts to what a session with this
-    /// configuration offers. A contract the configuration does not grant,
-    /// or whose digest differs from the one the program names, refuses the
-    /// session up front rather than failing the program at that call.
+    /// configuration and these declared tools offers. A contract the session
+    /// is not granted, or whose digest differs from the one the program
+    /// names, refuses the session up front rather than failing the program
+    /// at that call.
     pub(super) async fn pin_program_contracts(
         &self,
         spec: &api::ProgramSpec,
         session_config: &SessionConfig,
+        declared: &[harness::ToolSpec],
     ) -> Result<Vec<harness::ContractPin>, AgentApiError> {
         if spec.requires.is_empty() {
             return Ok(Vec::new());
         }
         let available = self
-            .program_contracts_for(&spec.requires, session_config)
+            .program_contracts_for(&spec.requires, session_config, declared)
             .await?;
         tools::program::contracts::pin_requirements(
             &available,

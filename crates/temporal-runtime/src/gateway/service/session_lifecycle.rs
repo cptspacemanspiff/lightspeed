@@ -448,7 +448,18 @@ impl GatewayAgentApi {
         if let (harness::SessionDriver::Program { program }, Some(spec)) =
             (&mut driver, program_spec.as_ref())
         {
-            program.requires = self.pin_program_contracts(spec, &session_config).await?;
+            // Of the tools a managed session's owner declares, only a bot's
+            // `bot_emit` serves a contract (`bot.emit`); a function of that
+            // name declared for anything else does not.
+            let declared = admitted
+                .iter()
+                .flat_map(|admitted| &admitted.bindings)
+                .filter(|binding| binding.definition.semantic_type == bots::tools::BOT_EMIT_TOOL_ID)
+                .map(|binding| binding.definition.tool.clone())
+                .collect::<Vec<_>>();
+            program.requires = self
+                .pin_program_contracts(spec, &session_config, &declared)
+                .await?;
         }
         let setup_environment = profiles::default_environment_id(&session_config.features)?;
 

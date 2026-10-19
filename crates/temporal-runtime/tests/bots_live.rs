@@ -584,6 +584,129 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
     .await
 }
 
+/// A program that sends each delivery's note on to the bot `to` with
+/// `env.bot.emit`, then tries `closed`, a bot that takes no events.
+fn emitting_program_input(profile_id: &ProfileId, to: &BotId, closed: &BotId) -> AgentProfileInput {
+    AgentProfileInput {
+        profile_id: profile_id.clone(),
+        display_name: Some("bots live emitter".to_owned()),
+        description: None,
+        document: ProfileDocument {
+            program: Some(api::ProgramSpec {
+                source: api::ProgramSource::Text {
+                    text: format!(
+                        "export default {{ async run(input, env) {{ \
+                         const note = input.events[0].event.data.note; \
+                         const sent = await env.bot.emit({{ to: {to:?}, kind: \"test.forwarded\", \
+                           summary: \"forwarded \" + note, data: {{ note }} }}); \
+                         let refused = null; \
+                         try {{ await env.bot.emit({{ to: {closed:?}, kind: \"test.forwarded\", summary: \"x\" }}); }} \
+                         catch (error) {{ refused = error.kind; }} \
+                         return {{ sent, refused }}; }} }};",
+                        to = to.as_str(),
+                        closed = closed.as_str(),
+                    ),
+                },
+                semantics_version: 1,
+                input_schema: None,
+                output_schema: None,
+                limits: None,
+                requires: vec![api::ProgramContractRequirement {
+                    contract: "bot.emit".to_owned(),
+                    digest: None,
+                }],
+                approvals: None,
+            }),
+            ..ProfileDocument::default()
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_program_bot_emits_to_another_bot() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, _client| async move {
+        let store = pg_store_from_env().await?;
+        // The receiver takes events from the sender alone, on its inbox.
+        let receiver_profile = ProfileId::new(unique("bots-live-receiver"));
+        api.create_profile(ProfileCreateParams {
+            profile: program_profile_input(&receiver_profile, 1),
+        })
+        .await?;
+        let sender = BotId::new(unique("live"));
+        let receiver = create_bot(
+            &api,
+            &receiver_profile,
+            |_| {},
+            vec![BotTriggerInput {
+                trigger_id: BotTriggerId::new("inbox"),
+                document: BotTriggerDocument {
+                    spec: BotTriggerSpec::Bot {
+                        from: Some(vec![sender.clone()]),
+                    },
+                    filter: None,
+                    route: None,
+                    coalesce: None,
+                    deliver: None,
+                    session_close_after_ms: None,
+                    enabled: true,
+                    escalate_to: None,
+                },
+                pairing_code: None,
+            }],
+        )
+        .await?;
+        // A bot with no inbox refuses every event.
+        let closed = create_bot(&api, &receiver_profile, |_| {}, Vec::new()).await?;
+
+        let sender_profile = ProfileId::new(unique("bots-live-emitter"));
+        api.create_profile(ProfileCreateParams {
+            profile: emitting_program_input(&sender_profile, &receiver, &closed),
+        })
+        .await?;
+        let mut document = bot_document(&sender_profile);
+        document.emit = true;
+        api.create_bot(BotCreateParams {
+            bot: BotInput {
+                bot_id: sender.clone(),
+                document,
+            },
+            triggers: Vec::new(),
+        })
+        .await?;
+
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: sender.clone(),
+            event: manual_event("hello"),
+        })
+        .await?;
+        let sent = wait_for_outcomes(&api, &sender, 1).await?;
+        assert_eq!(sent[0].outcome, Some(BotEventOutcome::Handled));
+        assert_eq!(
+            event_program_output(&api, &store, &bot_main_session_id(&sender, 1), &sent[0]).await?,
+            serde_json::json!({
+                "sent": { "to": receiver.as_str(), "seq": 1 },
+                "refused": "no_inbox",
+            })
+        );
+
+        // The receiver's program runs the event, which names its sender.
+        let received = wait_for_outcomes(&api, &receiver, 1).await?;
+        assert_eq!(received[0].kind, "test.forwarded");
+        assert_eq!(received[0].sender_bot_id.as_ref(), Some(&sender));
+        let output = event_program_output(
+            &api,
+            &store,
+            &bot_main_session_id(&receiver, 1),
+            &received[0],
+        )
+        .await?;
+        assert_eq!(output["notes"], serde_json::json!(["hello"]), "{output}");
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
 async fn bots_live_program_verdict_keeps_the_output_out_of_controller_history() -> anyhow::Result<()>
