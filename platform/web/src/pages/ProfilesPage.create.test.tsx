@@ -141,3 +141,36 @@ it("opens the id on its own when neither a name nor an id is given", async () =>
   expect(dialog().querySelector("#new-profile-id")).not.toBeNull();
   expect(mocks.api.mock.calls.some(([method]) => method === "PUT")).toBe(false);
 });
+
+it("starts a program profile with a program that returns its input", async () => {
+  await act(async () => root.render(
+    <QueryClientProvider client={client}><PermissionIdentityProvider userId="user" platformAdmin={false}><MemoryRouter initialEntries={["/u/universe/profiles/own"]}>
+      <Routes><Route path="/u/:slug/profiles/:profileId" element={<ProfilesPage admin />} /></Routes>
+    </MemoryRouter></PermissionIdentityProvider></QueryClientProvider>,
+  ));
+  await settle();
+  await click(container.querySelector('[aria-label="New profile"]'));
+  await type("#new-profile-name", "Checker");
+  await click(dialog().querySelector('[aria-label="Change starting point"]'));
+  const source = dialog().querySelector<HTMLSelectElement>("#new-profile-source")!;
+  await act(async () => {
+    source.value = "@program";
+    source.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(lines()[1]).toBe("Starts as a program·Hide");
+
+  await click(dialog().querySelector('button[type="submit"]'));
+  const put = mocks.api.mock.calls.find(([method]) => method === "PUT");
+  expect(put?.[1]).toBe("/api/v1/universes/universe/profiles/checker");
+  expect(put?.[2]).toMatchObject({
+    profileId: "checker",
+    displayName: "Checker",
+    revision: 0,
+    program: {
+      source: { type: "text", text: expect.stringContaining("async run(input, env, ctx)") },
+      semanticsVersion: 1,
+      inputSchema: { type: "object" },
+      requires: [],
+    },
+  });
+});

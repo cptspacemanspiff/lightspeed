@@ -25,6 +25,7 @@ import {
   MetadataMapEditor,
 } from "@/components/session/metadata-editor";
 import { ProfileRetentionEditor } from "@/components/session/profile-retention-editor";
+import { ProgramSection, profileProgram, programProfileDocument } from "@/components/profile/program-section";
 import { SessionConfigEditor } from "@/components/session/session-config-editor";
 import {
   Dialog,
@@ -215,6 +216,7 @@ function ProfileEditor({
   const [jsonText, setJsonText] = useState("");
   const [configError, setConfigError] = useState<string | null>(null);
   const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [programError, setProgramError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Re-sync on every (re)load — including the refetch after a save, which
@@ -227,6 +229,7 @@ function ProfileEditor({
       setJsonText(JSON.stringify(editable, null, 2));
       setConfigError(null);
       setRetentionError(null);
+      setProgramError(null);
       setError(null);
     }
   }, [doc.data]);
@@ -290,8 +293,10 @@ function ProfileEditor({
         return;
       }
       setDraft(document);
-    } else if (configError || retentionError) {
-      setError(configError ? `Config: ${configError}` : `Retention: ${retentionError}`);
+    } else if (programError || configError || retentionError) {
+      setError(programError
+        ? `Program: ${programError}`
+        : configError ? `Config: ${configError}` : `Retention: ${retentionError}`);
       return;
     }
     if (document) {
@@ -416,7 +421,19 @@ function ProfileEditor({
         ) : (
           <div className="mx-auto grid w-full max-w-5xl gap-8 px-4 py-6 md:px-8">
             <GeneralSection draft={draft} mutate={mutate} readOnly={!manage} />
-            <InstructionsSection draft={draft} mutate={mutate} readOnly={!manage} />
+            {profileProgram(draft) ? (
+              <Section title="Program" description="Sessions from this profile run this program instead of a model.">
+                <ProgramSection
+                  key={`${profileId}:${original?.revision ?? 0}`}
+                  program={profileProgram(draft)!}
+                  onChange={(program) => mutate((d) => { d.program = program; })}
+                  readOnly={!manage}
+                  onValidityChange={setProgramError}
+                />
+              </Section>
+            ) : (
+              <InstructionsSection draft={draft} mutate={mutate} readOnly={!manage} />
+            )}
             <ConfigSection
               universeId={universeId}
               draft={draft}
@@ -649,8 +666,10 @@ function NewProfileDialog({
   const create = useMutation({
     mutationFn: async () => {
       if (!canCreate) throw new Error("You do not have permission to create profiles.");
-      let document = newProfileDocument(profileId, displayName);
-      if (sourceProfileId) {
+      let document = sourceProfileId === PROGRAM_START
+        ? programProfileDocument(profileId, displayName)
+        : newProfileDocument(profileId, displayName);
+      if (sourceProfileId && sourceProfileId !== PROGRAM_START) {
         const source = await api<ProfileDocument>(
           "GET",
           `/api/v1/universes/${universeId}/profiles/${encodeURIComponent(sourceProfileId)}`,
@@ -681,8 +700,9 @@ function NewProfileDialog({
     }
     create.mutate();
   };
-  const sourceName = profiles.find((profile) => profile.profileId === sourceProfileId)?.displayName
-    ?? sourceProfileId;
+  const sourceName = sourceProfileId === PROGRAM_START
+    ? "Program"
+    : profiles.find((profile) => profile.profileId === sourceProfileId)?.displayName ?? sourceProfileId;
 
   return (
     <Dialog open={open && canCreate} onOpenChange={onOpenChange}>
@@ -736,7 +756,9 @@ function NewProfileDialog({
             </SettingsDisclosure>
           </Field>
           <SettingsDisclosure
-            summary={sourceProfileId ? `Copies ${sourceName}` : "Starts empty"}
+            summary={sourceProfileId === PROGRAM_START
+              ? "Starts as a program"
+              : sourceProfileId ? `Copies ${sourceName}` : "Starts empty"}
             action="Change"
             label="Change starting point"
           >
@@ -753,6 +775,7 @@ function NewProfileDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">Empty profile</SelectItem>
+                  <SelectItem value={PROGRAM_START}>Program</SelectItem>
                   {profiles.map((profile) => (
                     <SelectItem key={profile.profileId} value={profile.profileId}>
                       {profile.displayName ?? profile.profileId}
@@ -761,7 +784,9 @@ function NewProfileDialog({
                 </SelectContent>
               </Select>
               <FieldDescription>
-                {sourceProfileId
+                {sourceProfileId === PROGRAM_START
+                  ? "Sessions run a program you write instead of a model; starts with one that returns its input."
+                  : sourceProfileId
                   ? "Copies the profile’s current setup once. Later changes to it are not inherited."
                   : "Starts with no profile configuration."}
               </FieldDescription>
@@ -781,6 +806,9 @@ function NewProfileDialog({
     </Dialog>
   );
 }
+
+/// The "Start from" choice for a program profile; no profile id can take it.
+const PROGRAM_START = "@program";
 
 function newProfileDocument(profileId: string, displayName: string): ProfileDocument {
   return {
