@@ -27,6 +27,9 @@ pub(crate) struct State {
     pub(crate) local: VecDeque<HostCompletion>,
     pub(crate) failure: Option<ExecutionError>,
     pub(crate) calls: u32,
+    /// Notes made this execution, and those made this step, to send.
+    pub(crate) notes: u64,
+    pub(crate) noted: Vec<HostNote>,
     pub(crate) jobs: u64,
     /// The exit `run` returned and the state it hands over.
     pub(crate) exit: Option<(ProgramExit, Value)>,
@@ -35,6 +38,34 @@ pub(crate) struct State {
     pub(crate) clock_ms: u64,
     /// What `ctx.shouldContinue()` reports during the current step.
     pub(crate) should_continue: bool,
+}
+
+/// What the prelude sends with a call besides its arguments.
+#[derive(Default, serde::Deserialize)]
+struct CallMeta {
+    why: Option<String>,
+    step: Option<u64>,
+}
+
+/// A note's fields, by kind.
+#[derive(serde::Deserialize)]
+struct NoteFields {
+    step: Option<u64>,
+    parent: Option<u64>,
+    text: Option<String>,
+    name: Option<String>,
+}
+
+/// `text` cut to at most `max` bytes, at a character boundary.
+fn truncated(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let end = (0..=max)
+            .rev()
+            .find(|index| text.is_char_boundary(*index))
+            .unwrap_or(0);
+        text.truncate(end);
+    }
+    text
 }
 
 pub(crate) fn validate(input: &ExecutionInput) -> Result<(), StartError> {
@@ -166,7 +197,7 @@ pub(crate) fn prepare_context<'js>(
         move |ctx: Ctx<'js>,
               binding_id: String,
               json: String,
-              why: Opt<String>|
+              meta: Opt<String>|
               -> rquickjs::Result<String> {
             let mut state = send_state.borrow_mut();
             let failure = if !allowed.contains_key(&binding_id) {
@@ -200,21 +231,28 @@ pub(crate) fn prepare_context<'js>(
                     error(ExecutionErrorKind::Internal, "invalid bridge JSON"),
                 )
             })?;
+            // The prelude's `{ why, step }`: what the call is for and the
+            // step it was made in, apart from its arguments.
+            let meta: CallMeta = match meta.0 {
+                Some(meta) => serde_json::from_str(&meta).map_err(|_| {
+                    fail_callback(
+                        &ctx,
+                        &mut state,
+                        &send_fatal,
+                        error(ExecutionErrorKind::Internal, "invalid bridge JSON"),
+                    )
+                })?,
+                None => CallMeta::default(),
+            };
             let request_id = format!("call-{}", state.calls + 1);
             let request = HostRequest {
                 request_id: request_id.clone(),
                 binding_id,
                 arguments,
-                annotation: why.0.map(|mut why| {
-                    if why.len() > crate::MAX_ANNOTATION_BYTES {
-                        let end = (0..=crate::MAX_ANNOTATION_BYTES)
-                            .rev()
-                            .find(|index| why.is_char_boundary(*index))
-                            .unwrap_or(0);
-                        why.truncate(end);
-                    }
-                    why
-                }),
+                annotation: meta
+                    .why
+                    .map(|why| truncated(why, crate::MAX_ANNOTATION_BYTES)),
+                step: meta.step,
             };
             outbox.borrow_mut().push(request);
             state.calls += 1;
@@ -283,6 +321,52 @@ pub(crate) fn prepare_context<'js>(
         },
     )
     .map_err(|failure| js_error(&ctx, failure))?;
+    // `note(kind, json)`: narration, or a step begun or ended. Returns the
+    // note's number, a begun step's id.
+    let note_state = state.clone();
+    let note = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, kind: String, json: String| -> rquickjs::Result<u64> {
+            let mut state = note_state.borrow_mut();
+            if state.notes >= crate::MAX_NOTES_PER_EXECUTION {
+                return Err(Exception::throw_range(
+                    &ctx,
+                    &format!(
+                        "a program execution may note at most {} things",
+                        crate::MAX_NOTES_PER_EXECUTION
+                    ),
+                ));
+            }
+            let fields: NoteFields = serde_json::from_str(&json)
+                .map_err(|_| Exception::throw_type(&ctx, "invalid note"))?;
+            let kind = match kind.as_str() {
+                "said" => HostNoteKind::Said {
+                    step: fields.step,
+                    text: truncated(fields.text.unwrap_or_default(), crate::MAX_NOTE_TEXT_BYTES),
+                },
+                "step_started" => HostNoteKind::StepStarted {
+                    parent: fields.parent,
+                    name: truncated(fields.name.unwrap_or_default(), crate::MAX_STEP_NAME_BYTES),
+                },
+                "step_ended" => HostNoteKind::StepEnded {
+                    step: fields
+                        .step
+                        .ok_or_else(|| Exception::throw_type(&ctx, "invalid note"))?,
+                },
+                _ => return Err(Exception::throw_type(&ctx, "invalid note")),
+            };
+            state.notes += 1;
+            let seq = state.notes;
+            let after_calls = u64::from(state.calls);
+            state.noted.push(HostNote {
+                seq,
+                after_calls,
+                kind,
+            });
+            Ok(seq)
+        },
+    )
+    .map_err(|failure| js_error(&ctx, failure))?;
     // `keep(json, exit)`: an exit checks its state when called (an oversized
     // value is an ordinary exception the program can catch), and the
     // prelude keeps it with the exit's kind once `run` returns the token.
@@ -324,7 +408,7 @@ pub(crate) fn prepare_context<'js>(
     let program = serde_json::to_string(&input.program)
         .map_err(|failure| error(ExecutionErrorKind::Internal, failure.to_string()))?;
     let controls: Object = prelude
-        .call((send, cancel, keep, should_continue, catalog, program))
+        .call((send, cancel, keep, should_continue, note, catalog, program))
         .map_err(|failure| js_error(&ctx, failure))?;
     let deliver: Function = controls
         .get("deliver")

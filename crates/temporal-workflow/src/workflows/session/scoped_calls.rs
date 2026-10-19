@@ -33,6 +33,7 @@ enum Request {
     Invoke(crate::InvokeCodeToolRequest),
     Close(crate::CloseCodeToolScopeRequest),
     Cancel(crate::CancelCodeToolRequest),
+    Notes(crate::RecordCodeToolNotesRequest),
 }
 
 fn rejected(kind: Rejection, message: impl Into<String>) -> CodeToolRejection {
@@ -170,6 +171,17 @@ pub(super) async fn cancel(
     ctx.state_mut(|state| state.code_tools.waiters -= 1);
     admitted?;
     ctx.state(|state| cancel_status(state, &request))
+}
+
+pub(super) async fn record_notes(
+    ctx: &mut WorkflowContext<AgentSessionWorkflow>,
+    request: crate::RecordCodeToolNotesRequest,
+) -> crate::CodeToolNotesResult {
+    loaded(ctx).await;
+    let ticket = ctx.state_mut(|state| enqueue(state, Request::Notes(request)))?;
+    let admitted = await_admission(ctx, ticket).await;
+    ctx.state_mut(|state| state.code_tools.waiters -= 1);
+    admitted
 }
 
 /// Where a cancel's target stands now that the cancel is recorded, read from
@@ -360,6 +372,16 @@ pub(super) async fn process_pending(
                 )
                 .await?
             }
+            Request::Notes(request) => {
+                apply(
+                    ctx,
+                    CoreAgentCommand::RecordCodeToolNotes {
+                        execution_id: request.execution_id,
+                        notes: request.notes,
+                    },
+                )
+                .await?
+            }
             Request::Close(request) => {
                 apply(
                     ctx,
@@ -495,6 +517,7 @@ fn invocation_command(
             tool_name: binding.tool_name.clone(),
             arguments_ref: request.arguments_ref,
             annotation: request.annotation,
+            step: request.step,
         },
         acknowledged: request.acknowledged,
     })
@@ -1371,6 +1394,7 @@ mod tests {
                         tool_name: tool_id,
                         arguments_ref: BlobRef::from_bytes(b"{}"),
                         annotation: None,
+                        step: None,
                     },
                     promise_id_base: base,
                     status: CodeToolCallStatus::Pending,
@@ -1407,6 +1431,7 @@ mod tests {
                 program_context: None,
                 cancel_requested_calls: Default::default(),
                 withdrawn: Default::default(),
+                notes_recorded: 0,
             },
         );
         state
@@ -1460,6 +1485,7 @@ mod tests {
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
             annotation: None,
+            step: None,
         };
         assert!(invocation_command(&state, request.clone()).is_ok());
         assert_eq!(
@@ -1610,6 +1636,7 @@ mod tests {
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
             annotation: None,
+            step: None,
         };
         let resent = invocation_command(&state, invoke("call-1")).unwrap_err();
         assert_eq!(resent.kind, Rejection::Conflict);

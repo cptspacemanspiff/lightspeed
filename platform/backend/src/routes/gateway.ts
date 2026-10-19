@@ -918,6 +918,31 @@ export function gatewayRoutes(ctx: AppContext) {
     });
   });
 
+  /// A page of a program run's notes on its work (narration, steps), in
+  /// program order.
+  app.get("/:id/sessions/:sessionId/runs/:runId/notes", async (c) => {
+    const access = await universeForSession(ctx, c, c.req.param("id"));
+    if (!access) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const cursor = c.req.query("cursor") || undefined;
+    const limitRaw = Number(c.req.query("limit") ?? 200);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, limitRaw), 1000) : 200;
+    return withGateway(c, async () => {
+      const client = engineClientFor(ctx, access);
+      const response = await client.call("session/runs/notes/list", {
+        sessionId: c.req.param("sessionId"),
+        runId: c.req.param("runId"),
+        limit,
+        ...(cursor ? { cursor } : {}),
+      });
+      return c.json({
+        notes: response.result.notes ?? [],
+        nextCursor: response.result.nextCursor ?? null,
+      });
+    });
+  });
+
   /// Cancel a queued or active run. Returns the run's projected state right
   /// after the cancel was admitted (`cancelling` for an active run,
   /// `cancelled` for a queued one); the terminal event arrives on the tail.

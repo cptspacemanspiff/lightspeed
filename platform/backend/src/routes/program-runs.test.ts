@@ -22,6 +22,8 @@ function fixture() {
     requests.push(rpc);
     const result = rpc.method === "session/runs/list"
       ? { runs: [{ id: "run_2", status: "completed" }], nextCursor: "run_2", hasOlderRuns: true }
+      : rpc.method === "session/runs/notes/list"
+        ? { notes: [{ seq: 1, kind: "said", text: "hello" }], nextCursor: "4:1" }
       : rpc.method === "session/runs/calls/list"
         ? { calls: [{ id: "code-tool:a", requestId: "call-1" }], nextCursor: "7", counts }
         : { run: { id: "run_3", status: "running" } };
@@ -72,4 +74,9 @@ it("pages runs and a run's calls", async () => {
   // An unknown status filter is dropped rather than sent.
   await f.app.request("/universe/sessions/s1/runs/run_2/calls?status=bogus");
   expect(f.requests[2]!.params).not.toHaveProperty("status");
+  const notes = await f.app.request("/universe/sessions/s1/runs/run_2/notes?cursor=4:1");
+  expect(await notes.json()).toEqual({ notes: [{ seq: 1, kind: "said", text: "hello" }], nextCursor: "4:1" });
+  expect(f.requests[3]).toMatchObject({
+    method: "session/runs/notes/list", params: { sessionId: "s1", runId: "run_2", cursor: "4:1", limit: 200 },
+  });
 });

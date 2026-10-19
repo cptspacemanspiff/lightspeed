@@ -10677,6 +10677,7 @@ mod tests {
             tool_name: ToolName::new(tool),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             annotation: None,
+            step: None,
         }
     }
 
@@ -12930,6 +12931,7 @@ mod tests {
             tool_name: ToolName::new(tool),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             annotation: None,
+            step: None,
         }
     }
 
@@ -14295,6 +14297,89 @@ mod tests {
             CoreAgentCommand::OpenCodeToolScope { scope },
         ));
         (drive, log, execution_id)
+    }
+
+    #[test]
+    fn a_program_records_its_notes_once_in_order() {
+        let (mut drive, mut log, execution_id) = echo_program_scope("program-notes");
+        let note = |seq: u64, kind: crate::ProgramNoteKind| crate::ProgramNote {
+            seq,
+            after_calls: 0,
+            kind,
+        };
+        let started = note(
+            1,
+            crate::ProgramNoteKind::StepStarted {
+                parent: None,
+                name: "check".to_owned(),
+            },
+        );
+        let said = note(
+            2,
+            crate::ProgramNoteKind::Said {
+                step: Some(1),
+                text: "fetching".to_owned(),
+            },
+        );
+        let record = |notes: Vec<crate::ProgramNote>| CoreAgentCommand::RecordCodeToolNotes {
+            execution_id: execution_id.clone(),
+            notes,
+        };
+        log.extend(code_tool_commit(
+            &mut drive,
+            record(vec![started.clone(), said.clone()]),
+        ));
+        assert_eq!(
+            drive.state().code_tools.scopes[&execution_id].notes_recorded,
+            2
+        );
+        let recorded = log
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.event,
+                    CoreAgentEvent::CodeTool(crate::CodeToolEvent::NotesRecorded { .. })
+                )
+            })
+            .count();
+        assert_eq!(recorded, 1);
+
+        // Sent again, with one more: only the new note is recorded.
+        let ended = note(3, crate::ProgramNoteKind::StepEnded { step: 1 });
+        let entries = code_tool_commit(&mut drive, record(vec![said, ended.clone()]));
+        assert!(matches!(
+            &entries[..],
+            [entry] if entry.event == CoreAgentEvent::CodeTool(crate::CodeToolEvent::NotesRecorded {
+                execution_id: execution_id.clone(),
+                notes: vec![ended.clone()],
+            })
+        ));
+        log.extend(entries);
+        // All sent before: nothing new.
+        let again = drive.admit_command(record(vec![ended]), 100).unwrap();
+        assert!(!matches!(again, CoreAgentAction::AppendEvents { .. }));
+
+        // A gap, or a note naming a step after it, is refused.
+        for notes in [
+            vec![note(5, crate::ProgramNoteKind::StepEnded { step: 1 })],
+            vec![note(4, crate::ProgramNoteKind::StepEnded { step: 4 })],
+        ] {
+            assert!(drive.admit_command(record(notes), 100).is_err());
+        }
+
+        let mut replayed = CoreAgentDrive::from_replayed(
+            SessionId::new("program-notes"),
+            CoreAgentState::new(),
+            None,
+        );
+        replayed
+            .resume_appended(
+                log.iter()
+                    .map(|entry| CoreAgentCodec.encode_entry(entry).unwrap())
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(replayed.state(), drive.state());
     }
 
     #[test]

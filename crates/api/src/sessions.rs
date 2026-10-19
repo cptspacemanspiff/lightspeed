@@ -1428,6 +1428,9 @@ pub enum CodeToolProgressPhase {
     ScopeClosed,
     /// The scope's owner asked to cancel the call; its outcome follows.
     CallCancelRequested,
+    /// A program noted its progress (`ctx.say`, `ctx.step`); list the
+    /// notes with `session/runs/notes/list`.
+    NotesRecorded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

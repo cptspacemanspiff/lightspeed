@@ -1,4 +1,4 @@
-(function (send, cancelHost, keep, shouldContinueHost, catalogJson, programJson) {
+(function (send, cancelHost, keep, shouldContinueHost, noteHost, catalogJson, programJson) {
     "use strict";
     // Capture intrinsics before user code can replace globals or prototypes.
     const parse = JSON.parse;
@@ -80,12 +80,20 @@
         if (typeof why !== "string") throw new NativeTypeError("why must be a string");
         return why;
     }
-    function invoke(id, args, options) {
+    // A call made in a step (`ctx.step`) carries the step's id.
+    function invoke(id, args, options, step) {
         const json = serialize(args);
         const why = annotation(options);
+        let meta;
+        if (why !== undefined || step !== undefined) {
+            meta = create(null);
+            if (why !== undefined) meta.why = why;
+            if (step !== undefined) meta.step = step;
+            meta = stringify(meta);
+        }
         let request;
         const promise = new NativePromise(function (resolve, reject) {
-            request = why === undefined ? send(id, json) : send(id, json, why);
+            request = meta === undefined ? send(id, json) : send(id, json, meta);
             pending[request] = { resolve, reject };
         });
         return { request, promise };
@@ -114,10 +122,10 @@
         return promise;
     }
     // A call as `env` exposes it: argument errors reject its promise.
-    function call(id, args, options) {
+    function call(id, args, options, step) {
         let issued;
         try {
-            issued = invoke(id, args, options);
+            issued = invoke(id, args, options, step);
         } catch (error) {
             return NativePromise.reject(error);
         }
@@ -137,7 +145,9 @@
     function advance(at) {
         if (typeof at === "number" && at > now) now = at;
     }
-    function buildEnv() {
+    // The program's `env`, or a step's: the same functions, each call
+    // marked with the step it was made in.
+    function buildEnv(step) {
         const env = create(null);
         for (let i = 0; i < catalog.length; i++) {
             const binding = catalog[i];
@@ -145,7 +155,7 @@
             if (binding.name === "time.sleep") {
                 sleepId = id;
                 place(env, binding.name, freeze(function (args, options) {
-                    return sleep(args, options);
+                    return sleep(args, options, step);
                 }));
                 continue;
             }
@@ -153,12 +163,12 @@
                 place(env, binding.name, freeze(function (spec, options) {
                     let issued;
                     try {
-                        issued = invoke(id, spec, options);
+                        issued = invoke(id, spec, options, step);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
                     const opened = issued.promise.then(function (opened) {
-                        return inputHandle(opened.executionId, opened.promise);
+                        return inputHandle(opened.executionId, opened.promise, step);
                     });
                     return withCancel(opened, issued.request);
                 }));
@@ -170,12 +180,12 @@
                 place(env, binding.name, freeze(function (requestId, options) {
                     let issued;
                     try {
-                        issued = invoke(id, { id: requestId }, options);
+                        issued = invoke(id, { id: requestId }, options, step);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
                     const taken = issued.promise.then(function (taken) {
-                        return inputHandle(taken.executionId, taken.promise);
+                        return inputHandle(taken.executionId, taken.promise, step);
                     });
                     return withCancel(taken, issued.request);
                 }));
@@ -186,7 +196,7 @@
                 place(env, binding.name, freeze(function (args, options) {
                     let issued;
                     try {
-                        issued = invoke(id, childArgs(args), options);
+                        issued = invoke(id, childArgs(args), options, step);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -205,12 +215,12 @@
                 place(env, binding.name, freeze(function (childId, options) {
                     let issued;
                     try {
-                        issued = invoke(id, { id: childId }, options);
+                        issued = invoke(id, { id: childId }, options, step);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
                     const taken = issued.promise.then(function (taken) {
-                        return childHandle(taken.executionId, taken.promise, noun);
+                        return childHandle(taken.executionId, taken.promise, noun, step);
                     });
                     return withCancel(taken, issued.request);
                 }));
@@ -221,19 +231,19 @@
                 place(env, binding.name, freeze(function (args, options) {
                     let issued;
                     try {
-                        issued = invoke(id, childArgs(args), options);
+                        issued = invoke(id, childArgs(args), options, step);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
                     const spawned = issued.promise.then(function (spawned) {
-                        return childHandle(spawned.executionId, spawned.promise, noun);
+                        return childHandle(spawned.executionId, spawned.promise, noun, step);
                     });
                     return withCancel(spawned, issued.request);
                 }));
                 continue;
             }
             place(env, binding.name, freeze(function (args, options) {
-                return call(id, args, options);
+                return call(id, args, options, step);
             }));
         }
         return deepFreeze(env);
@@ -290,13 +300,13 @@
     // `time.sleep` is one durable call that completes once its delay has
     // elapsed; the clock is clamped to its deadline.
     let sleepId = null;
-    function sleep(args, options) {
+    function sleep(args, options, step) {
         if (sleepId === null) {
             return NativePromise.reject(new NativeError("Waiting requires the time.sleep contract"));
         }
         let issued;
         try {
-            issued = invoke(sleepId, args, options);
+            issued = invoke(sleepId, args, options, step);
         } catch (error) {
             return NativePromise.reject(error);
         }
@@ -310,13 +320,13 @@
     // An open input request. Its operations are ordinary calls: `answer`
     // awaits the request's promise, `cancel` cancels it, and `remind` and
     // `reassign` act on the request's inbox row. Each needs its contract.
-    function contractCall(name, args) {
+    function contractCall(name, args, step) {
         if (!hasOwn(bindingIds, name)) {
             const error = new NativeError("This operation requires the " + name + " contract");
             define(error, "kind", { value: "unsupported_capability", enumerable: true });
             throw error;
         }
-        return invoke(bindingIds[name], args).promise;
+        return invoke(bindingIds[name], args, undefined, step).promise;
     }
     function inputFailure(result) {
         const failure = result.error;
@@ -337,12 +347,12 @@
         define(error, "kind", { value: kind, enumerable: true });
         return error;
     }
-    function inputHandle(id, promise) {
+    function inputHandle(id, promise, step) {
         let answered = null;
         const answer = function () {
             // One await per handle: every caller shares its outcome.
             if (answered === null) {
-                answered = contractCall("promise.await", { promises: [promise] }).then(function (awaited) {
+                answered = contractCall("promise.await", { promises: [promise] }, step).then(function (awaited) {
                     const result = awaited.results[0];
                     if (result.status === "resolved") return result.output;
                     throw inputFailure(result);
@@ -353,10 +363,10 @@
         const handle = {
             id,
             answer: async function () { return await answer(); },
-            remind: async function () { return await contractCall("input.remind", { id }); },
+            remind: async function () { return await contractCall("input.remind", { id }, step); },
             reassign: async function (args) {
                 const to = args === null || typeof args !== "object" ? undefined : args.to;
-                return await contractCall("input.reassign", { id, to });
+                return await contractCall("input.reassign", { id, to }, step);
             },
             // Withdraw the request, and wait until it has settled: withdrawn,
             // or answered if the answer came first.
@@ -368,7 +378,7 @@
             // it until a later run takes it back with `env.input.handle(id)`.
             // Rejects if the request has already settled; `answer()` has it.
             detach: async function () {
-                await contractCall("promise.detach", { promises: [promise] });
+                await contractCall("promise.detach", { promises: [promise] }, step);
                 return freeze({ id });
             },
             // Remind every `every_ms` until answered; after `max` reminders
@@ -394,7 +404,7 @@
                 for (let nudges = 0; ; nudges++) {
                     const next = await NativePromise.race([
                         outcome,
-                        sleep({ ms: every }).then(function () { return null; }),
+                        sleep({ ms: every }, undefined, step).then(function () { return null; }),
                     ]);
                     if (next !== null) return next.value;
                     if (nudges < max) {
@@ -458,12 +468,12 @@
     // program's output), `cancel` stops it and waits until it has settled,
     // and `detach` keeps it running past the run's exits, until a later run
     // takes it back with `env.agent.handle(id)` or `env.program.handle(id)`.
-    function childHandle(id, promise, noun) {
+    function childHandle(id, promise, noun, step) {
         let settled = null;
         const result = function () {
             // One await per handle: every caller shares its outcome.
             if (settled === null) {
-                settled = contractCall("promise.await", { promises: [promise] }).then(function (awaited) {
+                settled = contractCall("promise.await", { promises: [promise] }, step).then(function (awaited) {
                     const outcome = awaited.results[0];
                     if (outcome.status === "resolved") return outcome.output;
                     let failure = childError(outcome.error, noun);
@@ -490,7 +500,7 @@
                 return await settledStatus(result(), noun + "_cancelled");
             },
             detach: async function () {
-                await contractCall("promise.detach", { promises: [promise] });
+                await contractCall("promise.detach", { promises: [promise] }, step);
                 return freeze({ id });
             },
         };
@@ -736,18 +746,66 @@
     function shouldContinue() {
         return shouldContinueHost() === true;
     }
-    function prepare() {
-        programEnv = buildEnv();
-        // The state the last completed run, or this run's previous
-        // execution, handed over: a fresh copy for this execution.
-        programCtx = freeze({
+    // `ctx.say(text)`: narration, in the step it is said in.
+    function sayIn(step) {
+        return function (text) {
+            const fields = create(null);
+            if (step !== undefined) fields.step = step;
+            fields.text = "" + text;
+            noteHost("said", stringify(fields));
+        };
+    }
+    // `ctx.step(name, body)`: a step of the program's work. `body` gets the
+    // step's own `env` and `ctx`, so the calls made through them and what
+    // they say belong to the step however the program interleaves its
+    // steps. The step ends when `body` settles, and `step` settles with it.
+    function stepIn(parent) {
+        return function (name, body) {
+            if (typeof body !== "function") {
+                return NativePromise.reject(new NativeTypeError("ctx.step needs a function"));
+            }
+            const fields = create(null);
+            if (parent !== undefined) fields.parent = parent;
+            fields.name = "" + name;
+            const id = noteHost("step_started", stringify(fields));
+            const end = function () {
+                const ended = create(null);
+                ended.step = id;
+                noteHost("step_ended", stringify(ended));
+            };
+            let result;
+            try {
+                result = body(buildEnv(id), contextFor(id));
+            } catch (error) {
+                end();
+                return NativePromise.reject(error);
+            }
+            return NativePromise.resolve(result).then(
+                function (value) { end(); return value; },
+                function (error) { end(); throw error; },
+            );
+        };
+    }
+    // The program's `ctx`, or a step's.
+    let programState;
+    function contextFor(step) {
+        return freeze({
             startedAt: program.started_at_ms,
-            state: hasOwn(program, "state") ? program.state : undefined,
+            state: programState,
             continued: program.continued === true,
             complete: freeze(complete),
             continueAsNew: freeze(continueAsNew),
             shouldContinue: freeze(shouldContinue),
+            say: freeze(sayIn(step)),
+            step: freeze(stepIn(step)),
         });
+    }
+    function prepare() {
+        programEnv = buildEnv(undefined);
+        // The state the last completed run, or this run's previous
+        // execution, handed over: a fresh copy for this execution.
+        programState = hasOwn(program, "state") ? program.state : undefined;
+        programCtx = contextFor(undefined);
         harden();
     }
     function harden() {

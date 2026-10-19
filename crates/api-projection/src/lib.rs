@@ -729,6 +729,9 @@ impl<'a> CoreAgentProjector<'a> {
                         Phase::CallCancelRequested,
                         None,
                     ),
+                    harness::CodeToolEvent::NotesRecorded { execution_id, .. } => {
+                        (execution_id.clone(), None, Phase::NotesRecorded, None)
+                    }
                 };
                 Ok(SessionEventKindView::CodeToolProgress {
                     execution_id,

@@ -1,12 +1,16 @@
 //! A program run's calls, a page at a time from the store's program call
 //! index, with previews of what went in and came out and links to what each
 //! call started.
-use harness::storage::program_calls::{ProgramCallCounts, ProgramCallRecord, ProgramCallStatus};
+use harness::storage::program_calls::{
+    ProgramCallCounts, ProgramCallRecord, ProgramCallStatus, ProgramNoteRecord,
+};
 
 use super::*;
 
 const DEFAULT_CALL_LIMIT: u32 = 50;
 const MAX_CALL_LIMIT: u32 = 200;
+const DEFAULT_NOTE_LIMIT: u32 = 200;
+const MAX_NOTE_LIMIT: u32 = 1_000;
 
 impl GatewayAgentApi {
     pub(super) async fn list_run_calls_impl(
@@ -89,6 +93,52 @@ impl GatewayAgentApi {
         }))
     }
 
+    pub(super) async fn list_run_notes_impl(
+        &self,
+        params: api::RunNotesListParams,
+    ) -> Result<AgentApiOutcome<api::RunNotesListResponse>, AgentApiError> {
+        self.authorize_method(
+            api::METHOD_SESSION_RUNS_NOTES_LIST,
+            Some(ResourceRef::Session(params.session_id.clone())),
+        )
+        .await?;
+        let session_id = SessionId::try_new(params.session_id).map_err(|error| {
+            AgentApiError::invalid_request(format!("invalid session id: {error}"))
+        })?;
+        let run_id = api_projection::parse_api_run_id(&params.run_id)?;
+        let limit = params.limit.unwrap_or(DEFAULT_NOTE_LIMIT);
+        if limit == 0 || limit > MAX_NOTE_LIMIT {
+            return Err(AgentApiError::invalid_request(format!(
+                "limit must be between 1 and {MAX_NOTE_LIMIT}"
+            )));
+        }
+        // The cursor is the last note's recording position and number.
+        let after = params
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                cursor
+                    .split_once(':')
+                    .and_then(|(seq, note)| Some((seq.parse().ok()?, note.parse().ok()?)))
+                    .ok_or_else(|| AgentApiError::invalid_request("invalid note cursor"))
+            })
+            .transpose()?;
+        let mut records = self
+            .store
+            .list_program_notes(&session_id, run_id, after, limit + 1)
+            .await
+            .map_err(api_projection::map_session_store_error)?;
+        let next_cursor = (records.len() > limit as usize).then(|| {
+            records.truncate(limit as usize);
+            let last = records.last().expect("a full page has a last note");
+            format!("{}:{}", last.seq, last.note.seq)
+        });
+        Ok(AgentApiOutcome::new(api::RunNotesListResponse {
+            notes: records.into_iter().map(program_note_view).collect(),
+            next_cursor,
+        }))
+    }
+
     async fn program_call_view(
         &self,
         record: &ProgramCallRecord,
@@ -109,6 +159,7 @@ impl GatewayAgentApi {
             contract: record.contract.clone(),
             tool: record.tool_name.clone(),
             annotation: record.annotation.clone(),
+            step: record.step,
             status: match record.status {
                 ProgramCallStatus::Pending => api::ProgramCallStatusView::Pending,
                 ProgramCallStatus::Waiting => api::ProgramCallStatusView::Waiting,
@@ -165,6 +216,33 @@ fn starts_a_child(tool_id: &str) -> bool {
         .into_iter()
         .chain(tools::subagents::SubagentToolKind::PROGRAMS)
         .any(|kind| kind.tool_id() == tool_id)
+}
+
+fn program_note_view(record: ProgramNoteRecord) -> api::ProgramNoteView {
+    let (kind, step, parent, text) = match record.note.kind {
+        harness::ProgramNoteKind::Said { step, text } => {
+            (api::ProgramNoteKindView::Said, step, None, Some(text))
+        }
+        harness::ProgramNoteKind::StepStarted { parent, name } => (
+            api::ProgramNoteKindView::StepStarted,
+            None,
+            parent,
+            Some(name),
+        ),
+        harness::ProgramNoteKind::StepEnded { step } => {
+            (api::ProgramNoteKindView::StepEnded, Some(step), None, None)
+        }
+    };
+    api::ProgramNoteView {
+        execution: harness::program_scope_execution(&record.execution_id).1,
+        seq: record.note.seq,
+        kind,
+        step,
+        parent,
+        text,
+        after_calls: record.note.after_calls,
+        recorded_at_ms: record.recorded_at_ms,
+    }
 }
 
 fn program_call_counts_view(counts: ProgramCallCounts) -> api::ProgramCallCountsView {

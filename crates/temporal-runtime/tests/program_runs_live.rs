@@ -482,6 +482,7 @@ impl LosesFirstAdmit {
                 &request.descriptor,
                 request.requests,
                 request.cancels,
+                request.notes,
                 request.acknowledged,
             )
             .await
@@ -4400,6 +4401,125 @@ const CHECKER_PROGRAM: &str = r#"
         }
     };
 "#;
+
+/// Narrates, and checks two names in parallel steps.
+const NARRATING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env, ctx) {
+            ctx.say("checking " + input.claim);
+            const results = await Promise.all(["a", "b"].map((name) =>
+                ctx.step("check " + name, async (env, ctx) => {
+                    await env.time.sleep({ ms: 1 }, { why: "pace " + name });
+                    ctx.say("checked " + name);
+                    return name;
+                })));
+            return { claim: input.claim, slept: 0, results };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_narrates_its_steps_and_each_call_names_its_step() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let profile_id =
+                api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&profile_id, NARRATING_PROGRAM, &[("time.sleep", None)]),
+            })
+            .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(&api, &session_id, json!({"claim": "names"})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            assert_eq!(output["results"], json!(["a", "b"]));
+
+            // Two pages of notes, in order.
+            let page = |cursor: Option<String>| {
+                api.list_run_notes(api::RunNotesListParams {
+                    session_id: session_id.to_string(),
+                    run_id: run.id.clone(),
+                    cursor,
+                    limit: Some(4),
+                })
+            };
+            let first = page(None).await?.result;
+            let second = page(first.next_cursor.clone()).await?.result;
+            assert_eq!(second.next_cursor, None);
+            let notes = first.notes.iter().chain(&second.notes).collect::<Vec<_>>();
+            assert_eq!(
+                notes.iter().map(|note| note.seq).collect::<Vec<_>>(),
+                (1..=7).collect::<Vec<_>>(),
+                "{notes:?}"
+            );
+            assert_eq!(
+                (notes[0].kind, notes[0].text.as_deref(), notes[0].step),
+                (api::ProgramNoteKindView::Said, Some("checking names"), None)
+            );
+            let step = |name: &str| {
+                notes
+                    .iter()
+                    .find(|note| {
+                        note.kind == api::ProgramNoteKindView::StepStarted
+                            && note.text.as_deref() == Some(name)
+                    })
+                    .map(|note| note.seq)
+                    .expect("step started")
+            };
+            let (a, b) = (step("check a"), step("check b"));
+            for (step, said) in [(a, "checked a"), (b, "checked b")] {
+                assert!(
+                    notes
+                        .iter()
+                        .any(|note| note.kind == api::ProgramNoteKindView::Said
+                            && note.step == Some(step)
+                            && note.text.as_deref() == Some(said)
+                            && note.after_calls == 2)
+                );
+                assert!(
+                    notes
+                        .iter()
+                        .any(|note| note.kind == api::ProgramNoteKindView::StepEnded
+                            && note.step == Some(step))
+                );
+            }
+
+            // Each call names its step and says why it was made.
+            let calls = api
+                .list_run_calls(api::RunCallsListParams {
+                    session_id: session_id.to_string(),
+                    run_id: run.id.clone(),
+                    cursor: None,
+                    limit: None,
+                    status: None,
+                })
+                .await?
+                .result
+                .calls;
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|call| (call.step, call.annotation.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(Some(a), Some("pace a")), (Some(b), Some("pace b"))]
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            api.delete_profile(api::ProfileDeleteParams { profile_id })
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
 
 /// Sleeps `ms` before answering.
 const SLOW_CHECKER_PROGRAM: &str = r#"

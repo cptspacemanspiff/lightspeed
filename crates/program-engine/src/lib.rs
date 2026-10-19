@@ -123,10 +123,52 @@ pub struct HostRequest {
     /// `MAX_ANNOTATION_BYTES`. Shown with the call; not an argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// The step (`ctx.step`) the call was made in, by the seq of the note
+    /// that began it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
 }
 
 /// The most of a call's `why` kept.
 pub const MAX_ANNOTATION_BYTES: usize = 1_000;
+
+/// Something a program said about its work: narration (`ctx.say`), or a
+/// step it began or ended (`ctx.step`). Numbered per execution from 1, like
+/// calls; `after_calls` places it among them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostNote {
+    pub seq: u64,
+    /// How many calls the execution had made before it.
+    pub after_calls: u64,
+    #[serde(flatten)]
+    pub kind: HostNoteKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostNoteKind {
+    /// Narration, said in `step`.
+    Said {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<u64>,
+        text: String,
+    },
+    /// A step began, nested in `parent`; its id is the note's `seq`.
+    StepStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<u64>,
+        name: String,
+    },
+    /// The step begun by note `step` ended.
+    StepEnded { step: u64 },
+}
+
+/// The most notes one execution may make.
+pub const MAX_NOTES_PER_EXECUTION: u64 = 10_000;
+/// The most of a narration's text kept.
+pub const MAX_NOTE_TEXT_BYTES: usize = 2_000;
+/// The most of a step's name kept.
+pub const MAX_STEP_NAME_BYTES: usize = 200;
 
 /// A program's request to cancel something it holds: one of its calls the
 /// host already admitted, or a promise it has a handle to (an opened input

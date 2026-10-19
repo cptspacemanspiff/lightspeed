@@ -79,6 +79,8 @@ pub struct ProgramCallRecord {
     pub arguments_ref: BlobRef,
     /// Why the program made the call, as it said.
     pub annotation: Option<String>,
+    /// The step it was made in, by the seq of the note that began it.
+    pub step: Option<u64>,
     pub status: ProgramCallStatus,
     pub cancel_requested: bool,
     pub output_ref: Option<BlobRef>,
@@ -91,6 +93,16 @@ pub struct ProgramCallRecord {
     pub started_execution_id: Option<String>,
     /// The inbox request the call opened (a question or an approval).
     pub input_request_id: Option<String>,
+}
+
+/// One indexed program note, as a store lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramNoteRecord {
+    pub execution_id: String,
+    /// The session log position that recorded it.
+    pub seq: u64,
+    pub note: crate::ProgramNote,
+    pub recorded_at_ms: u64,
 }
 
 /// How many of a run's indexed calls are in each status.
@@ -140,6 +152,7 @@ pub enum ProgramCallChange {
         tool_name: String,
         arguments_ref: BlobRef,
         annotation: Option<String>,
+        step: Option<u64>,
         /// The entry's position: calls list in the order they were admitted.
         seq: u64,
         admitted_at_ms: u64,
@@ -161,6 +174,14 @@ pub enum ProgramCallChange {
         error_ref: Option<BlobRef>,
         duration_ms: Option<u64>,
         completed_at_ms: u64,
+    },
+    /// A program's notes on its work, recorded at the entry's position.
+    NotesRecorded {
+        execution_id: String,
+        run_id: RunId,
+        notes: Vec<crate::ProgramNote>,
+        seq: u64,
+        recorded_at_ms: u64,
     },
     /// The call started a workflow (a child session, an input request, an
     /// approval), named by its execution id.
@@ -217,6 +238,7 @@ pub fn program_call_changes(
                     tool_name: call.tool_name.as_str().to_owned(),
                     arguments_ref: call.arguments_ref,
                     annotation: call.annotation,
+                    step: call.step,
                     seq: decoded.position.seq.as_u64(),
                     admitted_at_ms: observed_at_ms,
                 }]
@@ -246,6 +268,19 @@ pub fn program_call_changes(
                 duration_ms: result.duration_ms,
                 completed_at_ms: completed_at_ms.unwrap_or(observed_at_ms),
             }],
+            crate::CodeToolEvent::NotesRecorded {
+                execution_id,
+                notes,
+            } => match decoded.joins.run_id {
+                Some(run_id) => vec![ProgramCallChange::NotesRecorded {
+                    execution_id,
+                    run_id,
+                    notes,
+                    seq: decoded.position.seq.as_u64(),
+                    recorded_at_ms: observed_at_ms,
+                }],
+                None => Vec::new(),
+            },
             crate::CodeToolEvent::ScopeClosed { .. } => Vec::new(),
         },
         CoreAgentEvent::WorkflowTool(WorkflowToolEvent::StartRequested {
@@ -354,6 +389,7 @@ mod tests {
                     tool_name: crate::ToolName::new("web.fetch"),
                     arguments_ref: arguments_ref.clone(),
                     annotation: Some("the claim cites it".to_owned()),
+                    step: None,
                 },
                 promise_id_base: 1,
                 acknowledged: None,
@@ -371,6 +407,7 @@ mod tests {
                 tool_name: "web.fetch".to_owned(),
                 arguments_ref,
                 annotation: Some("the claim cites it".to_owned()),
+                step: None,
                 seq: 2,
                 admitted_at_ms: 102,
             }]

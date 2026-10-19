@@ -71,6 +71,30 @@ pub struct RunCallsListResponse {
     pub counts: ProgramCallCountsView,
 }
 
+/// A page of a program run's notes on its work, in program order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunNotesListParams {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    /// Continue after a previous page's `nextCursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Notes per page: 200 when omitted, at most 1,000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunNotesListResponse {
+    #[serde(default)]
+    pub notes: Vec<ProgramNoteView>,
+    /// Present when more notes follow; a run still going may add more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunReadParams {

@@ -397,6 +397,7 @@ impl CodeRunner {
                         arguments_ref,
                         acknowledged: None,
                         annotation: None,
+                        step: None,
                     },
                     Default::default(),
                 )

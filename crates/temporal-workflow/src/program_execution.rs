@@ -281,6 +281,10 @@ pub struct ProgramAdmitActivityRequest {
     /// call from an earlier step, or a promise the program holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cancels: Vec<program_engine::HostCancel>,
+    /// What the program noted during the step (`ctx.say`, `ctx.step`),
+    /// recorded before its requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<program_engine::HostNote>,
     /// The scope's outcomes the program had collected when the workflow
     /// task sending this began, acknowledged with each admission.
     #[serde(default, skip_serializing_if = "is_zero")]

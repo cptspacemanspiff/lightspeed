@@ -309,6 +309,10 @@ pub struct CodeToolCallSpec {
     /// sent again is the same call whatever it carries here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// The program step (`ctx.step`) the call was made in: the `seq` of
+    /// the note that began it. Display only, like `annotation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
 }
 
 /// The most of a call's annotation a scope records.
@@ -316,7 +320,7 @@ pub const MAX_CODE_TOOL_ANNOTATION_BYTES: usize = 1_000;
 
 impl CodeToolCallSpec {
     /// Whether `other` asks for the same call: everything but the
-    /// annotation.
+    /// annotation and step.
     pub fn same_call(&self, other: &Self) -> bool {
         self.origin == other.origin
             && self.binding_id == other.binding_id
@@ -477,7 +481,48 @@ pub struct CodeToolScope {
     /// They are not calls; the exit waits until each has settled.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub withdrawn: BTreeSet<crate::PromiseId>,
+    /// The program notes recorded, which are numbered from 1: a note sent
+    /// again at or below it is recorded once.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notes_recorded: u64,
 }
+
+/// Something a program said about its work, in program order: narration
+/// (`ctx.say`), or a step it began or ended (`ctx.step`). Numbered per
+/// execution scope from 1; `after_calls` places it among the calls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+pub struct ProgramNote {
+    pub seq: u64,
+    /// How many calls the execution had made before it.
+    pub after_calls: u64,
+    #[serde(flatten)]
+    pub kind: ProgramNoteKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProgramNoteKind {
+    /// Narration, said in `step` (absent at the top level).
+    Said {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<u64>,
+        text: String,
+    },
+    /// A step began, nested in `parent`. Its id is the note's own `seq`.
+    StepStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<u64>,
+        name: String,
+    },
+    /// The step begun by note `step` ended.
+    StepEnded { step: u64 },
+}
+
+pub const MAX_PROGRAM_NOTE_TEXT_BYTES: usize = 2_000;
+pub const MAX_PROGRAM_STEP_NAME_BYTES: usize = 200;
+pub const MAX_PROGRAM_NOTES_PER_BATCH: usize = 256;
 
 impl CodeToolScope {
     /// Recorded outcomes after the first `after` completions, in log order;
@@ -642,6 +687,11 @@ pub enum CodeToolEvent {
     /// its kind can and still records one outcome.
     CallCancelRequested {
         origin: CodeToolOrigin,
+    },
+    /// A program's notes, the next ones after those recorded.
+    NotesRecorded {
+        execution_id: String,
+        notes: Vec<ProgramNote>,
     },
 }
 
@@ -1637,6 +1687,85 @@ pub fn code_tool_call_cancel_requested(state: &CoreAgentState, origin: &CodeTool
 /// already requested, needs nothing more. Every cancelled call still
 /// records one outcome; a promise is cancelled the way its producer needs
 /// (`promise_cancel_event`).
+/// Record a program's notes. Notes already recorded were sent again and
+/// are skipped; the rest must follow on.
+pub fn record_code_tool_notes_proposals(
+    state: &CoreAgentState,
+    execution_id: &str,
+    notes: Vec<ProgramNote>,
+) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
+    let scope = state
+        .code_tools
+        .scopes
+        .get(execution_id)
+        .ok_or_else(|| invalid("unknown code tool execution scope"))?;
+    let ScopeOwner::Run { run_id } = scope.spec.owner else {
+        return Err(invalid("only a program run's scope records notes"));
+    };
+    if notes.len() > MAX_PROGRAM_NOTES_PER_BATCH {
+        return Err(invalid(format!(
+            "at most {MAX_PROGRAM_NOTES_PER_BATCH} program notes are recorded at once"
+        )));
+    }
+    let fresh = notes
+        .into_iter()
+        .filter(|note| note.seq > scope.notes_recorded)
+        .collect::<Vec<_>>();
+    if fresh.is_empty() {
+        return Ok(Vec::new());
+    }
+    if scope.closed {
+        return Err(invalid("code tool execution scope is closed"));
+    }
+    validate_notes(scope, &fresh)?;
+    Ok(vec![CoreAgentEventProposal::new(
+        CoreAgentJoins {
+            run_id: Some(run_id),
+            ..Default::default()
+        },
+        CoreAgentEvent::CodeTool(CodeToolEvent::NotesRecorded {
+            execution_id: execution_id.to_owned(),
+            notes: fresh,
+        }),
+    )])
+}
+
+/// Notes follow the scope's last recorded one in order, refer only to
+/// earlier notes, and stay within their sizes.
+fn validate_notes(scope: &CodeToolScope, notes: &[ProgramNote]) -> Result<(), DomainError> {
+    for (expected, note) in (scope.notes_recorded + 1..).zip(notes) {
+        if note.seq != expected {
+            return Err(invalid(format!(
+                "program note {} does not follow note {}",
+                note.seq,
+                expected - 1
+            )));
+        }
+        let (earlier, bytes, max) = match &note.kind {
+            ProgramNoteKind::Said { step, text } => {
+                (*step, text.len(), MAX_PROGRAM_NOTE_TEXT_BYTES)
+            }
+            ProgramNoteKind::StepStarted { parent, name } => {
+                (*parent, name.len(), MAX_PROGRAM_STEP_NAME_BYTES)
+            }
+            ProgramNoteKind::StepEnded { step } => (Some(*step), 0, 0),
+        };
+        if earlier.is_some_and(|earlier| earlier == 0 || earlier >= note.seq) {
+            return Err(invalid(format!(
+                "program note {} refers to a step that does not precede it",
+                note.seq
+            )));
+        }
+        if bytes > max {
+            return Err(invalid(format!(
+                "program note {} exceeds {max} bytes",
+                note.seq
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn cancel_code_tool_proposals(
     state: &CoreAgentState,
     execution_id: &str,
@@ -2029,6 +2158,7 @@ pub(crate) fn apply_code_tool_event(
                     program_context: None,
                     cancel_requested_calls: BTreeSet::new(),
                     withdrawn: BTreeSet::new(),
+                    notes_recorded: 0,
                 },
             );
         }
@@ -2170,6 +2300,18 @@ pub(crate) fn apply_code_tool_event(
                 .status = CodeToolCallStatus::Waiting {
                 suspension: suspension.clone(),
             };
+        }
+        CodeToolEvent::NotesRecorded {
+            execution_id,
+            notes,
+        } => {
+            let scope = state
+                .code_tools
+                .scopes
+                .get_mut(execution_id)
+                .ok_or_else(|| invalid("unknown code tool execution scope"))?;
+            validate_notes(scope, notes)?;
+            scope.notes_recorded = notes.last().map_or(scope.notes_recorded, |note| note.seq);
         }
         CodeToolEvent::CallCancelRequested { origin } => {
             let call = code_tool_call(state, origin)

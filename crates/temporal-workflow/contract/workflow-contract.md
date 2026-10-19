@@ -102,6 +102,10 @@ and resending it is safe. The target still records exactly one outcome, which
 is its result if that came first; the reply's `CodeToolCancelOutcome` status
 (`requested`, `cancelled`, `resolved` or `failed`) is read after the cancel is
 recorded and is for logging, not for deciding what happened.
+`record_code_tool_notes` accepts `RecordCodeToolNotesRequest`: a program run's notes
+on its work (narration, steps begun and ended), numbered per execution from 1.
+Notes already recorded are skipped, so resending is safe; the rest must follow
+the last one recorded.
 Read `code_tool_scope_report` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
@@ -116,5 +120,5 @@ is distinct from a successfully admitted tool returning a failed outcome.
 
 ## Schema inventory
 
-The schema bundle contains 80 definitions. Its public roots
-are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CancelCodeToolRequest, CodeToolCancelOutcome, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.
+The schema bundle contains 82 definitions. Its public roots
+are: EmissionEnvelope, WorkflowToolStartArgs, WorkflowToolRecoveryResult, WorkflowToolRecipeV1, ConversationStart, ChannelDeliveryCommand, ChannelDeliveryResult, PrepareChannelMediaInput, PrepareChannelMediaResult, TranscriptionWorkflowArgs, TranscriptionSnapshot, TranscriptionActivityResult, OpenCodeToolScopeRequest, InvokeCodeToolRequest, CloseCodeToolScopeRequest, CancelCodeToolRequest, CodeToolCancelOutcome, RecordCodeToolNotesRequest, CodeToolScopeReportRequest, CodeToolScopeReport, ScopeRecordedOutcomesRequest, ScopeRecordedOutcomes, CodeToolCallOutcome, CodeToolRejection, CodeExecutionDescriptor, CodeExecutionSnapshot, CodeRunActivityResult.

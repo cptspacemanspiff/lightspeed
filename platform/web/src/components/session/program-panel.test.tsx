@@ -71,8 +71,29 @@ beforeEach(() => {
     if (method === "GET" && path.startsWith(`${base}/runs/run_1/calls?`)) {
       return { calls, nextCursor: null, counts: { total: 2, pending: 1, waiting: 0, succeeded: 1, failed: 0, cancelled: 0 } };
     }
-    if (method === "GET" && path.startsWith(`${base}/runs/run_2/calls?`)) {
+    if (method === "GET" && path.startsWith(`${base}/runs/run_1/notes?`)) {
+      return { notes: [], nextCursor: null };
+    }
+    if (method === "GET" && path.startsWith(`${base}/runs/run_2/notes?`)) {
+      return {
+        notes: [
+          { execution: 0, seq: 1, kind: "said", text: "checking one claim", afterCalls: 0, recordedAtMs: 4_000 },
+          { execution: 0, seq: 2, kind: "stepStarted", text: "check sky", afterCalls: 0, recordedAtMs: 4_000 },
+          { execution: 0, seq: 3, kind: "said", step: 2, text: "fetched it", afterCalls: 1, recordedAtMs: 4_050 },
+          { execution: 0, seq: 4, kind: "stepEnded", step: 2, afterCalls: 1, recordedAtMs: 4_080 },
+        ],
+        nextCursor: null,
+      };
+    }
+    if (method === "GET" && path.startsWith(`${base}/runs/run_2/calls?`) && path.includes("status=")) {
       return { calls: [], nextCursor: null, counts: { total: 0, pending: 0, waiting: 0, succeeded: 0, failed: 0, cancelled: 0 } };
+    }
+    if (method === "GET" && path.startsWith(`${base}/runs/run_2/calls?`)) {
+      return {
+        calls: [{ ...calls[0]!, id: "code-tool:s", step: 2, childSessionId: undefined }],
+        nextCursor: null,
+        counts: { total: 1, pending: 0, waiting: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      };
     }
     if (method === "POST" && path === `${base}/program-runs`) {
       posted.push(body);
@@ -147,6 +168,25 @@ it("lists runs newest first with failures, and opens a run's output and calls", 
   expect(annotated!.textContent).toContain("the claim cites it");
   expect(annotated!.textContent).not.toContain("CHECK sky");
   expect(plain!.textContent).toContain('{"ask":"Ship?"}');
+});
+
+it("shows a run's steps with their narration and calls", async () => {
+  await render();
+  await waitForUi(() => expect(container.querySelectorAll("[data-run]")).toHaveLength(2));
+  const newest = container.querySelectorAll("[data-run]")[0]!;
+  await waitForUi(() => expect(newest.querySelector("[data-step]")).not.toBeNull());
+  const step = newest.querySelector("[data-step]")!;
+  expect(step.getAttribute("data-step")).toBe("check sky");
+  expect(step.textContent).toContain("80ms");
+  expect(step.textContent).toContain("2 items");
+  expect(step.textContent).toContain("fetched it");
+  expect(step.querySelectorAll("[data-call]")).toHaveLength(1);
+  // Narration outside every step sits above it.
+  expect(newest.querySelector("[data-note='1']")!.textContent).toBe("checking one claim");
+  // Filtering the calls leaves the plain list.
+  const failed = [...newest.querySelectorAll("button")].find((button) => button.textContent === "Failed")!;
+  await act(async () => click(failed));
+  await waitForUi(() => expect(newest.querySelector("[data-step]")).toBeNull());
 });
 
 it("starts a run from JSON input and refuses text that is not JSON", async () => {

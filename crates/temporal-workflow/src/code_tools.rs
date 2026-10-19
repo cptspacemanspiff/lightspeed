@@ -20,6 +20,7 @@ pub const OPEN_CODE_TOOL_SCOPE_UPDATE: &str = "open_code_tool_scope";
 pub const INVOKE_CODE_TOOL_UPDATE: &str = "invoke_code_tool";
 pub const CLOSE_CODE_TOOL_SCOPE_UPDATE: &str = "close_code_tool_scope";
 pub const CANCEL_CODE_TOOL_UPDATE: &str = "cancel_code_tool";
+pub const RECORD_CODE_TOOL_NOTES_UPDATE: &str = "record_code_tool_notes";
 pub const CODE_TOOL_SCOPE_REPORT_QUERY: &str = "code_tool_scope_report";
 pub const SCOPE_RECORDED_OUTCOMES_QUERY: &str = "scope_recorded_outcomes";
 
@@ -69,6 +70,11 @@ pub struct InvokeCodeToolRequest {
     /// call; a resent request may carry a different one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// From a program: the step (`ctx.step`) the call was made in, by the
+    /// seq of the note that began it. Shown with the call, like
+    /// `annotation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
 }
 
 /// Close admission immediately. Cancellation additionally requests cleanup of
@@ -96,6 +102,15 @@ pub struct CloseCodeToolScopeRequest {
 pub struct CancelCodeToolRequest {
     pub execution_id: String,
     pub target: harness::CodeToolCancelTarget,
+}
+
+/// A program's notes on its work (`ctx.say`, `ctx.step`), in order. Notes
+/// the session recorded before are skipped, so resending is safe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecordCodeToolNotesRequest {
+    pub execution_id: String,
+    pub notes: Vec<harness::ProgramNote>,
 }
 
 /// Where the target stood once the cancel was recorded. `Requested` means
@@ -352,6 +367,7 @@ pub type CodeToolScopeResult = Result<CodeToolScopeReport, CodeToolRejection>;
 pub type CodeToolInvocationResult = Result<CodeToolCallOutcome, CodeToolRejection>;
 pub type ScopeRecordedOutcomesResult = Result<ScopeRecordedOutcomes, CodeToolRejection>;
 pub type CodeToolCancelResult = Result<CodeToolCancelOutcome, CodeToolRejection>;
+pub type CodeToolNotesResult = Result<(), CodeToolRejection>;
 
 /// Temporal is the transport even when the runner and session share a process.
 /// Dropping one of these futures only drops the client waiter; explicit scope
@@ -421,6 +437,22 @@ impl CodeToolClient {
         self.client
             .get_workflow_handle::<AgentSessionWorkflow>(self.session_workflow_id.clone())
             .execute_update(AgentSessionWorkflow::cancel_code_tool, request, options)
+            .await
+    }
+
+    pub async fn record_notes(
+        &self,
+        request: RecordCodeToolNotesRequest,
+        rpc_options: RpcOptions,
+    ) -> Result<CodeToolNotesResult, WorkflowUpdateError> {
+        let options = update_options(RECORD_CODE_TOOL_NOTES_UPDATE, &request, rpc_options);
+        self.client
+            .get_workflow_handle::<AgentSessionWorkflow>(self.session_workflow_id.clone())
+            .execute_update(
+                AgentSessionWorkflow::record_code_tool_notes,
+                request,
+                options,
+            )
             .await
     }
 
@@ -502,6 +534,7 @@ mod tests {
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
             annotation: None,
+            step: None,
         };
         let id = update_id(INVOKE_CODE_TOOL_UPDATE, &request);
         assert_eq!(id, update_id(INVOKE_CODE_TOOL_UPDATE, &request));

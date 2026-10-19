@@ -13,13 +13,13 @@ use std::{
 };
 
 use harness::{BlobRef, storage::BlobStore};
-use program_engine::{HostCancel, HostCompletion, HostError, HostRequest};
+use program_engine::{HostCancel, HostCompletion, HostError, HostNote, HostNoteKind, HostRequest};
 use serde_json::Value;
 use temporal_workflow::{
     CancelCodeToolRequest, CloseCodeToolScopeRequest, CodeToolCallOutcome as RecordedOutcome,
     CodeToolClient, CodeToolRejectionKind, CodeToolScopeReport, CodeToolScopeReportRequest,
     InvokeCodeToolRequest, MAX_RECORDED_OUTCOMES_PER_PAGE, ProgramCloseActivityResult,
-    ProgramRunDescriptor, ScopeRecordedOutcomesRequest,
+    ProgramRunDescriptor, RecordCodeToolNotesRequest, ScopeRecordedOutcomesRequest,
 };
 use temporalio_client::Client;
 use tools::program::contracts::ContractError;
@@ -270,10 +270,30 @@ impl ProgramRunner {
         descriptor: &ProgramRunDescriptor,
         requests: Vec<HostRequest>,
         cancels: Vec<HostCancel>,
+        notes: Vec<HostNote>,
         acknowledged: u64,
     ) -> Result<Vec<HostCompletion>, AdmitStepError> {
         let code_tools =
             CodeToolClient::new(self.client.clone(), descriptor.session_workflow_id.clone());
+        // Notes first: a step's start is recorded before the calls in it.
+        let notes = notes.into_iter().map(program_note).collect::<Vec<_>>();
+        for batch in notes.chunks(harness::MAX_PROGRAM_NOTES_PER_BATCH) {
+            let recorded = code_tools
+                .record_notes(
+                    RecordCodeToolNotesRequest {
+                        execution_id: descriptor.scope_id(),
+                        notes: batch.to_vec(),
+                    },
+                    Default::default(),
+                )
+                .await
+                .map_err(|error| AdmitStepError::Transport(format!("record notes: {error}")))?;
+            // Notes are an account of the work, not part of it: one the
+            // session refuses does not stop the program.
+            if let Err(rejection) = recorded {
+                tracing::warn!(scope_id = %descriptor.scope_id(), %rejection, "program notes refused");
+            }
+        }
         let mut rejected = Vec::new();
         for request in requests {
             match self
@@ -444,6 +464,7 @@ impl ProgramRunner {
                         arguments_ref,
                         acknowledged: (acknowledged > 0).then_some(acknowledged),
                         annotation: request.annotation,
+                        step: request.step,
                     },
                     Default::default(),
                 )
@@ -569,6 +590,21 @@ pub(crate) async fn put_json(blobs: &dyn BlobStore, value: &Value) -> Result<Blo
         .put_bytes(bytes)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// A program's note as the session records it.
+fn program_note(note: HostNote) -> harness::ProgramNote {
+    harness::ProgramNote {
+        seq: note.seq,
+        after_calls: note.after_calls,
+        kind: match note.kind {
+            HostNoteKind::Said { step, text } => harness::ProgramNoteKind::Said { step, text },
+            HostNoteKind::StepStarted { parent, name } => {
+                harness::ProgramNoteKind::StepStarted { parent, name }
+            }
+            HostNoteKind::StepEnded { step } => harness::ProgramNoteKind::StepEnded { step },
+        },
+    }
 }
 
 #[cfg(test)]

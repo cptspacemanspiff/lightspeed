@@ -373,6 +373,36 @@ export type EmissionProducer =
       workflow_id: string;
     };
 /**
+ * Something a program said about its work, in program order: narration
+ * (`ctx.say`), or a step it began or ended (`ctx.step`). Numbered per
+ * execution scope from 1; `after_calls` places it among the calls.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "ProgramNote".
+ */
+export type ProgramNote = {
+  /**
+   * How many calls the execution had made before it.
+   */
+  after_calls: number;
+  seq: number;
+} & ProgramNote1;
+export type ProgramNote1 =
+  | {
+      kind: "said";
+      step?: number | null;
+      text: string;
+    }
+  | {
+      kind: "step_started";
+      name: string;
+      parent?: number | null;
+    }
+  | {
+      kind: "step_ended";
+      step: number;
+    };
+/**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
  * via the `definition` "TranscriptionActivityResult".
  */
@@ -890,6 +920,12 @@ export interface InvokeCodeToolRequest {
   binding_id: string;
   execution_id: string;
   request_id: string;
+  /**
+   * From a program: the step (`ctx.step`) the call was made in, by the
+   * seq of the note that began it. Shown with the call, like
+   * `annotation`.
+   */
+  step?: number | null;
 }
 /**
  * `maintain_channel_typing`: keep the provider's typing indicator up for
@@ -970,6 +1006,17 @@ export interface PreparedMediaItem {
   kind: ChannelMediaKind;
   mime: string;
   name?: string | null;
+}
+/**
+ * A program's notes on its work (`ctx.say`, `ctx.step`), in order. Notes
+ * the session recorded before are skipped, so resending is safe.
+ *
+ * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema
+ * via the `definition` "RecordCodeToolNotesRequest".
+ */
+export interface RecordCodeToolNotesRequest {
+  execution_id: string;
+  notes: ProgramNote[];
 }
 /**
  * This interface was referenced by `LightspeedWorkflowContract`'s JSON-Schema

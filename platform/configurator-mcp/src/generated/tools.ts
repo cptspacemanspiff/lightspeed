@@ -3882,6 +3882,48 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_session_runs_notes_list",
+    "method": "session/runs/notes/list",
+    "group": "session",
+    "summary": "List a program run's notes",
+    "description": "Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.",
+    "paramsType": "RunNotesListParams",
+    "resultType": "AgentApiOutcome<RunNotesListResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "A page of a program run's notes on its work, in program order.",
+      "properties": {
+        "cursor": {
+          "description": "Continue after a previous page's `nextCursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Notes per page: 200 when omitted, at most 1,000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "lightspeed_session_runs_cancel",
     "method": "session/runs/cancel",
     "group": "session",

@@ -34,6 +34,8 @@ pub enum Step {
     Waiting {
         requests: Vec<HostRequest>,
         cancels: Vec<HostCancel>,
+        /// What the program noted during the step, in order.
+        notes: Vec<HostNote>,
     },
     /// The program returned or failed. `requests` and `cancels` are those
     /// it made during this step before finishing, which the host still
@@ -42,6 +44,7 @@ pub enum Step {
     Finished {
         requests: Vec<HostRequest>,
         cancels: Vec<HostCancel>,
+        notes: Vec<HostNote>,
         report: ExecutionReport,
     },
 }
@@ -202,6 +205,7 @@ impl ProgramInstance {
             return Step::Finished {
                 requests: Vec::new(),
                 cancels: Vec::new(),
+                notes: Vec::new(),
                 report: report.clone(),
             };
         }
@@ -229,6 +233,7 @@ impl ProgramInstance {
             return Step::Finished {
                 requests: Vec::new(),
                 cancels: Vec::new(),
+                notes: Vec::new(),
                 report: report.clone(),
             };
         }
@@ -309,6 +314,7 @@ impl ProgramInstance {
             Ok(None) => Step::Waiting {
                 requests: std::mem::take(&mut *self.outbox.borrow_mut()),
                 cancels: std::mem::take(&mut *self.cancels.borrow_mut()),
+                notes: std::mem::take(&mut self.state.borrow_mut().noted),
             },
             Ok(Some(value)) => self.finish(Ok(value)),
             Err(failure) => self.finish(Err(failure)),
@@ -371,11 +377,13 @@ impl ProgramInstance {
         drop(state);
         let requests = std::mem::take(&mut *self.outbox.borrow_mut());
         let cancels = std::mem::take(&mut *self.cancels.borrow_mut());
+        let notes = std::mem::take(&mut self.state.borrow_mut().noted);
         self.controls = None;
         self.finished = Some(report.clone());
         Step::Finished {
             requests,
             cancels,
+            notes,
             report,
         }
     }

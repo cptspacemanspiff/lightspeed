@@ -1392,6 +1392,15 @@
         },
         "request_id": {
           "type": "string"
+        },
+        "step": {
+          "description": "From a program: the step (`ctx.step`) the call was made in, by the\nseq of the note that began it. Shown with the call, like\n`annotation`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1627,6 +1636,98 @@
       ],
       "type": "object"
     },
+    "ProgramNote": {
+      "description": "Something a program said about its work, in program order: narration\n(`ctx.say`), or a step it began or ended (`ctx.step`). Numbered per\nexecution scope from 1; `after_calls` places it among the calls.",
+      "oneOf": [
+        {
+          "description": "Narration, said in `step` (absent at the top level).",
+          "properties": {
+            "kind": {
+              "const": "said",
+              "type": "string"
+            },
+            "step": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step began, nested in `parent`. Its id is the note's own `seq`.",
+          "properties": {
+            "kind": {
+              "const": "step_started",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parent": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The step begun by note `step` ended.",
+          "properties": {
+            "kind": {
+              "const": "step_ended",
+              "type": "string"
+            },
+            "step": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "step"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "after_calls": {
+          "description": "How many calls the execution had made before it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "after_calls"
+      ],
+      "type": "object"
+    },
     "PromiseId": {
       "description": "Stable identifier for a promise: a session-scoped counter rendered as\n`promise_<n>`, the same convention as `run_<n>`, so the model copies a\nshort handle rather than a digest. The harness hands every tool batch a\nbase one past the session cursor (`ToolInvocationBatchRequest::\npromise_id_base`); the executor numbers the promises it creates from\nthat base, and the reducer accepts a creation only at or above the\nbatch's base and never twice. Producer correlation lives on\n`PromiseSource`, not in the id.",
       "type": "string"
@@ -1683,6 +1784,26 @@
           "type": "object"
         }
       ]
+    },
+    "RecordCodeToolNotesRequest": {
+      "additionalProperties": false,
+      "description": "A program's notes on its work (`ctx.say`, `ctx.step`), in order. Notes\nthe session recorded before are skipped, so resending is safe.",
+      "properties": {
+        "execution_id": {
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/definitions/ProgramNote"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "execution_id",
+        "notes"
+      ],
+      "type": "object"
     },
     "ReplyContext": {
       "description": "The message a send replies to, for providers that quote it themselves.",

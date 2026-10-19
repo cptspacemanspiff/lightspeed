@@ -551,6 +551,31 @@
     },
     {
       "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.",
+      "group": "session",
+      "method": "session/runs/notes/list",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/RunNotesListParams"
+        },
+        "type": "RunNotesListParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfRunNotesListResponse"
+        },
+        "type": "AgentApiOutcome<RunNotesListResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "List a program run's notes",
+      "target": "sessionId"
+    },
+    {
+      "access": {
         "action": "stop_session",
         "kind": "universe"
       },

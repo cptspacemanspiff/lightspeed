@@ -103,6 +103,10 @@ pub struct ProgramCallView {
     /// Why the program made the call, as it said (`{ why }`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// The step (`ctx.step`) it was made in: the seq of the note that began
+    /// the step, in the same execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
     pub status: ProgramCallStatusView,
     /// The program asked to cancel it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -124,6 +128,39 @@ pub struct ProgramCallView {
     /// The inbox request a question or an approval opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_request_id: Option<String>,
+}
+
+/// Something a program said about its work: narration (`ctx.say`), or a
+/// step (`ctx.step`) it began or ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramNoteView {
+    /// The run's execution that made it, numbered as calls are.
+    pub execution: u32,
+    /// Its number within the execution, from 1. A step's id is the seq of
+    /// the note that began it.
+    pub seq: u64,
+    pub kind: ProgramNoteKindView,
+    /// Narration's step, or the step that ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
+    /// A started step's enclosing step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+    /// Narration's text, or a started step's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// How many calls the execution had made before it.
+    pub after_calls: u64,
+    pub recorded_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgramNoteKindView {
+    Said,
+    StepStarted,
+    StepEnded,
 }
 
 /// Where a program call stands.

@@ -2192,6 +2192,13 @@ impl AgentApiService for GatewayAgentApi {
         self.list_run_calls_impl(params).await
     }
 
+    async fn list_run_notes(
+        &self,
+        params: api::RunNotesListParams,
+    ) -> Result<AgentApiOutcome<api::RunNotesListResponse>, AgentApiError> {
+        self.list_run_notes_impl(params).await
+    }
+
     async fn read_inbox_request(
         &self,
         params: api::InboxRequestReadParams,

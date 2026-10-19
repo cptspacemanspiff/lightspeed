@@ -2019,6 +2019,23 @@
       ],
       "type": "object"
     },
+    "AgentApiOutcomeOfRunNotesListResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/RunNotesListResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
     "AgentApiOutcomeOfRunReadResponse": {
       "properties": {
         "notifications": {
@@ -7541,6 +7558,11 @@
         {
           "const": "callCancelRequested",
           "description": "The scope's owner asked to cancel the call; its outcome follows.",
+          "type": "string"
+        },
+        {
+          "const": "notesRecorded",
+          "description": "A program noted its progress (`ctx.say`, `ctx.step`); list the\nnotes with `session/runs/notes/list`.",
           "type": "string"
         }
       ]
@@ -13951,6 +13973,15 @@
         "status": {
           "$ref": "#/definitions/ProgramCallStatusView"
         },
+        "step": {
+          "description": "The step (`ctx.step`) it was made in: the seq of the note that began\nthe step, in the same execution.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "tool": {
           "description": "The session tool that served it.",
           "type": "string"
@@ -14070,6 +14101,78 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "ProgramNoteKindView": {
+      "enum": [
+        "said",
+        "stepStarted",
+        "stepEnded"
+      ],
+      "type": "string"
+    },
+    "ProgramNoteView": {
+      "description": "Something a program said about its work: narration (`ctx.say`), or a\nstep (`ctx.step`) it began or ended.",
+      "properties": {
+        "afterCalls": {
+          "description": "How many calls the execution had made before it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution": {
+          "description": "The run's execution that made it, numbered as calls are.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/definitions/ProgramNoteKindView"
+        },
+        "parent": {
+          "description": "A started step's enclosing step.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recordedAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "description": "Its number within the execution, from 1. A step's id is the seq of\nthe note that began it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "step": {
+          "description": "Narration's step, or the step that ended.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "Narration's text, or a started step's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "execution",
+        "seq",
+        "kind",
+        "afterCalls",
+        "recordedAtMs"
+      ],
       "type": "object"
     },
     "ProgramSource": {
@@ -14558,6 +14661,57 @@
       "required": [
         "hasOlderRuns"
       ],
+      "type": "object"
+    },
+    "RunNotesListParams": {
+      "description": "A page of a program run's notes on its work, in program order.",
+      "properties": {
+        "cursor": {
+          "description": "Continue after a previous page's `nextCursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Notes per page: 200 when omitted, at most 1,000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "RunNotesListResponse": {
+      "properties": {
+        "nextCursor": {
+          "description": "Present when more notes follow; a run still going may add more.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ProgramNoteView"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "RunReadParams": {

@@ -914,7 +914,8 @@ export type ToolAttachmentKind = "media" | "file";
  */
 export type CodeToolProgressPhase =
   | ("scopeOpened" | "callAdmitted" | "callDeferred" | "callCompleted" | "scopeClosed")
-  | "callCancelRequested";
+  | "callCancelRequested"
+  | "notesRecorded";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "RunViewSource".
@@ -1762,6 +1763,11 @@ export type ApprovalDecisionStatus = "decided" | "failed";
  * via the `definition` "ProgramCallStatusView".
  */
 export type ProgramCallStatusView = ("pending" | "succeeded" | "failed" | "cancelled") | "waiting";
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramNoteKindView".
+ */
+export type ProgramNoteKindView = "said" | "stepStarted" | "stepEnded";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SkillCatalogAvailability".
@@ -6564,6 +6570,11 @@ export interface ProgramCallView {
   requestId: string;
   status: ProgramCallStatusView;
   /**
+   * The step (`ctx.step`) it was made in: the seq of the note that began
+   * the step, in the same execution.
+   */
+  step?: number | null;
+  /**
    * The session tool that served it.
    */
   tool: string;
@@ -6626,6 +6637,61 @@ export interface RunListResponse {
   hasOlderRuns: boolean;
   nextCursor?: string | null;
   runs?: RunSummaryView[];
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfRunNotesListResponse".
+ */
+export interface AgentApiOutcomeOfRunNotesListResponse {
+  notifications?: AgentNotification[];
+  result: RunNotesListResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunNotesListResponse".
+ */
+export interface RunNotesListResponse {
+  /**
+   * Present when more notes follow; a run still going may add more.
+   */
+  nextCursor?: string | null;
+  notes?: ProgramNoteView[];
+}
+/**
+ * Something a program said about its work: narration (`ctx.say`), or a
+ * step (`ctx.step`) it began or ended.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramNoteView".
+ */
+export interface ProgramNoteView {
+  /**
+   * How many calls the execution had made before it.
+   */
+  afterCalls: number;
+  /**
+   * The run's execution that made it, numbered as calls are.
+   */
+  execution: number;
+  kind: ProgramNoteKindView;
+  /**
+   * A started step's enclosing step.
+   */
+  parent?: number | null;
+  recordedAtMs: number;
+  /**
+   * Its number within the execution, from 1. A step's id is the seq of
+   * the note that began it.
+   */
+  seq: number;
+  /**
+   * Narration's step, or the step that ended.
+   */
+  step?: number | null;
+  /**
+   * Narration's text, or a started step's name.
+   */
+  text?: string | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -8714,6 +8780,24 @@ export interface RunListParams {
    */
   cursor?: string | null;
   limit?: number | null;
+  sessionId: string;
+}
+/**
+ * A page of a program run's notes on its work, in program order.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunNotesListParams".
+ */
+export interface RunNotesListParams {
+  /**
+   * Continue after a previous page's `nextCursor`.
+   */
+  cursor?: string | null;
+  /**
+   * Notes per page: 200 when omitted, at most 1,000.
+   */
+  limit?: number | null;
+  runId: string;
   sessionId: string;
 }
 /**

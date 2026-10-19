@@ -1374,6 +1374,7 @@ fn step_through(journal: &Journal, group: usize) -> (Vec<HostRequest>, Execution
                     Step::Finished {
                         requests: Vec::new(),
                         cancels: Vec::new(),
+                        notes: Vec::new(),
                         report: report.clone()
                     }
                 );
@@ -1521,7 +1522,9 @@ fn an_oversized_result_arrives_as_a_failure_the_program_can_catch() {
 
 fn waiting(step: Step) -> (Vec<HostRequest>, Vec<HostCancel>) {
     match step {
-        Step::Waiting { requests, cancels } => (requests, cancels),
+        Step::Waiting {
+            requests, cancels, ..
+        } => (requests, cancels),
         Step::Finished { report, .. } => panic!("the program finished: {report:?}"),
     }
 }
@@ -1772,4 +1775,148 @@ fn a_run_counts_calls_and_compute_across_its_executions() {
     assert_eq!(error.kind, ExecutionErrorKind::LimitExceeded);
     assert!(error.message.contains("compute"), "{}", error.message);
     assert_eq!(over.return_value, None);
+}
+
+#[test]
+fn steps_own_the_calls_made_through_their_env_and_note_what_they_say() {
+    let source = r#"
+        export default {
+            async run(input, env, ctx) {
+                ctx.say("checking " + input.urls.length);
+                const checked = await Promise.all(input.urls.map((url) =>
+                    ctx.step("check " + url, async (env, ctx) => {
+                        const page = await env.web.fetch({ url }, { why: "cited" });
+                        ctx.say("fetched " + url);
+                        return ctx.step("inner", async (env) => env.web.fetch({ url: url + "/more" }));
+                    })));
+                let failed = null;
+                try {
+                    await ctx.step("fails", async () => { throw new Error("no"); });
+                } catch (error) {
+                    failed = error.message;
+                }
+                return { checked: checked.length, failed };
+            }
+        };
+    "#;
+    let input = program_input(source, &["web.fetch"], SEED);
+    let input = ExecutionInput {
+        program: ProgramExecution {
+            input: json!({"urls": ["a", "b"]}),
+            ..input.program
+        },
+        ..input
+    };
+    let (mut instance, mut step) = ProgramInstance::start(input, StepBudget::default()).unwrap();
+    let mut requests = Vec::new();
+    let mut notes = Vec::new();
+    let report = loop {
+        let (issued, noted, finished) = match step {
+            Step::Waiting {
+                requests, notes, ..
+            } => (requests, notes, None),
+            Step::Finished {
+                requests,
+                notes,
+                report,
+                ..
+            } => (requests, notes, Some(report)),
+        };
+        notes.extend(noted);
+        let ready = issued
+            .iter()
+            .map(|request| HostCompletion {
+                request_id: request.request_id.clone(),
+                outcome: Ok(json!({"status": 200})),
+                completed_at_ms: None,
+            })
+            .collect::<Vec<_>>();
+        requests.extend(issued);
+        if let Some(report) = finished {
+            break report;
+        }
+        step = instance.step(ready);
+    };
+    assert_eq!(report.error, None);
+    assert_eq!(
+        report.return_value,
+        Some(json!({"checked": 2, "failed": "no"}))
+    );
+
+    // Each step's calls are its own, interleaved though the steps ran.
+    let steps_of = |url: &str| {
+        requests
+            .iter()
+            .filter(|request| request.arguments["url"].as_str().unwrap().starts_with(url))
+            .map(|request| request.step)
+            .collect::<Vec<_>>()
+    };
+    let started = |name: &str| {
+        notes
+            .iter()
+            .filter_map(|note| match &note.kind {
+                HostNoteKind::StepStarted {
+                    name: started,
+                    parent,
+                } if started == name => Some((note.seq, *parent)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let [(a, None)] = started("check a")[..] else {
+        panic!("{notes:?}")
+    };
+    let [(b, None)] = started("check b")[..] else {
+        panic!("{notes:?}")
+    };
+    let inner = started("inner");
+    assert_eq!(
+        inner.iter().map(|(_, parent)| *parent).collect::<Vec<_>>(),
+        [Some(a), Some(b)]
+    );
+    assert_eq!(steps_of("a"), [Some(a), Some(inner[0].0)]);
+    assert_eq!(steps_of("b"), [Some(b), Some(inner[1].0)]);
+    assert!(requests.iter().all(|request| {
+        request.annotation.is_some()
+            == !request.arguments["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/more")
+    }));
+
+    // Notes are numbered in order, narration sits in its step, and every
+    // step ends, the failing one too.
+    assert_eq!(
+        notes.iter().map(|note| note.seq).collect::<Vec<_>>(),
+        (1..=notes.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        notes[0].kind,
+        HostNoteKind::Said {
+            step: None,
+            text: "checking 2".to_owned()
+        }
+    );
+    assert!(notes.iter().any(|note| note.kind
+        == HostNoteKind::Said {
+            step: Some(a),
+            text: "fetched a".to_owned()
+        }));
+    let [(fails, None)] = started("fails")[..] else {
+        panic!("{notes:?}")
+    };
+    for step in [a, b, inner[0].0, inner[1].0, fails] {
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.kind == HostNoteKind::StepEnded { step }),
+            "step {step} ended: {notes:?}"
+        );
+    }
+    // A note made after calls counts them.
+    let fetched_a = notes
+        .iter()
+        .find(|note| matches!(&note.kind, HostNoteKind::Said { text, .. } if text == "fetched a"))
+        .unwrap();
+    assert!(fetched_a.after_calls >= 1);
 }

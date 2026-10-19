@@ -2164,6 +2164,16 @@ impl AgentApiService for TestService {
         }))
     }
 
+    async fn list_run_notes(
+        &self,
+        _params: RunNotesListParams,
+    ) -> Result<AgentApiOutcome<RunNotesListResponse>, AgentApiError> {
+        Ok(AgentApiOutcome::new(RunNotesListResponse {
+            notes: Vec::new(),
+            next_cursor: None,
+        }))
+    }
+
     async fn cancel_run(
         &self,
         params: RunCancelParams,

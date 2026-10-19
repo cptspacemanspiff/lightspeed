@@ -7,6 +7,7 @@ import type {
   ProgramCallCountsView,
   ProgramCallStatusView,
   ProgramCallView,
+  ProgramNoteView,
   RunStatus,
   RunSummaryView,
   SessionDriverView,
@@ -15,6 +16,7 @@ import { api } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { buildTimeline, type TimelineItem } from "@/lib/sessions/program-timeline";
 import { formatDuration } from "@/lib/sessions/transcript";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +24,9 @@ import { cn } from "@/lib/utils";
 const LIVE_REFRESH_MS = 2_000;
 const RUN_PAGE = 20;
 const CALL_PAGE = 50;
+const NOTE_PAGE = 1_000;
+/// Steps open at first when there are no more than this many side by side.
+const OPEN_STEPS = 10;
 
 type ProgramDriver = Extract<SessionDriverView, { kind: "program" }>;
 
@@ -34,6 +39,11 @@ interface CallPage {
   calls: ProgramCallView[];
   nextCursor: string | null;
   counts: ProgramCallCountsView;
+}
+
+interface NotePage {
+  notes: ProgramNoteView[];
+  nextCursor: string | null;
 }
 
 export function isProgramDriver(driver: SessionDriverView | undefined | null): driver is ProgramDriver {
@@ -387,8 +397,26 @@ function CallList({
     getNextPageParam: (page) => page.nextCursor,
     refetchInterval: live ? LIVE_REFRESH_MS : false,
   });
+  const notes = useInfiniteQuery({
+    queryKey: ["program-notes", universeId, sessionId, runId],
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam }) => {
+      const query = new URLSearchParams({ limit: String(NOTE_PAGE) });
+      if (pageParam) query.set("cursor", pageParam);
+      return api<NotePage>(
+        "GET",
+        `/api/v1/universes/${universeId}/sessions/${sessionId}/runs/${runId}/notes?${query}`,
+      );
+    },
+    getNextPageParam: (page) => page.nextCursor,
+    refetchInterval: live ? LIVE_REFRESH_MS : false,
+  });
   const counts = calls.data?.pages[0]?.counts;
   const all = calls.data?.pages.flatMap((page) => page.calls) ?? [];
+  const allNotes = notes.data?.pages.flatMap((page) => page.notes) ?? [];
+  // With every call shown and the program noting its steps, calls sit in
+  // the steps they were made in.
+  const timeline = filter === null && allNotes.length > 0 ? buildTimeline(allNotes, all) : null;
   return (
     <section aria-label="Calls" className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -407,11 +435,21 @@ function CallList({
       {calls.isLoading && <p className="text-xs text-muted-foreground">Loading calls…</p>}
       {calls.error && <p className="text-xs text-destructive">Could not read calls: {calls.error.message}</p>}
       {calls.data && all.length === 0 && <p className="text-xs text-muted-foreground">No calls.</p>}
-      <ol className="flex flex-col divide-y rounded-md border">
-        {all.map((call) => (
-          <CallRow key={call.id} call={call} slug={slug} sessionHref={sessionHref} loadFullText={loadFullText} />
-        ))}
-      </ol>
+      {timeline ? (
+        <TimelineList items={timeline} slug={slug} sessionHref={sessionHref} loadFullText={loadFullText} />
+      ) : (
+        <ol className="flex flex-col divide-y rounded-md border">
+          {all.map((call) => (
+            <CallRow key={call.id} call={call} slug={slug} sessionHref={sessionHref} loadFullText={loadFullText} />
+          ))}
+        </ol>
+      )}
+      {notes.hasNextPage && (
+        <Button variant="ghost" size="sm" className="self-start" disabled={notes.isFetchingNextPage}
+          onClick={() => void notes.fetchNextPage()}>
+          {notes.isFetchingNextPage ? "Loading…" : "More notes"}
+        </Button>
+      )}
       {calls.hasNextPage && (
         <Button variant="ghost" size="sm" className="self-start" disabled={calls.isFetchingNextPage}
           onClick={() => void calls.fetchNextPage()}>
@@ -419,6 +457,70 @@ function CallList({
         </Button>
       )}
     </section>
+  );
+}
+
+function TimelineList({
+  items,
+  slug,
+  sessionHref,
+  loadFullText,
+}: {
+  items: TimelineItem[];
+  slug: string;
+  sessionHref: (sessionId: string) => string;
+  loadFullText: (blobRef: string) => Promise<string>;
+}) {
+  const steps = items.filter((item) => item.kind === "step").length;
+  return (
+    <ol className="flex flex-col divide-y rounded-md border">
+      {items.map((item) =>
+        item.kind === "call" ? (
+          <CallRow key={item.key} call={item.call} slug={slug} sessionHref={sessionHref} loadFullText={loadFullText} />
+        ) : item.kind === "said" ? (
+          <li key={item.key} className="px-2 py-1.5 text-xs whitespace-pre-wrap text-muted-foreground" data-note={item.note.seq}>
+            {item.note.text}
+          </li>
+        ) : (
+          <StepRow key={item.key} step={item} defaultOpen={steps <= OPEN_STEPS} slug={slug}
+            sessionHref={sessionHref} loadFullText={loadFullText} />
+        ))}
+    </ol>
+  );
+}
+
+function StepRow({
+  step,
+  defaultOpen,
+  slug,
+  sessionHref,
+  loadFullText,
+}: {
+  step: Extract<TimelineItem, { kind: "step" }>;
+  defaultOpen: boolean;
+  slug: string;
+  sessionHref: (sessionId: string) => string;
+  loadFullText: (blobRef: string) => Promise<string>;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const took = step.ended ? formatDuration(Math.max(0, step.ended.recordedAtMs - step.started.recordedAtMs)) : null;
+  return (
+    <li className="flex flex-col" data-step={step.started.text}>
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
+        className="flex min-w-0 items-center gap-2 px-2 py-1.5 text-left text-xs">
+        {open ? <ChevronDown className="size-3.5 shrink-0" /> : <ChevronRight className="size-3.5 shrink-0" />}
+        <span className="min-w-0 truncate font-medium">{step.started.text}</span>
+        {took ? <span className="shrink-0 text-muted-foreground">{took}</span> : <LoaderCircle className="size-3.5 shrink-0 animate-spin" aria-label="Running" />}
+        <span className="shrink-0 text-muted-foreground">
+          {step.items.length} {step.items.length === 1 ? "item" : "items"}
+        </span>
+      </button>
+      {open && step.items.length > 0 && (
+        <div className="ml-4 border-l pb-1.5 pl-2">
+          <TimelineList items={step.items} slug={slug} sessionHref={sessionHref} loadFullText={loadFullText} />
+        </div>
+      )}
+    </li>
   );
 }
 

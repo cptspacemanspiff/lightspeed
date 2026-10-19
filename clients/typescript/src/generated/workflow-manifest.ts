@@ -106,6 +106,7 @@ export const WORKFLOW_CONTRACT_MANIFEST =
     "CloseCodeToolScopeRequest",
     "CancelCodeToolRequest",
     "CodeToolCancelOutcome",
+    "RecordCodeToolNotesRequest",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
     "ScopeRecordedOutcomesRequest",
@@ -123,7 +124,8 @@ export const WORKFLOW_CONTRACT_MANIFEST =
     "cancelCodeTool": "cancel_code_tool",
     "closeCodeToolScope": "close_code_tool_scope",
     "invokeCodeTool": "invoke_code_tool",
-    "openCodeToolScope": "open_code_tool_scope"
+    "openCodeToolScope": "open_code_tool_scope",
+    "recordCodeToolNotes": "record_code_tool_notes"
   },
   "vectors": {
     "channels": {
@@ -214,6 +216,17 @@ export const WORKFLOW_CONTRACT_MANIFEST =
         "binding_id": "binding:vector",
         "execution_id": "execution:vector",
         "request_id": "request:vector"
+      },
+      "notesRequest": {
+        "execution_id": "execution:vector",
+        "notes": [
+          {
+            "after_calls": 0,
+            "kind": "step_started",
+            "name": "check citations",
+            "seq": 1
+          }
+        ]
       },
       "openRequest": {
         "allowed_tools": [

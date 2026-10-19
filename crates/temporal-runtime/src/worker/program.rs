@@ -585,6 +585,7 @@ async fn admit_activity(
                 &descriptor,
                 request.requests,
                 request.cancels,
+                request.notes,
                 request.acknowledged,
             )
             .await

@@ -27,6 +27,7 @@ export const METHODS = [
   "session/runs/list",
   "session/runs/read",
   "session/runs/calls/list",
+  "session/runs/notes/list",
   "session/runs/cancel",
   "session/runs/approvals/decide",
   "session/runs/steer",
@@ -283,6 +284,12 @@ export const METHOD_INFO = {
     access: {"action":"read","kind":"universe"},
     summary: "List a program run's calls",
     description: "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.",
+  },
+  "session/runs/notes/list": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "List a program run's notes",
+    description: "Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.",
   },
   "session/runs/cancel": {
     scope: "universe",
@@ -1228,6 +1235,15 @@ export interface MethodMap {
   "session/runs/calls/list": {
     params: Api.RunCallsListParams;
     result: Api.AgentApiOutcomeOfRunCallsListResponse;
+  };
+  /**
+   * List a program run's notes
+   *
+   * Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.
+   */
+  "session/runs/notes/list": {
+    params: Api.RunNotesListParams;
+    result: Api.AgentApiOutcomeOfRunNotesListResponse;
   };
   /**
    * Cancel a run
@@ -2512,6 +2528,14 @@ export const rpc = {
    */
   sessionRunsCallsList(client: RpcCaller, params: Api.RunCallsListParams): Promise<Api.AgentApiOutcomeOfRunCallsListResponse> {
     return client.call("session/runs/calls/list", params);
+  },
+  /**
+   * List a program run's notes
+   *
+   * Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.
+   */
+  sessionRunsNotesList(client: RpcCaller, params: Api.RunNotesListParams): Promise<Api.AgentApiOutcomeOfRunNotesListResponse> {
+    return client.call("session/runs/notes/list", params);
   },
   /**
    * Cancel a run

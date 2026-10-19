@@ -475,6 +475,12 @@ export function sessionRoutes(store: DemoStore): Hono {
     });
   });
 
+  app.get("/:id/sessions/:sessionId/runs/:runId/notes", (c) => {
+    const found = lookup(c);
+    if (!found) return notFound(c, "not found in engine");
+    return c.json({ notes: [], nextCursor: null });
+  });
+
   app.post("/:id/sessions/:sessionId/runs/:runId/cancel", (c) => {
     const found = lookup(c);
     if (!found) return notFound(c, "not found in engine");

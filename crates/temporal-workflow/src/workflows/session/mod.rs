@@ -394,6 +394,14 @@ impl AgentSessionWorkflow {
         scoped_calls::cancel(ctx, request).await
     }
 
+    #[update(name = "record_code_tool_notes")]
+    pub async fn record_code_tool_notes(
+        ctx: &mut WorkflowContext<Self>,
+        request: crate::RecordCodeToolNotesRequest,
+    ) -> crate::CodeToolNotesResult {
+        scoped_calls::record_notes(ctx, request).await
+    }
+
     #[query(name = "code_tool_scope_report")]
     pub fn code_tool_scope_report(
         &self,

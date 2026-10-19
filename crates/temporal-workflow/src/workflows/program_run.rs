@@ -522,15 +522,22 @@ async fn run_program(
     // them: admission rejections and collected outcomes.
     let mut ready = Vec::new();
     loop {
-        let (requests, cancels, finished) = match step {
-            program_engine::Step::Waiting { requests, cancels } => (requests, cancels, None),
+        let (requests, cancels, notes, finished) = match step {
+            program_engine::Step::Waiting {
+                requests,
+                cancels,
+                notes,
+            } => (requests, cancels, notes, None),
             program_engine::Step::Finished {
                 requests,
                 cancels,
+                notes,
                 report,
-            } => (requests, cancels, Some(report)),
+            } => (requests, cancels, notes, Some(report)),
         };
-        if !requests.is_empty() || !cancels.is_empty() {
+        // A step that only noted something still sends it; a program that
+        // notes nothing sends exactly what it did before notes existed.
+        if !requests.is_empty() || !cancels.is_empty() || !notes.is_empty() {
             let admitted = cancellable(
                 ctx,
                 ctx.execute_local_activity(
@@ -539,6 +546,7 @@ async fn run_program(
                         descriptor: descriptor.clone(),
                         requests,
                         cancels,
+                        notes,
                         acknowledged: acknowledgement(ctx),
                     },
                     admission_options(),

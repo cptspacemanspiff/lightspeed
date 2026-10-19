@@ -6,10 +6,10 @@ use harness::storage::{
     SessionStoreError, StoredSessionEntry,
     program_calls::{
         ProgramCallChange, ProgramCallCounts, ProgramCallRecord, ProgramCallStatus,
-        program_call_changes,
+        ProgramNoteRecord, program_call_changes,
     },
 };
-use harness::{BlobRef, RunId, SessionId, ToolCallId};
+use harness::{BlobRef, ProgramNote, ProgramNoteKind, RunId, SessionId, ToolCallId};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
@@ -72,6 +72,7 @@ async fn apply(
             tool_name,
             arguments_ref,
             annotation,
+            step,
             seq,
             admitted_at_ms,
         } => sqlx::query(
@@ -79,9 +80,9 @@ async fn apply(
             INSERT INTO program_calls (
                 universe_id, session_id, execution_id, request_id, run_id, seq,
                 tool_call_id, binding_id, tool_id, tool_name, arguments_ref, status,
-                admitted_at_ms, annotation
+                admitted_at_ms, annotation, step
             )
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, $14
             WHERE EXISTS (
                 SELECT 1 FROM program_scopes
                 WHERE universe_id = $1 AND session_id = $2 AND execution_id = $3
@@ -101,7 +102,8 @@ async fn apply(
         .bind(tool_name)
         .bind(arguments_ref.as_str().to_owned())
         .bind(u64_to_i64(admitted_at_ms, "admitted_at_ms")?)
-        .bind(annotation),
+        .bind(annotation)
+        .bind(step.map(|step| u64_to_i64(step, "step")).transpose()?),
         ProgramCallChange::Waiting {
             execution_id,
             request_id,
@@ -160,6 +162,56 @@ async fn apply(
                 .transpose()?,
         )
         .bind(u64_to_i64(completed_at_ms, "completed_at_ms")?),
+        ProgramCallChange::NotesRecorded {
+            execution_id,
+            run_id,
+            notes,
+            seq,
+            recorded_at_ms,
+        } => {
+            for note in notes {
+                let (kind, step, parent, text) = match note.kind {
+                    ProgramNoteKind::Said { step, text } => ("said", step, None, Some(text)),
+                    ProgramNoteKind::StepStarted { parent, name } => {
+                        ("step_started", None, parent, Some(name))
+                    }
+                    ProgramNoteKind::StepEnded { step } => ("step_ended", Some(step), None, None),
+                };
+                let optional = |value: Option<u64>, name: &str| {
+                    value.map(|value| u64_to_i64(value, name)).transpose()
+                };
+                sqlx::query(
+                    r#"
+                    INSERT INTO program_notes (
+                        universe_id, session_id, execution_id, note_seq, run_id, seq, kind,
+                        step, parent, text, after_calls, recorded_at_ms
+                    )
+                    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                    WHERE EXISTS (
+                        SELECT 1 FROM program_scopes
+                        WHERE universe_id = $1 AND session_id = $2 AND execution_id = $3
+                    )
+                    ON CONFLICT DO NOTHING
+                    "#,
+                )
+                .bind(universe_id)
+                .bind(session_id)
+                .bind(&execution_id)
+                .bind(u64_to_i64(note.seq, "note seq")?)
+                .bind(u64_to_i64(run_id.as_u64(), "run id")?)
+                .bind(u64_to_i64(seq, "event sequence")?)
+                .bind(kind)
+                .bind(optional(step, "step")?)
+                .bind(optional(parent, "parent")?)
+                .bind(text)
+                .bind(u64_to_i64(note.after_calls, "after_calls")?)
+                .bind(u64_to_i64(recorded_at_ms, "recorded_at_ms")?)
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| session_sql_error("record a program note", error))?;
+            }
+            return Ok(());
+        }
         ProgramCallChange::Started {
             tool_call_id,
             started_execution_id,
@@ -196,7 +248,7 @@ impl PgStore {
             r#"
             SELECT c.execution_id, c.request_id, c.run_id, c.seq, c.tool_call_id,
                 s.contracts ->> c.binding_id AS contract, c.tool_id, c.tool_name,
-                c.arguments_ref, c.annotation, c.status, c.cancel_requested, c.output_ref,
+                c.arguments_ref, c.annotation, c.step, c.status, c.cancel_requested, c.output_ref,
                 c.error_ref,
                 c.duration_ms, c.admitted_at_ms, c.completed_at_ms, c.started_execution_id,
                 r.request_id AS input_request_id
@@ -222,6 +274,39 @@ impl PgStore {
         .await
         .map_err(|error| session_sql_error("list program calls", error))?;
         rows.iter().map(program_call_from_row).collect()
+    }
+
+    /// Up to `limit` of `run_id`'s notes after the position `after` (a
+    /// recording's log position and a note's seq), in program order.
+    pub async fn list_program_notes(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        after: Option<(u64, u64)>,
+        limit: u32,
+    ) -> Result<Vec<ProgramNoteRecord>, SessionStoreError> {
+        let (after_seq, after_note) = after.unwrap_or((0, 0));
+        let rows = sqlx::query(
+            r#"
+            SELECT execution_id, note_seq, seq, kind, step, parent, text, after_calls,
+                recorded_at_ms
+            FROM program_notes
+            WHERE universe_id = $1 AND session_id = $2 AND run_id = $3
+                AND (seq, note_seq) > ($4, $5)
+            ORDER BY seq, note_seq
+            LIMIT $6
+            "#,
+        )
+        .bind(self.config.universe_id)
+        .bind(session_id.as_str())
+        .bind(u64_to_i64(run_id.as_u64(), "run id")?)
+        .bind(u64_to_i64(after_seq, "note cursor")?)
+        .bind(u64_to_i64(after_note, "note cursor")?)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| session_sql_error("list program notes", error))?;
+        rows.iter().map(program_note_from_row).collect()
     }
 
     /// Which of `session_ids` exist (and are not deleted).
@@ -310,6 +395,11 @@ fn program_call_from_row(
         tool_name: row.try_get("tool_name").map_err(get)?,
         arguments_ref: blob(row.try_get("arguments_ref").map_err(get)?)?,
         annotation: row.try_get("annotation").map_err(get)?,
+        step: row
+            .try_get::<Option<i64>, _>("step")
+            .map_err(get)?
+            .map(|value| unsigned(value, "step"))
+            .transpose()?,
         status: parse_status(&status)?,
         cancel_requested: row.try_get("cancel_requested").map_err(get)?,
         output_ref: row
@@ -338,6 +428,44 @@ fn program_call_from_row(
             .transpose()?,
         started_execution_id: row.try_get("started_execution_id").map_err(get)?,
         input_request_id: row.try_get("input_request_id").map_err(get)?,
+    })
+}
+
+fn program_note_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ProgramNoteRecord, SessionStoreError> {
+    let get = |error: sqlx::Error| session_sql_error("decode program note", error);
+    let unsigned = |value: i64, name: &str| i64_to_u64(value, name).map_err(store_error);
+    let optional =
+        |value: Option<i64>, name: &str| value.map(|value| unsigned(value, name)).transpose();
+    let kind: String = row.try_get("kind").map_err(get)?;
+    let step = optional(row.try_get("step").map_err(get)?, "step")?;
+    let text: Option<String> = row.try_get("text").map_err(get)?;
+    let kind = match (kind.as_str(), step, text) {
+        ("said", step, Some(text)) => ProgramNoteKind::Said { step, text },
+        ("step_started", _, Some(name)) => ProgramNoteKind::StepStarted {
+            parent: optional(row.try_get("parent").map_err(get)?, "parent")?,
+            name,
+        },
+        ("step_ended", Some(step), _) => ProgramNoteKind::StepEnded { step },
+        _ => {
+            return Err(SessionStoreError::Store {
+                message: format!("invalid program note of kind {kind}"),
+            });
+        }
+    };
+    Ok(ProgramNoteRecord {
+        execution_id: row.try_get("execution_id").map_err(get)?,
+        seq: unsigned(row.try_get("seq").map_err(get)?, "seq")?,
+        note: ProgramNote {
+            seq: unsigned(row.try_get("note_seq").map_err(get)?, "note_seq")?,
+            after_calls: unsigned(row.try_get("after_calls").map_err(get)?, "after_calls")?,
+            kind,
+        },
+        recorded_at_ms: unsigned(
+            row.try_get("recorded_at_ms").map_err(get)?,
+            "recorded_at_ms",
+        )?,
     })
 }
 

@@ -298,6 +298,19 @@ Returns a page of the calls a program run made, in the order they were admitted,
 - Params: `RunCallsListParams`
 - Result: `AgentApiOutcome<RunCallsListResponse>`
 
+### `session/runs/notes/list`
+
+**List a program run's notes**
+
+Returns a page of what a program run said about its work, in program order: narration (ctx.say) and the steps (ctx.step) it began and ended, each placed among the run's calls by how many came before it. A call made in a step names it. Follow nextCursor for the next page; a run still going may add notes after the last page.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `session`
+- Role: `viewer`
+- Target: `sessionId`
+- Params: `RunNotesListParams`
+- Result: `AgentApiOutcome<RunNotesListResponse>`
+
 ### `session/runs/cancel`
 
 **Cancel a run**

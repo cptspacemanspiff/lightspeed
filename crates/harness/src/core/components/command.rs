@@ -131,6 +131,12 @@ pub enum CoreAgentCommand {
         execution_id: String,
         target: crate::CodeToolCancelTarget,
     },
+    /// A program's notes on its work (`ctx.say`, `ctx.step`). Notes sent
+    /// again record nothing.
+    RecordCodeToolNotes {
+        execution_id: String,
+        notes: Vec<crate::ProgramNote>,
+    },
     /// Terminal push-delivery failure for one promise-bearing workflow-tool
     /// invocation: atomically records `WorkflowTool::DeliveryFailed` and
     /// fails every still-pending completion promise of that invocation, so a

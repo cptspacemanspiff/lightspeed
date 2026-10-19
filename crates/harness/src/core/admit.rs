@@ -72,6 +72,11 @@ pub fn admit_command(
             target,
         } => crate::cancel_code_tool_proposals(state, &execution_id, &target)
             .map_err(command_rejection_from_domain),
+        CoreAgentCommand::RecordCodeToolNotes {
+            execution_id,
+            notes,
+        } => crate::record_code_tool_notes_proposals(state, &execution_id, notes)
+            .map_err(command_rejection_from_domain),
         CoreAgentCommand::SeedProgramContext { context } => {
             crate::core::components::program::seed_program_context_proposals(state, context)
                 .map_err(command_rejection_from_domain)

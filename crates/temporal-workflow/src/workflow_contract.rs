@@ -43,7 +43,7 @@ pub const WORKFLOW_CONTRACT_VERSION: u32 = 2;
 pub const DELIVER_EMISSION_SIGNAL: &str = "deliver_emission";
 
 /// Root types of the schema bundle; everything else is reachable from them.
-pub const WORKFLOW_CONTRACT_ROOTS: [&str; 26] = [
+pub const WORKFLOW_CONTRACT_ROOTS: [&str; 27] = [
     "EmissionEnvelope",
     "WorkflowToolStartArgs",
     "WorkflowToolRecoveryResult",
@@ -61,6 +61,7 @@ pub const WORKFLOW_CONTRACT_ROOTS: [&str; 26] = [
     "CloseCodeToolScopeRequest",
     "CancelCodeToolRequest",
     "CodeToolCancelOutcome",
+    "RecordCodeToolNotesRequest",
     "CodeToolScopeReportRequest",
     "CodeToolScopeReport",
     "ScopeRecordedOutcomesRequest",
@@ -101,6 +102,7 @@ pub fn export() -> ExportedWorkflowContract {
     let _ = generator.subschema_for::<crate::CloseCodeToolScopeRequest>();
     let _ = generator.subschema_for::<crate::CancelCodeToolRequest>();
     let _ = generator.subschema_for::<crate::CodeToolCancelOutcome>();
+    let _ = generator.subschema_for::<crate::RecordCodeToolNotesRequest>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReportRequest>();
     let _ = generator.subschema_for::<crate::CodeToolScopeReport>();
     let _ = generator.subschema_for::<crate::ScopeRecordedOutcomesRequest>();
@@ -155,6 +157,7 @@ fn manifest() -> Value {
             "invokeCodeTool": crate::INVOKE_CODE_TOOL_UPDATE,
             "closeCodeToolScope": crate::CLOSE_CODE_TOOL_SCOPE_UPDATE,
             "cancelCodeTool": crate::CANCEL_CODE_TOOL_UPDATE,
+            "recordCodeToolNotes": crate::RECORD_CODE_TOOL_NOTES_UPDATE,
         },
         "workflowTools": {
             "executionKind": WORKFLOW_TOOL_EXECUTION_KIND,
@@ -390,7 +393,8 @@ fn code_tool_vectors() -> Value {
         CancelCodeToolRequest, CloseCodeToolScopeRequest, CodeToolCallOutcome, CodeToolCallStatus,
         CodeToolCancelOutcome, CodeToolCancelStatus, CodeToolRejection, CodeToolRejectionKind,
         CodeToolScopeReport, CodeToolScopeReportRequest, InvokeCodeToolRequest,
-        OpenCodeToolScopeRequest, ScopeRecordedOutcomes, ScopeRecordedOutcomesRequest,
+        OpenCodeToolScopeRequest, RecordCodeToolNotesRequest, ScopeRecordedOutcomes,
+        ScopeRecordedOutcomesRequest,
     };
 
     let invocation = WorkflowToolInvocationId::new(format!("wti:sha256:{}", "a".repeat(64)));
@@ -423,6 +427,7 @@ fn code_tool_vectors() -> Value {
             arguments_ref: BlobRef::from_bytes(b"{\"path\":\"note.txt\"}"),
             acknowledged: None,
             annotation: None,
+            step: None,
         },
         "closeRequest": CloseCodeToolScopeRequest {
             execution_id: execution_id.clone(),
@@ -435,6 +440,17 @@ fn code_tool_vectors() -> Value {
             target: harness::CodeToolCancelTarget::Call { request_id: request_id.clone() },
         },
         "cancelOutcome": CodeToolCancelOutcome { status: CodeToolCancelStatus::Requested },
+        "notesRequest": RecordCodeToolNotesRequest {
+            execution_id: execution_id.clone(),
+            notes: vec![harness::ProgramNote {
+                seq: 1,
+                after_calls: 0,
+                kind: harness::ProgramNoteKind::StepStarted {
+                    parent: None,
+                    name: "check citations".to_owned(),
+                },
+            }],
+        },
         "reportRequest": CodeToolScopeReportRequest { execution_id: execution_id.clone() },
         "recordedOutcomesRequest": ScopeRecordedOutcomesRequest {
             execution_id: execution_id.clone(),
@@ -597,6 +613,10 @@ and resending it is safe. The target still records exactly one outcome, which
 is its result if that came first; the reply's `CodeToolCancelOutcome` status
 (`requested`, `cancelled`, `resolved` or `failed`) is read after the cancel is
 recorded and is for logging, not for deciding what happened.
+`{record_notes}` accepts `RecordCodeToolNotesRequest`: a program run's notes
+on its work (narration, steps begun and ended), numbered per execution from 1.
+Notes already recorded are skipped, so resending is safe; the rest must follow
+the last one recorded.
 Read `{scope_report}` with `CodeToolScopeReportRequest` for a fresh authoritative
 snapshot, including results that finish after scope closure. Reports contain
 result references and attachments, never raw session effects or model context.
@@ -624,6 +644,7 @@ are: {roots}.
         invoke = crate::INVOKE_CODE_TOOL_UPDATE,
         close_scope = crate::CLOSE_CODE_TOOL_SCOPE_UPDATE,
         cancel = crate::CANCEL_CODE_TOOL_UPDATE,
+        record_notes = crate::RECORD_CODE_TOOL_NOTES_UPDATE,
         scope_report = crate::CODE_TOOL_SCOPE_REPORT_QUERY,
         recorded_outcomes = crate::SCOPE_RECORDED_OUTCOMES_QUERY,
         definition_count = definitions.len(),

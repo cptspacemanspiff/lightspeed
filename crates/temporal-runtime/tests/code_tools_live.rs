@@ -73,7 +73,7 @@ async fn code_tool_updates_execute_parallel_dependent_joined_and_submit_wait_cal
         let malformed = fixture.invoke("invalid-await", "await", json!({"promises":["promise_999999999"],"mode":"all","timeout_ms":1000})).await?;
         assert_eq!(malformed.status, CodeToolCallStatus::Failed, "a bad promise wait fails only its code tool call");
         let denied = InvokeCodeToolRequest { execution_id: fixture.execution_id.clone(), request_id: "guessed".to_owned(),
-            binding_id: "guessed-admin-tool".to_owned(), arguments_ref: BlobRef::from_bytes(b"{}"), acknowledged: None, annotation: None };
+            binding_id: "guessed-admin-tool".to_owned(), arguments_ref: BlobRef::from_bytes(b"{}"), acknowledged: None, annotation: None, step: None };
         assert_eq!(fixture.bridge.invoke(denied, Default::default()).await?.unwrap_err().kind, CodeToolRejectionKind::PermissionDenied);
         let report = fixture.bridge.close_scope(CloseCodeToolScopeRequest { execution_id: fixture.execution_id.clone(), cancel_pending: false, program_context: None, acknowledged: None }, Default::default()).await??;
         assert!(report.closed);
