@@ -2044,6 +2044,7 @@ export function SessionDetail({
           runRevision={runRevision}
           canControl={canControl}
           closed={closed}
+          parentSessionId={session.data.origin?.parentSessionId}
           sessionHref={sessionHref ?? ((target) => `/u/${slug}/sessions/${target}`)}
           loadFullText={loadFullText}
         />

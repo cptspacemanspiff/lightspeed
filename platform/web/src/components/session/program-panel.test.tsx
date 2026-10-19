@@ -113,7 +113,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(canControl = true) {
+async function render(canControl = true, parentSessionId?: string) {
   const loadFullText = vi.fn(async (blobRef: string) =>
     blobRef === "sha256:output" ? '{"verdict":"supported"}' : '{"claim":"sky"}');
   await act(async () => {
@@ -128,6 +128,7 @@ async function render(canControl = true) {
             runRevision={0}
             canControl={canControl}
             closed={false}
+            parentSessionId={parentSessionId}
             sessionHref={(id) => `/u/test/sessions/${id}`}
             loadFullText={loadFullText}
           />
@@ -211,6 +212,13 @@ it("starts a run from JSON input and refuses text that is not JSON", async () =>
   await submit();
   await waitForUi(() => expect(posted).toHaveLength(1));
   expect(posted[0]).toMatchObject({ input: { claim: "sky" }, submissionId: expect.any(String) });
+});
+
+it("offers no run form on a sub-program and points to its parent", async () => {
+  await render(true, "parent");
+  await waitForUi(() => expect(container.querySelectorAll("[data-run]")).toHaveLength(2));
+  expect(container.querySelector("textarea")).toBeNull();
+  expect(container.querySelector('a[href="/u/test/sessions/parent"]')?.textContent).toBe("its parent");
 });
 
 it("offers no run form to a reader", async () => {

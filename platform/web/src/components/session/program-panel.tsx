@@ -66,6 +66,7 @@ export function ProgramPanel({
   runRevision,
   canControl,
   closed,
+  parentSessionId,
   sessionHref,
   loadFullText,
 }: {
@@ -77,6 +78,9 @@ export function ProgramPanel({
   runRevision: number;
   canControl: boolean;
   closed: boolean;
+  /// Set for a sub-program: its parent started its one run, so the panel
+  /// offers no run form.
+  parentSessionId?: string | null;
   sessionHref: (sessionId: string) => string;
   loadFullText: (blobRef: string) => Promise<string>;
 }) {
@@ -113,7 +117,13 @@ export function ProgramPanel({
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 md:px-8">
         <ProgramHeader driver={driver} loadFullText={loadFullText} />
-        {canControl && !closed && (
+        {parentSessionId ? (
+          <p className="text-sm text-muted-foreground">
+            A sub-program runs once, with the input{" "}
+            <Link to={sessionHref(parentSessionId)} className="text-primary underline underline-offset-4">its parent</Link>{" "}
+            gave it; start runs from the parent.
+          </p>
+        ) : canControl && !closed && (
           <StartRunForm
             universeId={universeId}
             sessionId={sessionId}
