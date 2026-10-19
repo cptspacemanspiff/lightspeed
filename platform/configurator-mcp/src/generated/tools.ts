@@ -3808,6 +3808,80 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_session_runs_calls_list",
+    "method": "session/runs/calls/list",
+    "group": "session",
+    "summary": "List a program run's calls",
+    "description": "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.",
+    "paramsType": "RunCallsListParams",
+    "resultType": "AgentApiOutcome<RunCallsListResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "A page of a program run's calls, in the order they were admitted.",
+      "properties": {
+        "cursor": {
+          "description": "Continue after a previous page's `nextCursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Calls per page: 50 when omitted, at most 200.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProgramCallStatusView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only calls in this status."
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId"
+      ],
+      "type": "object",
+      "definitions": {
+        "ProgramCallStatusView": {
+          "description": "Where a program call stands.",
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "waiting",
+              "description": "Waiting for an approval decision.",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
     "name": "lightspeed_session_runs_cancel",
     "method": "session/runs/cancel",
     "group": "session",

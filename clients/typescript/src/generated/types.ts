@@ -1756,6 +1756,13 @@ export type ApprovalDecisionFailureKind =
  */
 export type ApprovalDecisionStatus = "decided" | "failed";
 /**
+ * Where a program call stands.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramCallStatusView".
+ */
+export type ProgramCallStatusView = ("pending" | "succeeded" | "failed" | "cancelled") | "waiting";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SkillCatalogAvailability".
  */
@@ -6480,6 +6487,107 @@ export interface ApprovalDecisionFailure {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfRunCallsListResponse".
+ */
+export interface AgentApiOutcomeOfRunCallsListResponse {
+  notifications?: AgentNotification[];
+  result: RunCallsListResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunCallsListResponse".
+ */
+export interface RunCallsListResponse {
+  calls?: ProgramCallView[];
+  /**
+   * The run's calls by status, across every page.
+   */
+  counts: ProgramCallCountsView;
+  /**
+   * Present when more calls follow; a run still going may add more.
+   */
+  nextCursor?: string | null;
+}
+/**
+ * One call a program run made.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramCallView".
+ */
+export interface ProgramCallView {
+  admittedAtMs: number;
+  arguments: ContentPreviewView;
+  /**
+   * The program asked to cancel it.
+   */
+  cancelRequested?: boolean;
+  /**
+   * The child session a child agent or program call started.
+   */
+  childSessionId?: string | null;
+  completedAtMs?: number | null;
+  /**
+   * The contract the program called, such as `web.fetch`.
+   */
+  contract?: string | null;
+  /**
+   * How long the tool itself ran, as its runtime measured it.
+   */
+  durationMs?: number | null;
+  error?: ContentPreviewView | null;
+  /**
+   * The run's execution that made it: 0, then one more after each
+   * `ctx.continueAsNew`.
+   */
+  execution: number;
+  /**
+   * The call's id in the session log (event joins' `toolCallId`).
+   */
+  id: string;
+  /**
+   * The inbox request a question or an approval opened.
+   */
+  inputRequestId?: string | null;
+  output?: ContentPreviewView | null;
+  /**
+   * The program's request id within that execution, `call-N`.
+   */
+  requestId: string;
+  status: ProgramCallStatusView;
+  /**
+   * The session tool that served it.
+   */
+  tool: string;
+}
+/**
+ * A stored value: its content reference and the start of its text.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ContentPreviewView".
+ */
+export interface ContentPreviewView {
+  contentRef: string;
+  /**
+   * The first `CONTENT_PREVIEW_BYTES` of its text; read the blob for the
+   * rest.
+   */
+  preview: string;
+  previewTruncated?: boolean;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramCallCountsView".
+ */
+export interface ProgramCallCountsView {
+  cancelled: number;
+  failed: number;
+  pending: number;
+  succeeded: number;
+  total: number;
+  waiting: number;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentApiOutcomeOfRunCancelResponse".
  */
 export interface AgentApiOutcomeOfRunCancelResponse {
@@ -8548,6 +8656,28 @@ export interface RunApprovalsDecideParams {
   decisions: ApprovalDecisionInput[];
   runId: string;
   sessionId: string;
+}
+/**
+ * A page of a program run's calls, in the order they were admitted.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunCallsListParams".
+ */
+export interface RunCallsListParams {
+  /**
+   * Continue after a previous page's `nextCursor`.
+   */
+  cursor?: string | null;
+  /**
+   * Calls per page: 50 when omitted, at most 200.
+   */
+  limit?: number | null;
+  runId: string;
+  sessionId: string;
+  /**
+   * Only calls in this status.
+   */
+  status?: ProgramCallStatusView | null;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

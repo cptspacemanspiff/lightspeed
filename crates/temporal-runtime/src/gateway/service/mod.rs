@@ -25,6 +25,7 @@ mod models_api;
 mod oauth_api;
 mod parse;
 mod profiles;
+mod program_calls_api;
 mod transcriptions;
 pub(crate) use crate::environments::provider_controllers;
 mod session_jobs;
@@ -2182,6 +2183,13 @@ impl AgentApiService for GatewayAgentApi {
         params: api::InboxRequestListParams,
     ) -> Result<AgentApiOutcome<api::InboxRequestListResponse>, AgentApiError> {
         self.list_inbox_requests_impl(params).await
+    }
+
+    async fn list_run_calls(
+        &self,
+        params: api::RunCallsListParams,
+    ) -> Result<AgentApiOutcome<api::RunCallsListResponse>, AgentApiError> {
+        self.list_run_calls_impl(params).await
     }
 
     async fn read_inbox_request(

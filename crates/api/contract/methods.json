@@ -526,6 +526,31 @@
     },
     {
       "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.",
+      "group": "session",
+      "method": "session/runs/calls/list",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/RunCallsListParams"
+        },
+        "type": "RunCallsListParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfRunCallsListResponse"
+        },
+        "type": "AgentApiOutcome<RunCallsListResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "List a program run's calls",
+      "target": "sessionId"
+    },
+    {
+      "access": {
         "action": "stop_session",
         "kind": "universe"
       },

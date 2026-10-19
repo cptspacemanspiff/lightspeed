@@ -26,6 +26,7 @@ export const METHODS = [
   "session/runs/start",
   "session/runs/list",
   "session/runs/read",
+  "session/runs/calls/list",
   "session/runs/cancel",
   "session/runs/approvals/decide",
   "session/runs/steer",
@@ -276,6 +277,12 @@ export const METHOD_INFO = {
     access: {"action":"read","kind":"universe"},
     summary: "Read one session run",
     description: "Reads and projects one run from its bounded event interval, paged by event sequence.",
+  },
+  "session/runs/calls/list": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "List a program run's calls",
+    description: "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.",
   },
   "session/runs/cancel": {
     scope: "universe",
@@ -1212,6 +1219,15 @@ export interface MethodMap {
   "session/runs/read": {
     params: Api.RunReadParams;
     result: Api.AgentApiOutcomeOfRunReadResponse;
+  };
+  /**
+   * List a program run's calls
+   *
+   * Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.
+   */
+  "session/runs/calls/list": {
+    params: Api.RunCallsListParams;
+    result: Api.AgentApiOutcomeOfRunCallsListResponse;
   };
   /**
    * Cancel a run
@@ -2488,6 +2504,14 @@ export const rpc = {
    */
   sessionRunsRead(client: RpcCaller, params: Api.RunReadParams): Promise<Api.AgentApiOutcomeOfRunReadResponse> {
     return client.call("session/runs/read", params);
+  },
+  /**
+   * List a program run's calls
+   *
+   * Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.
+   */
+  sessionRunsCallsList(client: RpcCaller, params: Api.RunCallsListParams): Promise<Api.AgentApiOutcomeOfRunCallsListResponse> {
+    return client.call("session/runs/calls/list", params);
   },
   /**
    * Cancel a run

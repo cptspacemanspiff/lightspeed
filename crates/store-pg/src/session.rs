@@ -131,6 +131,13 @@ impl PgStore {
         embedded
             .record_roots(&mut tx, self.config.universe_id, &request.session_id)
             .await?;
+        crate::program_calls::index_program_calls(
+            &mut tx,
+            self.config.universe_id,
+            &request.session_id,
+            &committed,
+        )
+        .await?;
 
         if let Some(last) = committed.last() {
             record.updated_at_ms = last.observed_at_ms;
@@ -1629,6 +1636,8 @@ async fn append_events_in_tx(
     }
     embedded
         .record_roots(tx, universe_id, &record.session_id)
+        .await?;
+    crate::program_calls::index_program_calls(tx, universe_id, &record.session_id, &committed)
         .await?;
 
     if let Some(last) = committed.last() {

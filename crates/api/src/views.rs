@@ -80,6 +80,83 @@ pub struct RunSummaryView {
     pub failure: Option<RunFailureView>,
 }
 
+/// One call a program run made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramCallView {
+    /// The call's id in the session log (event joins' `toolCallId`).
+    pub id: String,
+    /// The run's execution that made it: 0, then one more after each
+    /// `ctx.continueAsNew`.
+    pub execution: u32,
+    /// The program's request id within that execution, `call-N`.
+    pub request_id: String,
+    /// The contract the program called, such as `web.fetch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    /// The session tool that served it.
+    pub tool: String,
+    pub status: ProgramCallStatusView,
+    /// The program asked to cancel it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
+    pub arguments: ContentPreviewView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<ContentPreviewView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ContentPreviewView>,
+    pub admitted_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+    /// How long the tool itself ran, as its runtime measured it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The child session a child agent or program call started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<SessionId>,
+    /// The inbox request a question or an approval opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_request_id: Option<String>,
+}
+
+/// Where a program call stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgramCallStatusView {
+    Pending,
+    /// Waiting for an approval decision.
+    Waiting,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramCallCountsView {
+    pub total: u64,
+    pub pending: u64,
+    pub waiting: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
+/// A stored value: its content reference and the start of its text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPreviewView {
+    pub content_ref: String,
+    /// The first `CONTENT_PREVIEW_BYTES` of its text; read the blob for the
+    /// rest.
+    pub preview: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview_truncated: bool,
+}
+
+/// How much of a stored value a preview carries.
+pub const CONTENT_PREVIEW_BYTES: usize = 512;
+
 /// How much of a failure message a run summary carries.
 pub const RUN_SUMMARY_FAILURE_MESSAGE_BYTES: usize = 1_000;
 

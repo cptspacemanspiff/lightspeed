@@ -1107,6 +1107,25 @@ async fn a_program_waits_for_a_human_answer_and_catches_an_expired_request() -> 
             );
             assert_eq!(output["answer"]["comment"], json!("lgtm"), "{output}");
             assert!(output["answer"]["answered_by"].is_string(), "{output}");
+            // The run's call names the inbox request it opened.
+            let calls = api
+                .list_run_calls(api::RunCallsListParams {
+                    session_id: session_id.to_string(),
+                    run_id: run.id.clone(),
+                    cursor: None,
+                    limit: None,
+                    status: None,
+                })
+                .await?
+                .result
+                .calls;
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            assert_eq!(calls[0].contract.as_deref(), Some("input.request"));
+            assert_eq!(
+                calls[0].input_request_id.as_deref(),
+                Some(request.request_id.as_str())
+            );
+            assert_eq!(calls[0].child_session_id, None);
             assert_eq!(
                 scoped_call_tools(&store, &session_id).await?,
                 vec!["input.request"]
@@ -3649,6 +3668,33 @@ async fn a_program_continues_as_new_and_each_execution_starts_from_its_state() -
                         "distinctDraws": 3,
                     })
                 );
+                // The run's calls list across its executions.
+                let calls = api
+                    .list_run_calls(api::RunCallsListParams {
+                        session_id: session_id.to_string(),
+                        run_id: run.id.clone(),
+                        cursor: None,
+                        limit: None,
+                        status: None,
+                    })
+                    .await?
+                    .result
+                    .calls;
+                assert_eq!(
+                    calls
+                        .iter()
+                        .map(|call| (
+                            call.execution,
+                            call.request_id.as_str(),
+                            call.contract.as_deref()
+                        ))
+                        .collect::<Vec<_>>(),
+                    [
+                        (0, "call-1", Some("time.sleep")),
+                        (1, "call-1", Some("time.sleep")),
+                        (2, "call-1", Some("time.sleep")),
+                    ]
+                );
 
                 // The run is one workflow id; its third execution continued
                 // the second, and replays from its own history.
@@ -4224,6 +4270,90 @@ async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Res
                     "subagent.run",
                 ]
             );
+
+            // The run's calls, a page at a time, in the order the program made
+            // them, each with what it started.
+            let list = |cursor: Option<String>| {
+                api.list_run_calls(api::RunCallsListParams {
+                    session_id: session_id.to_string(),
+                    run_id: run.id.clone(),
+                    cursor,
+                    limit: Some(4),
+                    status: None,
+                })
+            };
+            let first = list(None).await?.result;
+            assert_eq!(
+                first.counts,
+                api::ProgramCallCountsView {
+                    total: 6,
+                    succeeded: 4,
+                    failed: 2,
+                    ..Default::default()
+                }
+            );
+            let second = list(Some(first.next_cursor.clone().expect("a second page")))
+                .await?
+                .result;
+            assert_eq!(second.next_cursor, None);
+            let calls = first.calls.iter().chain(&second.calls).collect::<Vec<_>>();
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|call| (call.contract.as_deref(), call.status))
+                    .collect::<Vec<_>>(),
+                [
+                    (Some("agent.run"), api::ProgramCallStatusView::Succeeded),
+                    (Some("agent.run"), api::ProgramCallStatusView::Succeeded),
+                    (Some("agent.spawn"), api::ProgramCallStatusView::Succeeded),
+                    (Some("promise.await"), api::ProgramCallStatusView::Succeeded),
+                    (Some("agent.run"), api::ProgramCallStatusView::Failed),
+                    (Some("agent.run"), api::ProgramCallStatusView::Failed),
+                ]
+            );
+            assert!(
+                calls[0].arguments.preview.contains("CHECK"),
+                "{:?}",
+                calls[0]
+            );
+            assert!(
+                calls[0]
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| output.preview.contains("checked"))
+            );
+            // Every child call names its child; the refused one never had one.
+            let children = calls
+                .iter()
+                .filter_map(|call| call.child_session_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(children.len(), 4, "{calls:?}");
+            for child in &children {
+                let child = api
+                    .read_session(api::SessionReadParams {
+                        session_id: child.clone(),
+                        run_limit: None,
+                    })
+                    .await?
+                    .result
+                    .session;
+                assert_eq!(
+                    child.origin.map(|origin| origin.parent_session_id),
+                    Some(session_id.to_string())
+                );
+            }
+            let failed = api
+                .list_run_calls(api::RunCallsListParams {
+                    session_id: session_id.to_string(),
+                    run_id: run.id.clone(),
+                    cursor: None,
+                    limit: None,
+                    status: Some(api::ProgramCallStatusView::Failed),
+                })
+                .await?
+                .result;
+            assert_eq!(failed.calls.len(), 2);
+            assert!(failed.calls.iter().all(|call| call.error.is_some()));
 
             let _ = api
                 .close_session(api::SessionCloseParams {

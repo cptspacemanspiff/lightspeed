@@ -37,6 +37,7 @@ pub const METHOD_SESSION_CONTEXT_COMPACT: &str = "session/context/compact";
 pub const METHOD_SESSION_RUNS_START: &str = "session/runs/start";
 pub const METHOD_SESSION_RUNS_LIST: &str = "session/runs/list";
 pub const METHOD_SESSION_RUNS_READ: &str = "session/runs/read";
+pub const METHOD_SESSION_RUNS_CALLS_LIST: &str = "session/runs/calls/list";
 pub const METHOD_SESSION_RUNS_CANCEL: &str = "session/runs/cancel";
 pub const METHOD_SESSION_RUNS_APPROVALS_DECIDE: &str = "session/runs/approvals/decide";
 pub const METHOD_SESSION_RUNS_STEER: &str = "session/runs/steer";

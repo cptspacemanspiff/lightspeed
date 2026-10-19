@@ -42,6 +42,35 @@ pub struct RunListResponse {
     pub has_older_runs: bool,
 }
 
+/// A page of a program run's calls, in the order they were admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCallsListParams {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    /// Continue after a previous page's `nextCursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Calls per page: 50 when omitted, at most 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Only calls in this status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProgramCallStatusView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCallsListResponse {
+    #[serde(default)]
+    pub calls: Vec<ProgramCallView>,
+    /// Present when more calls follow; a run still going may add more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The run's calls by status, across every page.
+    pub counts: ProgramCallCountsView,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunReadParams {

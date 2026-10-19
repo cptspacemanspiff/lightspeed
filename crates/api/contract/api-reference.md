@@ -285,6 +285,19 @@ Reads and projects one run from its bounded event interval, paged by event seque
 - Params: `RunReadParams`
 - Result: `AgentApiOutcome<RunReadResponse>`
 
+### `session/runs/calls/list`
+
+**List a program run's calls**
+
+Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `session`
+- Role: `viewer`
+- Target: `sessionId`
+- Params: `RunCallsListParams`
+- Result: `AgentApiOutcome<RunCallsListResponse>`
+
 ### `session/runs/cancel`
 
 **Cancel a run**

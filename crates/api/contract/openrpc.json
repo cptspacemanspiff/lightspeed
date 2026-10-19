@@ -1968,6 +1968,23 @@
         ],
         "type": "object"
       },
+      "AgentApiOutcomeOfRunCallsListResponse": {
+        "properties": {
+          "notifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotification"
+            },
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/RunCallsListResponse"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object"
+      },
       "AgentApiOutcomeOfRunCancelResponse": {
         "properties": {
           "notifications": {
@@ -7591,6 +7608,26 @@
             "type": "object"
           }
         ]
+      },
+      "ContentPreviewView": {
+        "description": "A stored value: its content reference and the start of its text.",
+        "properties": {
+          "contentRef": {
+            "type": "string"
+          },
+          "preview": {
+            "description": "The first `CONTENT_PREVIEW_BYTES` of its text; read the blob for the\nrest.",
+            "type": "string"
+          },
+          "previewTruncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contentRef",
+          "preview"
+        ],
+        "type": "object"
       },
       "ContentRefView": {
         "description": "Immutable content and its encoding. A reference can name plain text,\nprovider-native JSON, or media; it does not imply a UTF-8 text payload.",
@@ -13755,6 +13792,174 @@
         },
         "type": "object"
       },
+      "ProgramCallCountsView": {
+        "properties": {
+          "cancelled": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failed": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pending": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "succeeded": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "waiting": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "pending",
+          "waiting",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "type": "object"
+      },
+      "ProgramCallStatusView": {
+        "description": "Where a program call stands.",
+        "oneOf": [
+          {
+            "enum": [
+              "pending",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "waiting",
+            "description": "Waiting for an approval decision.",
+            "type": "string"
+          }
+        ]
+      },
+      "ProgramCallView": {
+        "description": "One call a program run made.",
+        "properties": {
+          "admittedAtMs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "arguments": {
+            "$ref": "#/components/schemas/ContentPreviewView"
+          },
+          "cancelRequested": {
+            "description": "The program asked to cancel it.",
+            "type": "boolean"
+          },
+          "childSessionId": {
+            "description": "The child session a child agent or program call started.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completedAtMs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "contract": {
+            "description": "The contract the program called, such as `web.fetch`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "description": "How long the tool itself ran, as its runtime measured it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentPreviewView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "description": "The run's execution that made it: 0, then one more after each\n`ctx.continueAsNew`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "The call's id in the session log (event joins' `toolCallId`).",
+            "type": "string"
+          },
+          "inputRequestId": {
+            "description": "The inbox request a question or an approval opened.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentPreviewView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestId": {
+            "description": "The program's request id within that execution, `call-N`.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProgramCallStatusView"
+          },
+          "tool": {
+            "description": "The session tool that served it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "execution",
+          "requestId",
+          "tool",
+          "status",
+          "arguments",
+          "admittedAtMs"
+        ],
+        "type": "object"
+      },
       "ProgramContractRequirement": {
         "additionalProperties": false,
         "description": "One tool contract a program calls.",
@@ -14129,6 +14334,79 @@
         "required": [
           "results",
           "run"
+        ],
+        "type": "object"
+      },
+      "RunCallsListParams": {
+        "description": "A page of a program run's calls, in the order they were admitted.",
+        "properties": {
+          "cursor": {
+            "description": "Continue after a previous page's `nextCursor`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Calls per page: 50 when omitted, at most 200.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgramCallStatusView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only calls in this status."
+          }
+        },
+        "required": [
+          "sessionId",
+          "runId"
+        ],
+        "type": "object"
+      },
+      "RunCallsListResponse": {
+        "properties": {
+          "calls": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProgramCallView"
+            },
+            "type": "array"
+          },
+          "counts": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProgramCallCountsView"
+              }
+            ],
+            "description": "The run's calls by status, across every page."
+          },
+          "nextCursor": {
+            "description": "Present when more calls follow; a run still going may add more.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "counts"
         ],
         "type": "object"
       },
@@ -20454,6 +20732,34 @@
         }
       },
       "summary": "Read one session run",
+      "x-lightspeed-access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "x-lightspeed-group": "session",
+      "x-lightspeed-role": "viewer",
+      "x-lightspeed-target": "sessionId"
+    },
+    {
+      "description": "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page.",
+      "name": "session/runs/calls/list",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/RunCallsListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/AgentApiOutcomeOfRunCallsListResponse"
+        }
+      },
+      "summary": "List a program run's calls",
       "x-lightspeed-access": {
         "action": "read",
         "kind": "universe"

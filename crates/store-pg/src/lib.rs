@@ -21,6 +21,7 @@ mod model_defaults;
 mod oauth;
 mod object;
 mod profile;
+mod program_calls;
 mod providers;
 mod session;
 pub use session::PurgeSessionError;

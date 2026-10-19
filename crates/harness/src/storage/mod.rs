@@ -6,6 +6,7 @@
 //! durability model.
 
 pub mod blobs;
+pub mod program_calls;
 pub mod session;
 
 pub use crate::session::{

@@ -203,6 +203,11 @@ pub trait AgentApiService: Send + Sync {
         params: RunReadParams,
     ) -> Result<AgentApiOutcome<RunReadResponse>, AgentApiError>;
 
+    async fn list_run_calls(
+        &self,
+        params: RunCallsListParams,
+    ) -> Result<AgentApiOutcome<RunCallsListResponse>, AgentApiError>;
+
     async fn cancel_run(
         &self,
         params: RunCancelParams,

@@ -2153,6 +2153,17 @@ impl AgentApiService for TestService {
         }))
     }
 
+    async fn list_run_calls(
+        &self,
+        _params: RunCallsListParams,
+    ) -> Result<AgentApiOutcome<RunCallsListResponse>, AgentApiError> {
+        Ok(AgentApiOutcome::new(RunCallsListResponse {
+            calls: Vec::new(),
+            next_cursor: None,
+            counts: ProgramCallCountsView::default(),
+        }))
+    }
+
     async fn cancel_run(
         &self,
         params: RunCancelParams,

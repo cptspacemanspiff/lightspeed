@@ -374,6 +374,8 @@ api_methods! {
         ["List session runs", "Returns a newest-first keyset page of bounded run summaries projected from current reducer state."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_SESSION_RUNS_READ => read_run(RunReadParams) -> RunReadResponse =>
         ["Read one session run", "Reads and projects one run from its bounded event interval, paged by event sequence."], access: MethodAccess::Universe(UniverseAction::Read),
+    METHOD_SESSION_RUNS_CALLS_LIST => list_run_calls(RunCallsListParams) -> RunCallsListResponse =>
+        ["List a program run's calls", "Returns a page of the calls a program run made, in the order they were admitted, with argument, output and error previews, the child session or inbox request a call started, and the run's call counts by status. Follow nextCursor for the next page; a run still going may add calls after the last page."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_SESSION_RUNS_CANCEL => cancel_run(RunCancelParams) -> RunCancelResponse =>
         ["Cancel a run", "Requests cancellation of the named queued or active run and returns its current projected state; observe session events for terminal completion. In-flight model and tool activity is aborted; no grace turn runs."], access: MethodAccess::Universe(UniverseAction::StopSession),
     METHOD_SESSION_RUNS_APPROVALS_DECIDE => decide_run_approvals(RunApprovalsDecideParams) -> RunApprovalsDecideResponse =>
