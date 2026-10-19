@@ -35,11 +35,13 @@ pub const HANDOFF_COMPLETED_RUNS: usize = 100;
 ///   names it as its parent, or one of its completion promises is pending. Its
 ///   delivery or start failure stays with it.
 /// - When `counts_dropped_emissions`, a live run's invocation made by a call
-///   left out goes too, with its completion promises, if they all settled and
-///   belong to the runtime (a joined call's reply, which only that call
-///   waited on). `WorkflowToolState::emissions_dropped` counts it for the
-///   per-run cap. A model-owned promise (a handle the program holds, as from
-///   `agent.spawn`) may still be awaited, so its invocation stays.
+///   left out goes too once its completion promises have all settled, with
+///   those that belong to the runtime (a joined call's reply, which only that
+///   call waited on). A model-owned promise (a handle the program holds, as
+///   from `agent.spawn`) may still be awaited, so it stays without its
+///   invocation: awaiting a settled promise reads only the promise.
+///   `WorkflowToolState::emissions_dropped` counts the invocation for the
+///   per-run cap.
 /// - A promise stays while it is pending, detached (any later run may await a
 ///   session-scoped promise), scoped to a live run, or a completion promise of
 ///   a kept invocation.
@@ -111,10 +113,17 @@ pub fn trim_for_handoff(state: &mut CoreAgentState, counts_dropped_emissions: bo
 
     // A live run's settled invocations whose calls were left out, and their
     // runtime-owned completion promises.
-    let settled_by_runtime = |promise_id: &PromiseId| {
-        promises.promises.get(promise_id).is_some_and(|promise| {
-            promise.status.is_terminal() && promise.ownership == PromiseOwnership::Runtime
-        })
+    let settled = |promise_id: &PromiseId| {
+        promises
+            .promises
+            .get(promise_id)
+            .is_some_and(|promise| promise.status.is_terminal())
+    };
+    let owned_by_runtime = |promise_id: &PromiseId| {
+        promises
+            .promises
+            .get(promise_id)
+            .is_some_and(|promise| promise.ownership == PromiseOwnership::Runtime)
     };
     let made_by_left_out_call = |invocation: &WorkflowToolInvocation| {
         counts_dropped_emissions
@@ -124,7 +133,7 @@ pub fn trim_for_handoff(state: &mut CoreAgentState, counts_dropped_emissions: bo
             && invocation
                 .completion_promises
                 .as_ref()
-                .is_none_or(|keyed| keyed.values().all(settled_by_runtime))
+                .is_none_or(|keyed| keyed.values().all(settled))
     };
     let mut dropped_promises = BTreeSet::new();
     for invocations in [
@@ -145,7 +154,9 @@ pub fn trim_for_handoff(state: &mut CoreAgentState, counts_dropped_emissions: bo
                 invocation
                     .completion_promises
                     .iter()
-                    .flat_map(|keyed| keyed.values().cloned()),
+                    .flat_map(|keyed| keyed.values())
+                    .filter(|promise_id| owned_by_runtime(promise_id))
+                    .cloned(),
             );
             false
         });
@@ -564,8 +575,8 @@ mod tests {
             }
             state.id_cursors.last_promise_id = 9;
             // Calls 1 and 2 are left out, call 3 is not acknowledged. Call 1
-            // joined its child (a runtime-owned reply); call 2 spawned one
-            // (the program holds a model-owned handle).
+            // joined its child (a runtime-owned reply); call 2 spawned one,
+            // which has finished (the program holds a model-owned handle).
             for (n, call, promise) in [(20, 1, 7), (21, 2, 8), (22, 3, 9)] {
                 let mut invocation = invocation(n, 151, &[("reply", promise)]);
                 invocation.context = CallContext::Scope {
@@ -591,21 +602,48 @@ mod tests {
                 invocation_id(11),
                 invocation_id(12),
                 invocation_id(13),
-                invocation_id(21),
                 invocation_id(22)
             ],
-            "of the program's calls, only call 1's invocation goes"
+            "calls 1 and 2's invocations go"
         );
-        assert_eq!(promise_numbers(&state), [2, 3, 4, 5, 6, 8, 9]);
+        assert_eq!(
+            promise_numbers(&state),
+            [2, 3, 4, 5, 6, 8, 9],
+            "the spawned child's settled handle stays for the program to await"
+        );
         assert_eq!(
             state.workflow_tools.emissions_dropped,
-            [(run, [(tool.clone(), 1)].into())].into()
+            [(run, [(tool.clone(), 2)].into())].into()
         );
         assert_eq!(state.workflow_tools.emission_count(run, &tool), counted);
         // The count crosses the activity boundary with the state.
         let carried: crate::WorkflowToolState =
             serde_json::from_value(serde_json::to_value(&state.workflow_tools).unwrap()).unwrap();
         assert_eq!(carried, state.workflow_tools);
+
+        // A spawned child still running keeps its invocation.
+        let mut state = session();
+        state
+            .promises
+            .promises
+            .get_mut(&PromiseId::from_number(8))
+            .expect("promise 8")
+            .status = crate::PromiseStatus::Pending;
+        trim_for_handoff(&mut state, true);
+        assert_eq!(
+            invocation_numbers(&state.workflow_tools.start_requests),
+            [
+                invocation_id(11),
+                invocation_id(12),
+                invocation_id(13),
+                invocation_id(21),
+                invocation_id(22)
+            ],
+        );
+        assert_eq!(
+            state.workflow_tools.emissions_dropped,
+            [(run, [(tool.clone(), 1)].into())].into()
+        );
 
         // A workflow that does not read the count gets the invocation.
         let mut state = session();
