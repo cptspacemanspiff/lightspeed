@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ProfileDocument } from "@/api";
-import { copiedProfileDocument } from "./ProfilesPage";
+import type { ProfileDocument, ProfileSummary } from "@/api";
+import { copiedProfileDocument, profileGroups } from "./ProfilesPage";
 
 describe("copiedProfileDocument", () => {
   it("copies setup fields without carrying registry identity", () => {
@@ -47,5 +47,32 @@ describe("copiedProfileDocument", () => {
       revision: 0,
       config: { features: { web: { fetch: {} } } },
     });
+  });
+});
+
+describe("profileGroups", () => {
+  const summary = (profileId: string, program?: boolean): ProfileSummary => ({
+    profileId,
+    revision: 1,
+    updatedAtMs: 0,
+    program,
+  });
+
+  it("lists agents and programs separately, each in API order", () => {
+    const groups = profileGroups([
+      summary("grader", true),
+      summary("helper"),
+      summary("checker", true),
+      summary("writer", false),
+    ]);
+    expect(groups.map((group) => [group.label, group.profiles.map((p) => p.profileId)])).toEqual([
+      ["Agents", ["helper", "writer"]],
+      ["Programs", ["grader", "checker"]],
+    ]);
+  });
+
+  it("leaves out an empty group", () => {
+    expect(profileGroups([summary("helper")]).map((group) => group.label)).toEqual(["Agents"]);
+    expect(profileGroups([])).toEqual([]);
   });
 });

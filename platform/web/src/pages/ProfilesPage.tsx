@@ -148,34 +148,41 @@ function ProfilePane({
         {profiles.data && profiles.data.length === 0 && (
           <ListNote>No profiles yet.</ListNote>
         )}
-        <ul>
-          {profiles.data?.map((profile) => (
-            <li key={profile.profileId}>
-              <NavLink
-                to={`/u/${slug}/profiles/${profile.profileId}`}
-                className={cn(
-                  "flex flex-col gap-0.5 border-b px-4 py-2.5 text-sm hover:bg-muted/50",
-                  profile.profileId === activeId && "bg-muted",
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <span className="truncate font-medium">
-                    {profile.displayName ?? profile.profileId}
-                  </span>
-                  {!permissions.can("manage_profile") && (
-                    <span className="shrink-0 text-xs text-muted-foreground">Read only</span>
-                  )}
-                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                    r{profile.revision}
-                  </span>
-                </span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {profile.description ?? profile.profileId}
-                </span>
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+        {profileGroups(profiles.data ?? []).map((group) => (
+          <section key={group.label} aria-label={group.label}>
+            <h2 className="border-b px-4 py-1.5 text-xs font-medium text-muted-foreground">
+              {group.label}
+            </h2>
+            <ul>
+              {group.profiles.map((profile) => (
+                <li key={profile.profileId}>
+                  <NavLink
+                    to={`/u/${slug}/profiles/${profile.profileId}`}
+                    className={cn(
+                      "flex flex-col gap-0.5 border-b px-4 py-2.5 text-sm hover:bg-muted/50",
+                      profile.profileId === activeId && "bg-muted",
+                    )}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="truncate font-medium">
+                        {profile.displayName ?? profile.profileId}
+                      </span>
+                      {!permissions.can("manage_profile") && (
+                        <span className="shrink-0 text-xs text-muted-foreground">Read only</span>
+                      )}
+                      <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                        r{profile.revision}
+                      </span>
+                    </span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {profile.description ?? profile.profileId}
+                    </span>
+                  </NavLink>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
       </div>
       {canCreate && (
         <NewProfileDialog
@@ -188,6 +195,16 @@ function ProfilePane({
       )}
     </>
   );
+}
+
+/// The pane lists agent profiles and program profiles as separate groups,
+/// each keeping the API's order (most recently updated first). Empty groups
+/// are left out.
+export function profileGroups(profiles: ProfileSummary[]) {
+  return [
+    { label: "Agents", profiles: profiles.filter((profile) => !profile.program) },
+    { label: "Programs", profiles: profiles.filter((profile) => profile.program) },
+  ].filter((group) => group.profiles.length > 0);
 }
 
 function ProfileEditor({
