@@ -766,6 +766,7 @@ impl EvalRuntime {
                 started_at_ms: projection.started_at_ms,
                 completed_at_ms: projection.completed_at_ms,
                 usage: projection.usage,
+                failure: None,
             })
             .await
             .map_err(api_error)

@@ -525,13 +525,18 @@ async fn bots_live_program_profile_runs_each_delivery_as_a_program_run() -> anyh
             .await?
             .result
             .session;
-        assert_eq!(
-            session.driver,
-            api::SessionDriverView::Program {
-                program_id: Some(profile_id.as_str().to_owned()),
-                revision: Some(1),
-                semantics_version: 1,
-            }
+        assert!(
+            matches!(
+                &session.driver,
+                api::SessionDriverView::Program {
+                    program_id: Some(program_id),
+                    revision: Some(1),
+                    semantics_version: 1,
+                    ..
+                } if program_id == profile_id.as_str()
+            ),
+            "{:?}",
+            session.driver
         );
         assert_eq!(
             event_program_output(&api, &store, &main, &events[0]).await?,

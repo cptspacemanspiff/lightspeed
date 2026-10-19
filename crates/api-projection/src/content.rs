@@ -179,6 +179,7 @@ mod tests {
                 entries: &[], run_id: harness::RunId::new(1), status: api::RunStatus::Completed,
                 output: Some(&content), source: &source, started_at_ms: None,
                 completed_at_ms: Some(1), usage: None,
+                failure: None,
             }).await.unwrap();
             assert!(run.entries.is_empty());
             assert_eq!(run.output, Some(content_ref_to_api(&content)));
@@ -208,6 +209,7 @@ mod tests {
                     started_at_ms: None,
                     completed_at_ms: Some(1),
                     usage: None,
+                    failure: None,
                 })
                 .await
                 .unwrap();

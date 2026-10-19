@@ -2719,6 +2719,7 @@ mod tests {
             }],
             usage: None,
             pending_approvals: Vec::new(),
+            failure: None,
         };
 
         let chains = project_tool_chains(&run);
@@ -2794,6 +2795,7 @@ mod tests {
             tool_batches: Vec::new(),
             usage: None,
             pending_approvals: Vec::new(),
+            failure: None,
         };
 
         let chains = project_tool_chains(&run);

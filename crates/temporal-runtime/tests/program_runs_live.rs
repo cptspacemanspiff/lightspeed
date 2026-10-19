@@ -750,14 +750,26 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 }
 
                 let session = start_program_session(&api, &session_id, &profile_id).await?;
+                let api::SessionDriverView::Program {
+                    program_id,
+                    revision,
+                    semantics_version,
+                    input_schema_ref,
+                    output_schema_ref,
+                } = &session.driver
+                else {
+                    anyhow::bail!("a program session: {:?}", session.driver);
+                };
                 assert_eq!(
-                    session.driver,
-                    api::SessionDriverView::Program {
-                        program_id: Some(profile_id.as_str().to_owned()),
-                        revision: Some(1),
-                        semantics_version: 1,
-                    }
+                    (program_id.as_deref(), *revision, *semantics_version),
+                    (Some(profile_id.as_str()), Some(1), 1)
                 );
+                // The schemas are the session's own blobs, for a caller to
+                // check input against.
+                let input_schema =
+                    read_json(&store, input_schema_ref.as_deref().expect("input schema")).await?;
+                assert_eq!(input_schema["required"], json!(["claim"]));
+                assert!(output_schema_ref.is_some());
                 assert!(
                     session.active_context.entries.is_empty(),
                     "a program session has no instructions: {:?}",
@@ -815,6 +827,27 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                 assert!(
                     report["error"].as_str().unwrap_or_default().contains("boom y"),
                     "{report}"
+                );
+                // The run views say why: whole in the run, cut short in a
+                // summary.
+                let failure = run.failure.as_ref().expect("run failure");
+                assert_eq!(failure.kind, api::RunFailureKindView::Program);
+                assert!(failure.message.contains("boom y"), "{failure:?}");
+                let summary = api
+                    .read_session(api::SessionReadParams {
+                        session_id: failing_session.to_string(),
+                        run_limit: None,
+                    })
+                    .await?
+                    .result
+                    .session
+                    .runs
+                    .into_iter()
+                    .find(|summary| summary.id == run.id)
+                    .expect("run summary");
+                assert_eq!(
+                    summary.failure.map(|failure| failure.kind),
+                    Some(api::RunFailureKindView::Program)
                 );
 
                 for id in [&session_id, &failing_session] {

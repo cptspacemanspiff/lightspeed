@@ -1270,6 +1270,7 @@ impl GatewayAgentApi {
                 started_at_ms: metadata.started_at_ms,
                 completed_at_ms: metadata.completed_at_ms,
                 usage: metadata.usage,
+                failure: metadata.failure,
             })
             .await
     }
@@ -1340,6 +1341,7 @@ struct RunProjectionMetadata<'a> {
     started_at_ms: Option<u64>,
     completed_at_ms: Option<u64>,
     usage: Option<&'a harness::LlmUsage>,
+    failure: Option<&'a harness::RunFailure>,
 }
 
 fn run_projection_metadata(
@@ -1360,6 +1362,7 @@ fn run_projection_metadata(
             started_at_ms: run.started_at_ms,
             completed_at_ms: Some(run.completed_at_ms),
             usage: run.usage.as_ref(),
+            failure: run.failure.as_ref(),
         })
         .or_else(|| {
             state
@@ -1376,6 +1379,7 @@ fn run_projection_metadata(
                     started_at_ms: run.started_at_ms,
                     completed_at_ms: None,
                     usage: run.usage.as_ref(),
+                    failure: None,
                 })
         })
         .or_else(|| {
@@ -1393,6 +1397,7 @@ fn run_projection_metadata(
                     started_at_ms: None,
                     completed_at_ms: None,
                     usage: None,
+                    failure: None,
                 })
         })
 }

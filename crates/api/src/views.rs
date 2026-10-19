@@ -73,6 +73,26 @@ pub struct RunSummaryView {
     pub usage: Option<LlmUsageView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<PendingApprovalView>,
+    /// Why a failed run failed. The message is cut to its first
+    /// `RUN_SUMMARY_FAILURE_MESSAGE_BYTES` here; `session/runs/read` has it
+    /// whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunFailureView>,
+}
+
+/// How much of a failure message a run summary carries.
+pub const RUN_SUMMARY_FAILURE_MESSAGE_BYTES: usize = 1_000;
+
+/// Why a run failed: the harness's classification and its message (for a
+/// program, the program's failure report).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFailureView {
+    pub kind: RunFailureKindView,
+    pub message: String,
+    /// The message was cut short.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub message_truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -112,6 +132,14 @@ pub enum SessionDriverView {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<u64>,
         semantics_version: u32,
+        /// The JSON Schema a run's input is checked against, as a session
+        /// blob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_schema_ref: Option<String>,
+        /// The JSON Schema a run's output is checked against, as a session
+        /// blob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema_ref: Option<String>,
     },
 }
 
@@ -197,6 +225,9 @@ pub struct RunView {
     pub usage: Option<LlmUsageView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<PendingApprovalView>,
+    /// Why the run failed, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunFailureView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

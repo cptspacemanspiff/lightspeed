@@ -14184,6 +14184,26 @@
           }
         ]
       },
+      "RunFailureView": {
+        "description": "Why a run failed: the harness's classification and its message (for a\nprogram, the program's failure report).",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RunFailureKindView"
+          },
+          "message": {
+            "type": "string"
+          },
+          "messageTruncated": {
+            "description": "The message was cut short.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
       "RunLimitsConfig": {
         "properties": {
           "maxToolRounds": {
@@ -14536,6 +14556,17 @@
               "null"
             ]
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunFailureView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why a failed run failed. The message is cut to its first\n`RUN_SUMMARY_FAILURE_MESSAGE_BYTES` here; `session/runs/read` has it\nwhole."
+          },
           "id": {
             "type": "string"
           },
@@ -14607,6 +14638,17 @@
               "$ref": "#/components/schemas/ContextEntryView"
             },
             "type": "array"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunFailureView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the run failed, when it did."
           },
           "id": {
             "type": "string"
@@ -14967,9 +15009,23 @@
           },
           {
             "properties": {
+              "inputSchemaRef": {
+                "description": "The JSON Schema a run's input is checked against, as a session\nblob.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "kind": {
                 "const": "program",
                 "type": "string"
+              },
+              "outputSchemaRef": {
+                "description": "The JSON Schema a run's output is checked against, as a session\nblob.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "programId": {
                 "type": [

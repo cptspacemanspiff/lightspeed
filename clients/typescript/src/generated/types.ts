@@ -279,6 +279,23 @@ export type ContextEntrySourceView =
  */
 export type TokenEstimateQualityView = "exact" | "providerCounted" | "estimated";
 /**
+ * Why a run failed, as the harness classified it.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunFailureKindView".
+ */
+export type RunFailureKindView =
+  | (
+      | "model_failure"
+      | "tool_failure"
+      | "context_failure"
+      | "limit_exceeded"
+      | "cancelled"
+      | "internal"
+    )
+  | "request_rejected"
+  | "program";
+/**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ApprovalSubjectView".
  */
@@ -395,7 +412,17 @@ export type SessionDriverView =
       kind: "agent";
     }
   | {
+      /**
+       * The JSON Schema a run's input is checked against, as a session
+       * blob.
+       */
+      inputSchemaRef?: string | null;
       kind: "program";
+      /**
+       * The JSON Schema a run's output is checked against, as a session
+       * blob.
+       */
+      outputSchemaRef?: string | null;
       programId?: string | null;
       revision?: number | null;
       semanticsVersion: number;
@@ -874,23 +901,6 @@ export type RunAcceptedSourceView =
  * via the `definition` "ApprovalDecisionKind".
  */
 export type ApprovalDecisionKind = "approve" | "reject";
-/**
- * Why a run failed, as the harness classified it.
- *
- * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
- * via the `definition` "RunFailureKindView".
- */
-export type RunFailureKindView =
-  | (
-      | "model_failure"
-      | "tool_failure"
-      | "context_failure"
-      | "limit_exceeded"
-      | "cancelled"
-      | "internal"
-    )
-  | "request_rejected"
-  | "program";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "ToolAttachmentKind".
@@ -2309,12 +2319,33 @@ export interface TokenEstimateView {
 export interface RunSummaryView {
   acceptedAtMs: number;
   completedAtMs?: number | null;
+  /**
+   * Why a failed run failed. The message is cut to its first
+   * `RUN_SUMMARY_FAILURE_MESSAGE_BYTES` here; `session/runs/read` has it
+   * whole.
+   */
+  failure?: RunFailureView | null;
   id: string;
   pendingApprovals?: PendingApprovalView[];
   source: RunSummarySourceView;
   startedAtMs?: number | null;
   status: RunStatus;
   usage?: LlmUsageView | null;
+}
+/**
+ * Why a run failed: the harness's classification and its message (for a
+ * program, the program's failure report).
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "RunFailureView".
+ */
+export interface RunFailureView {
+  kind: RunFailureKindView;
+  message: string;
+  /**
+   * The message was cut short.
+   */
+  messageTruncated?: boolean;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -3047,6 +3078,10 @@ export interface RunView {
    */
   completedAtMs?: number | null;
   entries?: ContextEntryView[];
+  /**
+   * Why the run failed, when it did.
+   */
+  failure?: RunFailureView | null;
   id: string;
   /**
    * Authoritative terminal output, retained independently of active context.

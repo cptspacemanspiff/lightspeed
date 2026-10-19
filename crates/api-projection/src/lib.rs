@@ -68,6 +68,7 @@ pub struct ProjectRun<'a> {
     pub started_at_ms: Option<u64>,
     pub completed_at_ms: Option<u64>,
     pub usage: Option<&'a harness::LlmUsage>,
+    pub failure: Option<&'a RunFailure>,
 }
 
 pub struct CoreAgentProjector<'a> {
@@ -212,36 +213,39 @@ impl<'a> CoreAgentProjector<'a> {
         state: &CoreAgentState,
         run: RunStateRef<'_>,
     ) -> Result<RunSummaryView, AgentApiError> {
-        let (id, status, accepted_at_ms, started_at_ms, completed_at_ms, usage, source) = match run
-        {
-            RunStateRef::Completed(run) => (
-                run.run_id,
-                core_run_status_to_api_status(run.status),
-                run.accepted_at_ms,
-                run.started_at_ms,
-                Some(run.completed_at_ms),
-                run.usage.as_ref(),
-                Some(&run.source),
-            ),
-            RunStateRef::Active(run) => (
-                run.run_id,
-                core_run_status_to_api_status(run.status),
-                run.accepted_at_ms,
-                run.started_at_ms,
-                None,
-                run.usage.as_ref(),
-                Some(&run.source),
-            ),
-            RunStateRef::Queued(run) => (
-                run.run_id,
-                ApiRunStatus::Queued,
-                run.accepted_at_ms,
-                None,
-                None,
-                None,
-                Some(&run.source),
-            ),
-        };
+        let (id, status, accepted_at_ms, started_at_ms, completed_at_ms, usage, source, failure) =
+            match run {
+                RunStateRef::Completed(run) => (
+                    run.run_id,
+                    core_run_status_to_api_status(run.status),
+                    run.accepted_at_ms,
+                    run.started_at_ms,
+                    Some(run.completed_at_ms),
+                    run.usage.as_ref(),
+                    Some(&run.source),
+                    run.failure.as_ref(),
+                ),
+                RunStateRef::Active(run) => (
+                    run.run_id,
+                    core_run_status_to_api_status(run.status),
+                    run.accepted_at_ms,
+                    run.started_at_ms,
+                    None,
+                    run.usage.as_ref(),
+                    Some(&run.source),
+                    None,
+                ),
+                RunStateRef::Queued(run) => (
+                    run.run_id,
+                    ApiRunStatus::Queued,
+                    run.accepted_at_ms,
+                    None,
+                    None,
+                    None,
+                    Some(&run.source),
+                    None,
+                ),
+            };
         let pending_approvals = if let Some(active) = state
             .runs
             .active
@@ -270,6 +274,13 @@ impl<'a> CoreAgentProjector<'a> {
             source: self.project_run_summary_source(source).await?,
             usage: usage.map(llm_usage_to_api),
             pending_approvals,
+            failure: match failure {
+                Some(failure) => Some(
+                    self.run_failure_view(failure, Some(api::RUN_SUMMARY_FAILURE_MESSAGE_BYTES))
+                        .await,
+                ),
+                None => None,
+            },
         })
     }
 
@@ -346,6 +357,10 @@ impl<'a> CoreAgentProjector<'a> {
             pending_approvals: self
                 .pending_approvals_for_run(&projection, params.run_id)
                 .await?,
+            failure: match params.failure {
+                Some(failure) => Some(self.run_failure_view(failure, None).await),
+                None => None,
+            },
         })
     }
 
@@ -1468,6 +1483,28 @@ impl<'a> CoreAgentProjector<'a> {
             .map_err(map_blob_store_error)
     }
 
+    /// A run's failure, its message cut to `max_bytes` when given.
+    async fn run_failure_view(
+        &self,
+        failure: &RunFailure,
+        max_bytes: Option<usize>,
+    ) -> api::RunFailureView {
+        let mut message = self.run_failure_message(failure).await;
+        let message_truncated = max_bytes.is_some_and(|max| message.len() > max);
+        if let Some(max) = max_bytes.filter(|_| message_truncated) {
+            let end = (0..=max)
+                .rev()
+                .find(|index| message.is_char_boundary(*index))
+                .unwrap_or(0);
+            message.truncate(end);
+        }
+        api::RunFailureView {
+            kind: run_failure_kind_to_api(failure.kind.clone()),
+            message,
+            message_truncated,
+        }
+    }
+
     async fn run_failure_message(&self, failure: &RunFailure) -> String {
         if let Some(message_ref) = &failure.message_ref
             && let Ok(message) = self.read_blob_text(message_ref).await
@@ -2214,6 +2251,14 @@ fn session_driver_view(driver: &harness::SessionDriver) -> api::SessionDriverVie
             program_id: program.program_id.clone(),
             revision: program.revision,
             semantics_version: program.engine.semantics_version,
+            input_schema_ref: program
+                .input_schema
+                .as_ref()
+                .map(|schema| schema.as_str().to_owned()),
+            output_schema_ref: program
+                .output_schema
+                .as_ref()
+                .map(|schema| schema.as_str().to_owned()),
         },
     }
 }
