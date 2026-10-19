@@ -17737,10 +17737,18 @@
       "type": "object"
     },
     "SessionOriginKind": {
-      "enum": [
-        "subagent"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "subagent",
+          "description": "A child agent session, started by `agent.run`/`agent.spawn` or the\n`agent_run`/`agent_spawn` model tools.",
+          "type": "string"
+        },
+        {
+          "const": "subprogram",
+          "description": "A child program session, started by `program.run`/`program.spawn` or\nthe `program_run`/`program_spawn` model tools. Children created\nbefore this kind existed say `subagent`.",
+          "type": "string"
+        }
+      ]
     },
     "SessionOriginView": {
       "description": "Typed provenance of a delegated (sub-agent) session: who created it,\nunder which root, at what depth, and the effective limits it was spawned\nwith. Provenance, never ownership — the child is an ordinary session.",

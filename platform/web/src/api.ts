@@ -424,10 +424,12 @@ export type EnvironmentCredential = EnvironmentCredentialView;
 export type EnvironmentRegistrationKey = EnvironmentRegistrationKeyView;
 export type EnvironmentRegistrationKeyCreated = EnvironmentRegistrationKeyCreateResponse;
 
-/// Sub-agent lineage: who delegated the session, under which root,
-/// at what depth, from which pinned profile revision. Provenance only.
+/// Sub-agent and sub-program lineage: who delegated the session, under
+/// which root, at what depth, from which pinned profile revision.
+/// Provenance only. Program children created before origins named them
+/// say "subagent".
 export interface SessionOrigin {
-  kind: "subagent";
+  kind: "subagent" | "subprogram";
   parentSessionId: string;
   parentRunId: string;
   rootSessionId: string;

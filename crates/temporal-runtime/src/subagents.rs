@@ -503,7 +503,11 @@ impl SubagentService {
                 .or_else(|| Some(profile_id.as_str().to_owned()))
         });
         let origin = SessionOrigin {
-            kind: SessionOriginKind::Subagent,
+            kind: if kind.is_program() {
+                SessionOriginKind::Subprogram
+            } else {
+                SessionOriginKind::Subagent
+            },
             parent_session_id: parent_session_id.clone(),
             parent_run_id: context.parent_run_id,
             root_session_id,
@@ -1986,6 +1990,17 @@ mod tests {
             *h.runtime.pinned_from.lock().unwrap(),
             [Some((ProfileId::new("checker"), 4))],
             "the child program records the profile revision it was copied from"
+        );
+        let record = h
+            .sessions
+            .load_session(&SessionId::new(&child.session_id))
+            .await
+            .expect("load")
+            .expect("child row reserved");
+        assert_eq!(
+            record.origin.expect("origin").kind,
+            SessionOriginKind::Subprogram,
+            "a program child says a program, not an agent, was asked for"
         );
         let runs = h.runtime.started_runs.lock().unwrap().clone();
         assert_eq!(

@@ -516,7 +516,7 @@ export type BoundWorkflowToolDispatchInput = "pull" | "push";
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SessionOriginKind".
  */
-export type SessionOriginKind = "subagent";
+export type SessionOriginKind = "subagent" | "subprogram";
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "SessionStatus".

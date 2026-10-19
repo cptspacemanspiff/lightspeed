@@ -2552,6 +2552,7 @@ pub fn session_origin_to_api(
     Ok(api::SessionOriginView {
         kind: match origin.kind {
             harness::storage::SessionOriginKind::Subagent => api::SessionOriginKind::Subagent,
+            harness::storage::SessionOriginKind::Subprogram => api::SessionOriginKind::Subprogram,
         },
         parent_session_id: origin.parent_session_id.as_str().to_owned(),
         parent_run_id: format!("run_{}", origin.parent_run_id),

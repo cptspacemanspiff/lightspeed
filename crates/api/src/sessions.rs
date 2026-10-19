@@ -1161,7 +1161,13 @@ pub struct SessionOriginView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionOriginKind {
+    /// A child agent session, started by `agent.run`/`agent.spawn` or the
+    /// `agent_run`/`agent_spawn` model tools.
     Subagent,
+    /// A child program session, started by `program.run`/`program.spawn` or
+    /// the `program_run`/`program_spawn` model tools. Children created
+    /// before this kind existed say `subagent`.
+    Subprogram,
 }
 
 /// The profile a sub-agent was spawned from, pinned at its revision.

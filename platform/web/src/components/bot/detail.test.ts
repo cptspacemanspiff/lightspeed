@@ -101,6 +101,14 @@ describe("conversationTabs", () => {
     expect(tabs.overflow.find((tab) => tab.id === "sub-child-id")?.hint)
       .toBe("sub-agent of planner");
   });
+  it("calls a program's child a sub-program", () => {
+    const parent = subagent("sub-parent-id", "planner", "bot:v1:triage", 4);
+    const child = subagent("sub-child-id", "checker", "sub-parent-id", 5);
+    child.origin = { ...child.origin!, kind: "subprogram" };
+    const tabs = conversationTabs(state({}, [parent, child]), undefined);
+    expect(tabs.overflow.find((tab) => tab.id === "sub-child-id")?.hint)
+      .toBe("sub-program of planner");
+  });
   it("always shows the selected conversation inline", () => {
     const current = state({
       sessions: [

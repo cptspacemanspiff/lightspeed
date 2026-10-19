@@ -124,3 +124,14 @@ it.each(["session", "universe"])("does not carry old lineage into a different %s
   await respond(2, [child("new-child")]);
   expect(container.textContent).toContain("Reviewer new-child");
 });
+
+it("names program children sub-programs, and both kinds together", async () => {
+  const programChild = (id: string): SessionSummary => ({ ...child(id), origin: { ...origin, kind: "subprogram" } });
+  await show(0);
+  await respond(0, [programChild("checker")]);
+  expect(container.textContent).toContain("Sub-programs (1)");
+
+  await show(1);
+  await respond(1, [programChild("checker"), { ...child("reviewer"), origin }]);
+  expect(container.textContent).toContain("Sub-agents and sub-programs (2)");
+});

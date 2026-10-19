@@ -109,7 +109,10 @@ pub struct DelegatedContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOriginKind {
+    /// A child agent session (`agent.run`, `agent_run`).
     Subagent,
+    /// A child program session (`program.run`, `program_run`).
+    Subprogram,
 }
 
 /// Which root-scoped limit a session creation exceeded.

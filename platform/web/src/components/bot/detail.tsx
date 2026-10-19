@@ -39,6 +39,7 @@ import { BotActionsMenu } from "./bot-actions-menu";
 import { BotChat } from "./chat";
 import { BotEditorDialog } from "./editor-dialog";
 import { BotAvatar } from "./face";
+import { childNoun } from "@/lib/sessions/origin";
 import { botInputOf } from "./identity";
 import { BotSetup } from "./setup";
 import { StatusDot, botStatus, relativeTime } from "./status";
@@ -106,7 +107,7 @@ export function conversationTabs(
     return {
       id: child.id,
       label: child.displayName ?? child.id.slice(0, 14),
-      hint: `sub-agent of ${parentId ? (labelOf.get(parentId) ?? parentId.slice(0, 12)) : "the bot"}`,
+      hint: `${childNoun(child.origin)} of ${parentId ? (labelOf.get(parentId) ?? parentId.slice(0, 12)) : "the bot"}`,
       activity: child.activity,
       closed: child.lifecycleStatus === "closed",
       kind: "subagent" as const,

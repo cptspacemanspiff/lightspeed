@@ -128,6 +128,7 @@ import { modelFromConfig, modelLabel, resolveCreationModel, useModelDefaults, us
 import { useActionPermissions, useSessionClosePermission, useSessionDeletePermission } from "@/lib/permissions";
 import { useActiveUniverse, useFeature } from "@/lib/universes";
 import { cn } from "@/lib/utils";
+import { capitalize, childNoun, childrenNoun } from "@/lib/sessions/origin";
 import {
   metadataFilterFromSearchParams,
   parseMetadataPair,
@@ -424,7 +425,7 @@ function SessionList({
                     showSubagents: checked === true,
                   }))}
                 />
-                Sub-agent sessions
+                Sub-agent and sub-program sessions
               </label>
               <label className="flex cursor-pointer items-center gap-2 text-sm">
                 <Checkbox
@@ -847,14 +848,14 @@ function SessionListItem({
         <span className="min-w-0 flex-1 truncate font-medium" title={displayName ? undefined : session.id}>
           {displayName || session.id}
         </span>
-        {/* Sub-agents follow their root; the root row carries the mark. */}
+        {/* Children follow their root; the root row carries the mark. */}
         {!origin && <SharingMark access={session.access} quiet />}
         {origin && (
           <Badge
             variant="outline"
-            title={`Sub-agent of ${origin.parentSessionId} (depth ${origin.depth}, profile ${origin.agent.profileId} rev ${origin.agent.revision})`}
+            title={`${capitalize(childNoun(origin))} of ${origin.parentSessionId} (depth ${origin.depth}, profile ${origin.agent.profileId} rev ${origin.agent.revision})`}
           >
-            sub-agent
+            {childNoun(origin)}
           </Badge>
         )}
         {session.managed && (
@@ -2371,6 +2372,7 @@ export function SessionLineage({
   const inlineChildren = list.slice(0, INLINE_SUBAGENT_LIMIT);
   const overflowChildren = list.slice(INLINE_SUBAGENT_LIMIT);
   const hiddenCount = overflowChildren.length;
+  const childrenLabel = childrenNoun(list);
   const parentName = parent.data?.displayName?.trim();
   const parentLabel = parentName || (parentId ? compactSessionId(parentId) : "");
   const tagClass = "inline-flex min-w-0 max-w-64 items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium text-foreground transition-colors hover:bg-muted";
@@ -2401,7 +2403,7 @@ export function SessionLineage({
       )}
       {list.length > 0 && (
         <span className="flex min-w-0 flex-wrap items-center gap-1">
-          <span>Sub-agents ({list.length}{children.hasNextPage ? "+" : ""}):</span>
+          <span>{capitalize(childrenLabel)} ({list.length}{children.hasNextPage ? "+" : ""}):</span>
           {inlineChildren.map((child) => (
             <SubagentLineageLink
               key={child.id}
@@ -2417,7 +2419,7 @@ export function SessionLineage({
                   <button
                     type="button"
                     className={tagClass}
-                    aria-label={`Show ${hiddenCount}${children.hasNextPage ? " or more" : ""} additional sub-agents`}
+                    aria-label={`Show ${hiddenCount}${children.hasNextPage ? " or more" : ""} additional ${childrenLabel}`}
                   />
                 }
               >
@@ -2425,7 +2427,7 @@ export function SessionLineage({
               </PopoverTrigger>
               <PopoverContent align="start" className="w-80 p-2">
                 <div className="mb-1 px-2 py-1 text-xs font-medium text-muted-foreground">
-                  Additional sub-agents
+                  Additional {childrenLabel}
                 </div>
                 <div className="max-h-72 overflow-y-auto">
                   {overflowChildren.map((child) => (
@@ -2449,7 +2451,7 @@ export function SessionLineage({
                     disabled={children.isFetchingNextPage}
                     onClick={() => void children.fetchNextPage()}
                   >
-                    {children.isFetchingNextPage ? "Loading…" : "Load more sub-agents"}
+                    {children.isFetchingNextPage ? "Loading…" : `Load more ${childrenLabel}`}
                   </Button>
                 )}
               </PopoverContent>
