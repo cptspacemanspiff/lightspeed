@@ -1007,6 +1007,7 @@ mod tests {
             usage: None,
             pending_approvals: Vec::new(),
             failure: None,
+            output: None,
         }
     }
 

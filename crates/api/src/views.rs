@@ -78,6 +78,10 @@ pub struct RunSummaryView {
     /// whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<RunFailureView>,
+    /// A finished run's output, by reference (for a program run, its result
+    /// as JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::ContentRefView>,
 }
 
 /// One call a program run made.

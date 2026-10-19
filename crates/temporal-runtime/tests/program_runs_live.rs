@@ -793,6 +793,20 @@ async fn program_session_runs_its_pinned_program_and_returns_its_output() -> any
                     read_json(&store, &output.content_ref).await?,
                     json!({"claim": "x", "slept": 3, "clock": true, "hasOnlyItsContracts": "time"})
                 );
+                // The run's summary carries the same output.
+                let summary = api
+                    .read_session(api::SessionReadParams {
+                        session_id: session_id.to_string(),
+                        run_limit: None,
+                    })
+                    .await?
+                    .result
+                    .session
+                    .runs
+                    .into_iter()
+                    .find(|summary| summary.id == run.id)
+                    .expect("run summary");
+                assert_eq!(summary.output.as_ref(), Some(output));
                 // Three sleeps and a timer: each wait is one recorded call.
                 assert_eq!(
                     scoped_call_tools(&store, &session_id).await?,

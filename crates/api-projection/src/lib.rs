@@ -213,39 +213,40 @@ impl<'a> CoreAgentProjector<'a> {
         state: &CoreAgentState,
         run: RunStateRef<'_>,
     ) -> Result<RunSummaryView, AgentApiError> {
-        let (id, status, accepted_at_ms, started_at_ms, completed_at_ms, usage, source, failure) =
-            match run {
-                RunStateRef::Completed(run) => (
-                    run.run_id,
-                    core_run_status_to_api_status(run.status),
-                    run.accepted_at_ms,
-                    run.started_at_ms,
-                    Some(run.completed_at_ms),
-                    run.usage.as_ref(),
-                    Some(&run.source),
-                    run.failure.as_ref(),
-                ),
-                RunStateRef::Active(run) => (
-                    run.run_id,
-                    core_run_status_to_api_status(run.status),
-                    run.accepted_at_ms,
-                    run.started_at_ms,
-                    None,
-                    run.usage.as_ref(),
-                    Some(&run.source),
-                    None,
-                ),
-                RunStateRef::Queued(run) => (
-                    run.run_id,
-                    ApiRunStatus::Queued,
-                    run.accepted_at_ms,
-                    None,
-                    None,
-                    None,
-                    Some(&run.source),
-                    None,
-                ),
-            };
+        let (id, status, accepted_at_ms, started_at_ms, completed_at_ms, usage, source) = match run
+        {
+            RunStateRef::Completed(run) => (
+                run.run_id,
+                core_run_status_to_api_status(run.status),
+                run.accepted_at_ms,
+                run.started_at_ms,
+                Some(run.completed_at_ms),
+                run.usage.as_ref(),
+                Some(&run.source),
+            ),
+            RunStateRef::Active(run) => (
+                run.run_id,
+                core_run_status_to_api_status(run.status),
+                run.accepted_at_ms,
+                run.started_at_ms,
+                None,
+                run.usage.as_ref(),
+                Some(&run.source),
+            ),
+            RunStateRef::Queued(run) => (
+                run.run_id,
+                ApiRunStatus::Queued,
+                run.accepted_at_ms,
+                None,
+                None,
+                None,
+                Some(&run.source),
+            ),
+        };
+        let (failure, output) = match run {
+            RunStateRef::Completed(run) => (run.failure.as_ref(), run.output.as_ref()),
+            RunStateRef::Active(_) | RunStateRef::Queued(_) => (None, None),
+        };
         let pending_approvals = if let Some(active) = state
             .runs
             .active
@@ -281,6 +282,7 @@ impl<'a> CoreAgentProjector<'a> {
                 ),
                 None => None,
             },
+            output: output.map(content_ref_to_api),
         })
     }
 

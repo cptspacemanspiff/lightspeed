@@ -14848,6 +14848,17 @@
         "id": {
           "type": "string"
         },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContentRefView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A finished run's output, by reference (for a program run, its result\nas JSON)."
+        },
         "pendingApprovals": {
           "items": {
             "$ref": "#/definitions/PendingApprovalView"

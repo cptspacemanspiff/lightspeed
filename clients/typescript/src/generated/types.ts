@@ -2333,6 +2333,11 @@ export interface RunSummaryView {
    */
   failure?: RunFailureView | null;
   id: string;
+  /**
+   * A finished run's output, by reference (for a program run, its result
+   * as JSON).
+   */
+  output?: ContentRefView | null;
   pendingApprovals?: PendingApprovalView[];
   source: RunSummarySourceView;
   startedAtMs?: number | null;
