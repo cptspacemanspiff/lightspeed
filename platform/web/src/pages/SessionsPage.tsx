@@ -964,10 +964,17 @@ function NewSessionDialog({
     creationProfile.kind === "named" ? modelFromConfig(selectedProfile.data?.config) : null,
     defaults.data,
   );
+  // A program profile's sessions run its program, not a model, and an
+  // inline copy of it would drop the program.
+  const programProfile = isProgramProfile(profileId, profiles.data, selectedProfile.data);
   const modelPending = Boolean(profileId && !inlineProfile && selectedProfile.isLoading)
-    || (!effectiveModel.model && defaults.isLoading);
-  const modelMissing = !modelPending && Boolean(defaults.data) && !effectiveModel.model;
-  const modelSummary = (
+    || (!programProfile && !effectiveModel.model && defaults.isLoading);
+  const modelMissing = !programProfile && !modelPending && Boolean(defaults.data) && !effectiveModel.model;
+  const modelSummary = programProfile ? (
+    <p className="text-sm text-muted-foreground">
+      Runs this profile&apos;s program: start runs with JSON input from the session&apos;s program panel.
+    </p>
+  ) : (
     <div className="grid gap-2">
       <p className="text-sm">
         <span className="text-muted-foreground">
@@ -1097,13 +1104,14 @@ function NewSessionDialog({
                     {(profiles.data ?? []).map((profile) => (
                       <SelectItem key={profile.profileId} value={profile.profileId}>
                         {profile.displayName ?? profile.profileId}
+                        {profile.program && <span className="text-muted-foreground"> · program</span>}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </Field>
               {modelSummary}
-              {canConfigure && <Button
+              {canConfigure && !programProfile && <Button
                 type="button"
                 variant="outline"
                 disabled={Boolean(profileId) && selectedProfile.isLoading}
@@ -1268,6 +1276,17 @@ function InlineSetupEditor({
       </SetupEditorSection>
     </div>
   );
+}
+
+/// Whether the chosen profile runs a program, from its summary or, before
+/// the list has loaded, its document.
+export function isProgramProfile(
+  profileId: string,
+  summaries: ProfileSummary[] | undefined,
+  document: ProfileDocument | undefined,
+): boolean {
+  if (!profileId) return false;
+  return Boolean(summaries?.find((profile) => profile.profileId === profileId)?.program || document?.program);
 }
 
 function inlineProfileFromDocument(document: ProfileDocument): InlineProfile {

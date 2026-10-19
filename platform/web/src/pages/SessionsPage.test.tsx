@@ -3,11 +3,11 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BotView } from "@/api";
+import type { BotView, ProfileDocument, ProfileSummary } from "@/api";
 import { BotChat } from "@/components/bot/chat";
 import { sessionDraftKey } from "@/lib/sessions/draft";
 import { applyEvents, emptyTranscript } from "@/lib/sessions/transcript";
-import { SessionDetail } from "./SessionsPage";
+import { SessionDetail, isProgramProfile } from "./SessionsPage";
 
 const mocks = vi.hoisted(() => ({
   permissions: new Set<string>(),
@@ -451,5 +451,16 @@ describe("session action permissions", () => {
     await show("session");
     expect(input().disabled).toBe(true);
     expect(container.querySelector('[aria-label="Stop run"]')).toBeNull();
+  });
+});
+
+describe("isProgramProfile", () => {
+  const summary = (profileId: string, program?: boolean): ProfileSummary =>
+    ({ profileId, revision: 1, updatedAtMs: 0, ...(program === undefined ? {} : { program }) });
+  it("reads the chosen profile's summary, or its document before the list loads", () => {
+    expect(isProgramProfile("checker", [summary("checker", true), summary("chat")], undefined)).toBe(true);
+    expect(isProgramProfile("chat", [summary("checker", true), summary("chat")], undefined)).toBe(false);
+    expect(isProgramProfile("checker", undefined, { profileId: "checker", program: { source: { type: "text", text: "" } } } as ProfileDocument)).toBe(true);
+    expect(isProgramProfile("", [summary("checker", true)], undefined)).toBe(false);
   });
 });
