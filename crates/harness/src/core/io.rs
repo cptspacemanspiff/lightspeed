@@ -486,16 +486,25 @@ pub struct WorkflowToolCallRuntime {
     pub version: u32,
     pub binding: WorkflowToolBinding,
     pub prior_emission_count: u32,
+    /// The run's per-tool cap (`workflow_call_cap`). Requests from before it
+    /// was carried were all under the model cap.
+    #[serde(default = "model_emission_cap")]
+    pub emission_cap: u32,
+}
+
+fn model_emission_cap() -> u32 {
+    crate::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN
 }
 
 impl WorkflowToolCallRuntime {
     pub const VERSION: u32 = 1;
 
-    pub fn v1(binding: WorkflowToolBinding, prior_emission_count: u32) -> Self {
+    pub fn v1(binding: WorkflowToolBinding, prior_emission_count: u32, emission_cap: u32) -> Self {
         Self {
             version: Self::VERSION,
             binding,
             prior_emission_count,
+            emission_cap,
         }
     }
 }

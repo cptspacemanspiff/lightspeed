@@ -6293,6 +6293,12 @@ export interface ProgramLimitsInput {
    * Tool calls a run may have outstanding at once. 64 when omitted.
    */
   maxInFlight?: number | null;
+  /**
+   * Calls a run may make to each workflow tool: child agents and
+   * programs (each tool counted apart), input requests, approvals.
+   * 1,000 when omitted. Sessions a model drives allow 32 per tool.
+   */
+  maxWorkflowCalls?: number | null;
 }
 /**
  * One tool contract a program calls.

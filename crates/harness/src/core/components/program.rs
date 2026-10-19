@@ -276,6 +276,11 @@ pub struct ProgramLimits {
     /// deterministic count, so a replay stops at the same point.
     #[serde(default = "default_max_compute")]
     pub max_compute: u64,
+    /// Calls the run may make to each workflow tool (a child agent or
+    /// program, an input request, an approval). Sessions a model drives
+    /// have `MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN` instead.
+    #[serde(default = "default_max_workflow_calls")]
+    pub max_workflow_calls: u32,
     /// How long a human-input request waits when the call sets no deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_deadline_ms: Option<u64>,
@@ -296,6 +301,10 @@ pub const MAX_PROGRAM_CALLS: u32 = 1_000_000;
 /// run that maps, sorts and serializes a few hundred rows per call uses
 /// (about 24,000 interrupt checks).
 pub const DEFAULT_PROGRAM_MAX_COMPUTE: u64 = 250_000;
+/// Calls a program run may make to each workflow tool by default.
+pub const DEFAULT_PROGRAM_MAX_WORKFLOW_CALLS: u32 = 1_000;
+/// The most calls to one workflow tool any program run may be allowed.
+pub const MAX_PROGRAM_WORKFLOW_CALLS: u32 = 10_000;
 
 fn default_context_retained() -> u32 {
     DEFAULT_PROGRAM_CONTEXT_RETAINED
@@ -305,12 +314,17 @@ fn default_max_compute() -> u64 {
     DEFAULT_PROGRAM_MAX_COMPUTE
 }
 
+fn default_max_workflow_calls() -> u32 {
+    DEFAULT_PROGRAM_MAX_WORKFLOW_CALLS
+}
+
 impl Default for ProgramLimits {
     fn default() -> Self {
         Self {
             max_calls: DEFAULT_PROGRAM_MAX_CALLS,
             max_in_flight: 64,
             max_compute: DEFAULT_PROGRAM_MAX_COMPUTE,
+            max_workflow_calls: DEFAULT_PROGRAM_MAX_WORKFLOW_CALLS,
             input_deadline_ms: None,
             context_retained: DEFAULT_PROGRAM_CONTEXT_RETAINED,
         }
@@ -324,6 +338,8 @@ impl ProgramLimits {
             || self.max_in_flight == 0
             || self.max_in_flight > self.max_calls
             || self.max_compute == 0
+            || self.max_workflow_calls == 0
+            || self.max_workflow_calls > MAX_PROGRAM_WORKFLOW_CALLS
             || self.input_deadline_ms == Some(0)
             || self.context_retained == 0
             || self.context_retained > MAX_PROGRAM_CONTEXT_RETAINED

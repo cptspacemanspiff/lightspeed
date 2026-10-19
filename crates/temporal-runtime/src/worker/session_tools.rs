@@ -621,16 +621,16 @@ impl SessionTools {
         call: &harness::ToolInvocationRequest,
         binding: &harness::WorkflowToolBinding,
         emitted_count: u32,
+        emission_cap: u32,
         promise_ids: &PromiseIdAllocator,
     ) -> Result<ToolInvocationResult, CoreAgentIoError> {
-        if emitted_count >= harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN {
+        if emitted_count >= emission_cap {
             return failed_result(
                 self.blobs.as_ref(),
                 call.call_id.clone(),
                 format!(
-                    "workflow tool {} reached its per-run emission cap of {}",
+                    "workflow tool {} reached its per-run emission cap of {emission_cap}",
                     binding.definition.tool_id,
-                    harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN
                 ),
             )
             .await;
@@ -897,7 +897,14 @@ impl SessionTools {
         let sibling_count = successful_siblings.get(&tool_id).copied().unwrap_or(0);
         let emitted_count = runtime.prior_emission_count.saturating_add(sibling_count);
         let result = self
-            .invoke_workflow_tool_call(request, call, &runtime.binding, emitted_count, promise_ids)
+            .invoke_workflow_tool_call(
+                request,
+                call,
+                &runtime.binding,
+                emitted_count,
+                runtime.emission_cap,
+                promise_ids,
+            )
             .await?;
         if result.status == ToolCallStatus::Succeeded {
             successful_siblings.insert(tool_id, sibling_count.saturating_add(1));
@@ -3196,6 +3203,7 @@ mod tests {
             workflow.workflow_tool = Some(harness::WorkflowToolCallRuntime::v1(
                 binding,
                 harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN - 1,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
             ));
             let mut bad_route = workflow.clone();
             bad_route.call_id = ToolCallId::new("bad-route");
@@ -3327,6 +3335,7 @@ mod tests {
             workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
                 binding.clone(),
                 prior_emission_count,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
             )),
             promise_control: None,
             remote_mcp: None,
@@ -3340,6 +3349,7 @@ mod tests {
             workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
                 binding.clone(),
                 prior_emission_count,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
             )),
             promise_control: None,
             remote_mcp: None,
@@ -3353,6 +3363,7 @@ mod tests {
             workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
                 corrupt_binding,
                 prior_emission_count,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
             )),
             promise_control: None,
             remote_mcp: None,
@@ -3378,6 +3389,7 @@ mod tests {
                     workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
                         binding.clone(),
                         prior_emission_count,
+                        harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
                     )),
                     promise_control: None,
                     remote_mcp: None,
@@ -3393,6 +3405,7 @@ mod tests {
             workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
                 binding.clone(),
                 prior_emission_count,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
             )),
             promise_control: None,
             remote_mcp: None,
@@ -3564,7 +3577,11 @@ mod tests {
             tool_id: Some(binding.definition.tool.name.clone()),
             tool_name: binding.definition.tool.name.clone(),
             arguments_ref: arguments_ref.clone(),
-            workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(binding.clone(), 0)),
+            workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
+                binding.clone(),
+                0,
+                harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
+            )),
             promise_control: None,
             remote_mcp: None,
         };
@@ -3772,7 +3789,11 @@ mod tests {
                     .map_or("agent_run", SubagentToolKind::tool_name),
                 ),
                 arguments_ref,
-                workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(binding.clone(), 0)),
+                workflow_tool: Some(harness::WorkflowToolCallRuntime::v1(
+                    binding.clone(),
+                    0,
+                    harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
+                )),
                 promise_control: None,
                 remote_mcp: None,
             }],
@@ -3941,7 +3962,11 @@ mod tests {
         request.call.tool_id = Some(ToolName::new("env.job_run"));
         request.call.call_id = ToolCallId::new("code-tool:job-run");
         request.call.arguments_ref = blobs.put_bytes(arguments.to_vec()).await.unwrap();
-        request.call.workflow_tool = Some(harness::WorkflowToolCallRuntime::v1(binding, 0));
+        request.call.workflow_tool = Some(harness::WorkflowToolCallRuntime::v1(
+            binding,
+            0,
+            harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN,
+        ));
         request.active_environment_id = Some(EnvironmentId::new("environment-original"));
         request.environment_policy = Some(test_environment_policy(&["environment-original"]));
         request.promise_id_base = 129;

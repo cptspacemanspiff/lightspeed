@@ -310,6 +310,12 @@ pub struct ProgramLimitsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_compute: Option<u64>,
+    /// Calls a run may make to each workflow tool: child agents and
+    /// programs (each tool counted apart), input requests, approvals.
+    /// 1,000 when omitted. Sessions a model drives allow 32 per tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 10000))]
+    pub max_workflow_calls: Option<u32>,
     /// How long a human-input request waits when the call sets no deadline,
     /// within the deployment's bounds (by default 1 second to 30 days); the
     /// deployment's default (7 days unless overridden) when omitted.

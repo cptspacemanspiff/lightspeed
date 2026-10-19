@@ -1102,6 +1102,7 @@ mod tests {
                 max_calls: 300,
                 max_in_flight: 20,
                 max_compute: 9_000,
+                max_workflow_calls: 1_000,
                 input_deadline_ms: None,
                 context_retained: 10,
             },

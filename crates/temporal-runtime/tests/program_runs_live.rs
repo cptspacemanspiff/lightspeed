@@ -4411,6 +4411,135 @@ const SEQUENTIAL_AGENTS_PROGRAM: &str = r#"
     };
 "#;
 
+/// Spawns `calls` child agents, then awaits every handle.
+const SPAWNING_AGENTS_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const handles = [];
+            for (let i = 0; i < input.calls; i++) {
+                handles.push(await env.agent.spawn({ agent: input.agent, input: "CHECK " + i }));
+            }
+            const answers = [];
+            for (const handle of handles) answers.push((await handle.result()).output);
+            return { claim: input.claim, slept: 0, spawned: handles.length, answers };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_spawns_more_children_than_a_model_may_and_awaits_them_across_session_reloads()
+-> anyhow::Result<()> {
+    with_program_workers_setup(
+        ProgramWorkerSetup {
+            // Each reload leaves out the spawns the program acknowledged,
+            // once their children finish.
+            session_continue_as_new_events: Some(1),
+            ..Default::default()
+        },
+        |api, store, session_id, _client| {
+            Box::pin(async move {
+                let child_id = api::ProfileId::new(format!(
+                    "live_program_child_{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                api.create_profile(api::ProfileCreateParams {
+                    profile: api::AgentProfileInput {
+                        profile_id: child_id.clone(),
+                        display_name: Some("Live child".to_owned()),
+                        description: Some("Answers CHECK briefs".to_owned()),
+                        document: api::ProfileDocument {
+                            program: None,
+                            metadata: Default::default(),
+                            config: Some(api::SessionConfig::default()),
+                            instructions: Some(api::ProfileInstructions::Text {
+                                text: "You are a scripted child agent.".to_owned(),
+                            }),
+                            retention: None,
+                        },
+                    },
+                })
+                .await?;
+                let profile_id =
+                    api::ProfileId::new(format!("live_program_{}", uuid::Uuid::new_v4().simple()));
+                let mut profile = program_profile(
+                    &profile_id,
+                    SPAWNING_AGENTS_PROGRAM,
+                    &[("agent.spawn", None), ("promise.await", None)],
+                );
+                let calls = harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN + 8;
+                profile.document.config = Some(api::SessionConfig {
+                    features: Some(api::FeaturesConfig {
+                        subagents: Some(api::SubagentsFeature {
+                            programs: Vec::new(),
+                            version: api::CURRENT_FEATURE_VERSION,
+                            agents: vec![api::SubagentAgentRef {
+                                profile_id: child_id.clone(),
+                            }],
+                            max_depth: 2,
+                            max_descendants: 64,
+                            max_concurrent: 64,
+                            deadline_ms: 120_000,
+                        }),
+                        ..api::FeaturesConfig::default()
+                    }),
+                    ..api::SessionConfig::default()
+                });
+                api.create_profile(api::ProfileCreateParams { profile })
+                    .await?;
+                start_program_session(&api, &session_id, &profile_id).await?;
+                let run = start_program_run(
+                    &api,
+                    &session_id,
+                    json!({"claim": "many", "agent": child_id.as_str(), "calls": calls}),
+                )
+                .await?;
+                let run = support::live::wait_for_terminal_run_with_timeout(
+                    &api,
+                    &session_id,
+                    &run.id,
+                    Duration::from_secs(240),
+                )
+                .await?;
+                assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+                let output =
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+                assert_eq!(output["spawned"], json!(calls), "{output}");
+                let answers = output["answers"].as_array().expect("answers");
+                assert_eq!(answers.len(), calls as usize, "{output}");
+                for (index, answer) in answers.iter().enumerate() {
+                    assert_eq!(answer, &json!(format!("checked {index}")));
+                }
+
+                // The full log replays and counts every spawn.
+                let state = programs::session_state(&store, &session_id).await?;
+                assert_eq!(
+                    state.workflow_tools.emission_count(
+                        harness::RunId::new(1),
+                        &harness::WorkflowToolId::new(
+                            tools::subagents::AGENT_SPAWN_WORKFLOW_TOOL_ID
+                        )
+                    ),
+                    calls
+                );
+
+                let _ = api
+                    .close_session(api::SessionCloseParams {
+                        session_id: session_id.to_string(),
+                        force: true,
+                    })
+                    .await;
+                for profile_id in [profile_id, child_id] {
+                    api.delete_profile(api::ProfileDeleteParams { profile_id })
+                        .await?;
+                }
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
 async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_workflow_calls()
@@ -4451,6 +4580,11 @@ async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_w
                     SEQUENTIAL_AGENTS_PROGRAM,
                     &[("agent.run", None)],
                 );
+                let cap = 32;
+                profile.document.program.as_mut().unwrap().limits = Some(api::ProgramLimitsInput {
+                    max_workflow_calls: Some(cap),
+                    ..Default::default()
+                });
                 // Enough descendants that the per-run cap is the limit.
                 profile.document.config = Some(api::SessionConfig {
                     features: Some(api::FeaturesConfig {
@@ -4472,7 +4606,6 @@ async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_w
                 api.create_profile(api::ProfileCreateParams { profile })
                     .await?;
                 start_program_session(&api, &session_id, &profile_id).await?;
-                let cap = harness::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN;
                 let run = start_program_run(
                     &api,
                     &session_id,

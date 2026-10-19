@@ -902,7 +902,7 @@ impl WorkflowToolState {
 
     /// Per-run/per-tool invocation count across both bound emissions and
     /// start requests, and those left out of memory; the deterministic cap
-    /// covers them uniformly.
+    /// (`workflow_call_cap`) covers them uniformly.
     pub fn emission_count(&self, run_id: RunId, tool_id: &WorkflowToolId) -> u32 {
         let held: u32 = self
             .emissions
@@ -920,6 +920,21 @@ impl WorkflowToolState {
             .unwrap_or(0);
         held.saturating_add(dropped)
     }
+}
+
+/// The most invocations of one workflow tool a run of this session may make:
+/// a program's own `ProgramLimits::max_workflow_calls`, or
+/// `MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN` where a model drives the session.
+/// The driver is fixed when the session opens, so every replay of an event
+/// checks it against the same cap.
+pub fn workflow_call_cap(state: &crate::CoreAgentState) -> u32 {
+    state
+        .lifecycle
+        .driver
+        .program()
+        .map_or(MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN, |program| {
+            program.limits.max_workflow_calls
+        })
 }
 
 /// Project the workflow-tool invocations for one receiver and run from the
@@ -1323,7 +1338,7 @@ pub(crate) fn apply_event(
             if state
                 .workflow_tools
                 .emission_count(invocation.run_id, &invocation.tool_id)
-                >= MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN
+                >= workflow_call_cap(state)
             {
                 return Err(DomainError::InvariantViolation(format!(
                     "workflow tool {} exceeded its per-run emission cap",
@@ -1377,7 +1392,7 @@ pub(crate) fn apply_event(
             if state
                 .workflow_tools
                 .emission_count(invocation.run_id, &invocation.tool_id)
-                >= MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN
+                >= workflow_call_cap(state)
             {
                 return Err(DomainError::InvariantViolation(format!(
                     "workflow tool {} exceeded its per-run invocation cap",
@@ -1762,7 +1777,7 @@ pub(crate) fn validate_emit_effect(
     let existing = state
         .workflow_tools
         .emission_count(invocation.run_id, &invocation.tool_id);
-    if existing.saturating_add(pending_emissions_for_port) >= MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN {
+    if existing.saturating_add(pending_emissions_for_port) >= workflow_call_cap(state) {
         return Err(DomainError::InvariantViolation(format!(
             "workflow tool {} exceeded its per-run emission cap",
             invocation.tool_id

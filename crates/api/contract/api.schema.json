@@ -13846,6 +13846,16 @@
             "integer",
             "null"
           ]
+        },
+        "maxWorkflowCalls": {
+          "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

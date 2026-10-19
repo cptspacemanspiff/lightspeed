@@ -951,6 +951,7 @@ pub(crate) fn tool_invocation_request(
                         state
                             .workflow_tools
                             .emission_count(run_id, &binding.definition.tool_id),
+                        crate::workflow_call_cap(state),
                     )
                 });
             // Native MCP routing is decided here, once per dispatch, so the
@@ -12343,6 +12344,125 @@ mod tests {
             .filter(|entry| entry.kind == crate::ContextEntryKind::ProgramState)
             .map(|entry| (entry.content.content_ref.clone(), entry.source.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_program_run_calls_each_workflow_tool_up_to_its_own_cap() {
+        let session_id = SessionId::new("program-workflow-cap");
+        let mut drive =
+            CoreAgentDrive::from_replayed(session_id.clone(), CoreAgentState::new(), None);
+        let mut driver = program_driver();
+        let crate::SessionDriver::Program { program } = &mut driver else {
+            unreachable!()
+        };
+        program.limits.max_workflow_calls = 40;
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::OpenManagedSession {
+                    config: config(),
+                    driver,
+                    session_universe_id: uuid::Uuid::from_u128(7),
+                    workflow_tools: crate::ManagedSessionWorkflowTools::v1(
+                        None,
+                        vec![program_execute_declaration(), agent_run_declaration()],
+                    ),
+                },
+                10,
+            )
+            .unwrap();
+        let mut log = commit_action(&mut drive, action);
+        assert_eq!(crate::workflow_call_cap(drive.state()), 40);
+        let tools = [crate::PROGRAM_EXECUTE_TOOL_NAME, "agent_run"]
+            .into_iter()
+            .map(test_tool_spec)
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let action = drive
+            .admit_command(
+                CoreAgentCommand::ReplaceTools {
+                    expected_revision: None,
+                    tools,
+                },
+                15,
+            )
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        let action = drive
+            .admit_command(program_run_command(RunConfig::default()), 20)
+            .unwrap();
+        log.extend(commit_action(&mut drive, action));
+        for now in [30, 31] {
+            let action = drive.next_action(now, 8).unwrap();
+            log.extend(commit_action(&mut drive, action));
+        }
+        let run_id = drive.state().runs.active.as_ref().unwrap().run_id;
+        let execution_id = crate::program_run_execution_id(drive.state(), run_id)
+            .expect("pending program execution");
+        let mut scope = program_scope(run_id, &execution_id);
+        scope.policy.limits = crate::ScopeLimits {
+            max_calls: 64,
+            max_in_flight: 64,
+        };
+        scope.bindings.retain(|name, _| name == "agent_run");
+        log.extend(code_tool_commit(
+            &mut drive,
+            CoreAgentCommand::OpenCodeToolScope { scope },
+        ));
+        let admit = |request_id: String| CoreAgentCommand::AdmitCodeToolCall {
+            call: scoped_call_spec(&execution_id, &request_id, "agent_run"),
+            acknowledged: None,
+        };
+
+        // More emissions than a model's cap of 32 are recorded...
+        for index in 1..=33 {
+            let request_id = format!("call-{index}");
+            log.extend(code_tool_commit(&mut drive, admit(request_id.clone())));
+            let request =
+                crate::code_tool_request(&session_id, drive.state(), &execution_id, &request_id)
+                    .unwrap();
+            assert_eq!(
+                request.calls[0]
+                    .workflow_tool
+                    .as_ref()
+                    .map(|runtime| runtime.emission_cap),
+                Some(40)
+            );
+            let (result, _) = code_tool_workflow_effect(&request);
+            log.extend(code_tool_commit(
+                &mut drive,
+                CoreAgentCommand::CompleteCodeToolCall {
+                    origin: scoped_call_spec(&execution_id, &request_id, "agent_run").origin,
+                    result,
+                },
+            ));
+        }
+        let agent_run = crate::WorkflowToolId::new("agent_run");
+        assert_eq!(
+            drive
+                .state()
+                .workflow_tools
+                .emission_count(run_id, &agent_run),
+            33
+        );
+        // ...and calls still waiting count too, up to the program's own cap.
+        for index in 34..=40 {
+            log.extend(code_tool_commit(&mut drive, admit(format!("call-{index}"))));
+        }
+        assert!(
+            drive
+                .admit_command(admit("call-41".to_owned()), 100)
+                .is_err()
+        );
+
+        let mut replayed = CoreAgentDrive::from_replayed(session_id, CoreAgentState::new(), None);
+        replayed
+            .resume_appended(
+                log.iter()
+                    .map(|entry| CoreAgentCodec.encode_entry(entry).unwrap())
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(replayed.state(), drive.state());
     }
 
     fn open_program_session_retaining(

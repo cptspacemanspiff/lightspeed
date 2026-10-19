@@ -61,8 +61,8 @@ pub use log::*;
 pub use program::{
     APPROVAL_TOOL_NAME, APPROVAL_WORKFLOW_SEMANTIC_TYPE, APPROVAL_WORKFLOW_TOOL_ID,
     ContractBinding, ContractPin, DEFAULT_PROGRAM_CONTEXT_RETAINED, DEFAULT_PROGRAM_MAX_CALLS,
-    DEFAULT_PROGRAM_MAX_COMPUTE, MAX_PROGRAM_CALLS, MAX_PROGRAM_CONTEXT_RETAINED,
-    PROGRAM_CONTEXT_SEED_SOURCE, PROGRAM_EXECUTE_TOOL_NAME, PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE,
+    DEFAULT_PROGRAM_MAX_COMPUTE, DEFAULT_PROGRAM_MAX_WORKFLOW_CALLS, MAX_PROGRAM_CALLS,
+    MAX_PROGRAM_CONTEXT_RETAINED, MAX_PROGRAM_WORKFLOW_CALLS, PROGRAM_CONTEXT_SEED_SOURCE, PROGRAM_EXECUTE_TOOL_NAME, PROGRAM_EXECUTE_WORKFLOW_SEMANTIC_TYPE,
     PROGRAM_EXECUTE_WORKFLOW_TOOL_ID, PinnedProgram, ProgramApprovals, ProgramContextInput,
     ProgramEngine, ProgramEngineKind, ProgramLimits, SessionDriver, contract_digest,
     is_program_session, program_context, program_run_execution_id, program_run_invocation,
@@ -108,6 +108,6 @@ pub use workflow_tool::{
     WorkflowToolCompletion, WorkflowToolCompletionKeySource, WorkflowToolConfigEvent,
     WorkflowToolDeclaration, WorkflowToolDefinition, WorkflowToolEvent, WorkflowToolInvocation,
     WorkflowToolState, WorkflowToolTarget, completion_promise_source, read_tool_emissions,
-    validate_completion_key, with_completion_deadline, workflow_tool_emit_effect,
-    workflow_tool_execution_id,
+    validate_completion_key, with_completion_deadline, workflow_call_cap,
+    workflow_tool_emit_effect, workflow_tool_execution_id,
 };

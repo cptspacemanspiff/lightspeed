@@ -279,6 +279,9 @@ impl GatewayAgentApi {
                 max_calls: limits.max_calls.unwrap_or(defaults.max_calls),
                 max_in_flight: limits.max_in_flight.unwrap_or(defaults.max_in_flight),
                 max_compute: limits.max_compute.unwrap_or(defaults.max_compute),
+                max_workflow_calls: limits
+                    .max_workflow_calls
+                    .unwrap_or(defaults.max_workflow_calls),
                 input_deadline_ms: limits.input_deadline_ms,
                 context_retained: limits.context_retained.unwrap_or(defaults.context_retained),
             },

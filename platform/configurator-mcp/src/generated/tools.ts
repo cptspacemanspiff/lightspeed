@@ -959,6 +959,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
+            },
+            "maxWorkflowCalls": {
+              "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -4924,6 +4934,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
+            },
+            "maxWorkflowCalls": {
+              "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -7359,6 +7379,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "integer",
                 "null"
               ]
+            },
+            "maxWorkflowCalls": {
+              "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -8730,6 +8760,16 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
             "maxInFlight": {
               "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
               "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWorkflowCalls": {
+              "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+              "format": "uint32",
+              "maximum": 10000,
               "minimum": 1,
               "type": [
                 "integer",

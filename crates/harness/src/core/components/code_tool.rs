@@ -1048,7 +1048,7 @@ fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), 
             .workflow_tools
             .emission_count(run_id, &binding.definition.tool_id) as usize
             + pending
-            >= crate::MAX_WORKFLOW_TOOL_EMISSIONS_PER_RUN as usize
+            >= crate::workflow_call_cap(state) as usize
         {
             return Err(invalid(
                 "workflow tool invoked from code exhausted its emission budget",
