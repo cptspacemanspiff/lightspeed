@@ -38,6 +38,7 @@ const calls: ProgramCallView[] = [
     requestId: "call-1",
     contract: "agent.run",
     tool: "agent_run",
+    annotation: "the claim cites it",
     status: "succeeded",
     arguments: preview('{"agent":"checker","input":"CHECK sky"}'),
     output: preview('{"status":"completed","output":"checked sky"}'),
@@ -139,8 +140,13 @@ it("lists runs newest first with failures, and opens a run's output and calls", 
     ["Child session", "/u/test/sessions/agent_child"],
     ["Inbox request", "/u/test/inbox/inp_9"],
   ]);
-  // A later execution's call is numbered by its execution.
+  // A later execution's call is numbered by its execution; a call shows why
+  // it was made in place of its arguments.
   expect(older!.textContent).toContain("#2 call-1");
+  const [annotated, plain] = older!.querySelectorAll("[data-call]");
+  expect(annotated!.textContent).toContain("the claim cites it");
+  expect(annotated!.textContent).not.toContain("CHECK sky");
+  expect(plain!.textContent).toContain('{"ask":"Ship?"}');
 });
 
 it("starts a run from JSON input and refuses text that is not JSON", async () => {

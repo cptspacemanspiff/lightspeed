@@ -77,6 +77,8 @@ pub struct ProgramCallRecord {
     pub tool_id: String,
     pub tool_name: String,
     pub arguments_ref: BlobRef,
+    /// Why the program made the call, as it said.
+    pub annotation: Option<String>,
     pub status: ProgramCallStatus,
     pub cancel_requested: bool,
     pub output_ref: Option<BlobRef>,
@@ -137,6 +139,7 @@ pub enum ProgramCallChange {
         tool_id: String,
         tool_name: String,
         arguments_ref: BlobRef,
+        annotation: Option<String>,
         /// The entry's position: calls list in the order they were admitted.
         seq: u64,
         admitted_at_ms: u64,
@@ -213,6 +216,7 @@ pub fn program_call_changes(
                     tool_id: call.tool_id.as_str().to_owned(),
                     tool_name: call.tool_name.as_str().to_owned(),
                     arguments_ref: call.arguments_ref,
+                    annotation: call.annotation,
                     seq: decoded.position.seq.as_u64(),
                     admitted_at_ms: observed_at_ms,
                 }]
@@ -349,6 +353,7 @@ mod tests {
                     tool_id: crate::ToolName::new("web.fetch"),
                     tool_name: crate::ToolName::new("web.fetch"),
                     arguments_ref: arguments_ref.clone(),
+                    annotation: Some("the claim cites it".to_owned()),
                 },
                 promise_id_base: 1,
                 acknowledged: None,
@@ -365,6 +370,7 @@ mod tests {
                 tool_id: "web.fetch".to_owned(),
                 tool_name: "web.fetch".to_owned(),
                 arguments_ref,
+                annotation: Some("the claim cites it".to_owned()),
                 seq: 2,
                 admitted_at_ms: 102,
             }]

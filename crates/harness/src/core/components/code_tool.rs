@@ -305,6 +305,25 @@ pub struct CodeToolCallSpec {
     pub tool_id: ToolName,
     pub tool_name: ToolName,
     pub arguments_ref: BlobRef,
+    /// Why the program made the call, as it said. Display only: a request
+    /// sent again is the same call whatever it carries here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
+}
+
+/// The most of a call's annotation a scope records.
+pub const MAX_CODE_TOOL_ANNOTATION_BYTES: usize = 1_000;
+
+impl CodeToolCallSpec {
+    /// Whether `other` asks for the same call: everything but the
+    /// annotation.
+    pub fn same_call(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.binding_id == other.binding_id
+            && self.tool_id == other.tool_id
+            && self.tool_name == other.tool_name
+            && self.arguments_ref == other.arguments_ref
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -991,6 +1010,15 @@ fn validate_owner_free(
 
 fn validate_call(state: &CoreAgentState, call: &CodeToolCallSpec) -> Result<(), DomainError> {
     validate_id("request_id", &call.origin.request_id)?;
+    if call
+        .annotation
+        .as_ref()
+        .is_some_and(|annotation| annotation.len() > MAX_CODE_TOOL_ANNOTATION_BYTES)
+    {
+        return Err(invalid(format!(
+            "code tool call annotation exceeds {MAX_CODE_TOOL_ANNOTATION_BYTES} bytes"
+        )));
+    }
     let scope = state
         .code_tools
         .scopes
@@ -1163,7 +1191,7 @@ pub fn admit_code_tool_call_proposals(
     acknowledged: Option<u64>,
 ) -> Result<Vec<CoreAgentEventProposal>, DomainError> {
     if let Some(existing) = code_tool_call(state, &call.origin) {
-        return if existing.spec == call {
+        return if existing.spec.same_call(&call) {
             Ok(Vec::new())
         } else {
             Err(invalid(

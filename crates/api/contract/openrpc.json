@@ -13862,6 +13862,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "annotation": {
+            "description": "Why the program made the call, as it said (`{ why }`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "arguments": {
             "$ref": "#/components/schemas/ContentPreviewView"
           },

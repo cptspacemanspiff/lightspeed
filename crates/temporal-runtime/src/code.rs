@@ -396,6 +396,7 @@ impl CodeRunner {
                         binding_id: request.binding_id,
                         arguments_ref,
                         acknowledged: None,
+                        annotation: None,
                     },
                     Default::default(),
                 )

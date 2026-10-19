@@ -946,6 +946,54 @@ fn a_child_call_hands_on_the_callers_own_functions_by_contract_name() {
 }
 
 #[test]
+fn a_call_says_why_it_was_made_apart_from_its_arguments() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                await env.web.fetch({ url: "https://a.org" }, { why: "the claim cites it" });
+                await env.web.fetch({ url: "https://b.org" }, { why: "x".repeat(1500) });
+                await env.web.fetch({ url: "https://c.org" });
+                const refused = [];
+                for (const options of [{ why: 3 }, "why"]) {
+                    try { await env.web.fetch({ url: "https://d.org" }, options); }
+                    catch (error) { refused.push(error.message); }
+                }
+                return refused;
+            }
+        };
+    "#;
+    let (requests, report) = run_program(program_input(source, &["web.fetch"], SEED), |_| {
+        (Ok(json!({"status": 200})), None)
+    });
+    assert_eq!(report.error, None);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (
+                request.arguments["url"].clone(),
+                request.annotation.as_ref().map(String::len)
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (json!("https://a.org"), Some(18)),
+            (json!("https://b.org"), Some(crate::MAX_ANNOTATION_BYTES)),
+            (json!("https://c.org"), None),
+        ]
+    );
+    assert_eq!(
+        requests[0].annotation.as_deref(),
+        Some("the claim cites it")
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!([
+            "why must be a string",
+            "call options must be an object"
+        ]))
+    );
+}
+
+#[test]
 fn a_detached_child_is_taken_back_by_its_id() {
     let source = r#"
         export default {

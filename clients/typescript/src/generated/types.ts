@@ -6521,6 +6521,10 @@ export interface RunCallsListResponse {
  */
 export interface ProgramCallView {
   admittedAtMs: number;
+  /**
+   * Why the program made the call, as it said (`{ why }`).
+   */
+  annotation?: string | null;
   arguments: ContentPreviewView;
   /**
    * The program asked to cancel it.

@@ -881,6 +881,11 @@ export interface InvokeCodeToolRequest {
    * again, so the session may stop holding them.
    */
   acknowledged?: number | null;
+  /**
+   * From a program: why it made the call (`{ why }`). Shown with the
+   * call; a resent request may carry a different one.
+   */
+  annotation?: string | null;
   arguments_ref: string;
   binding_id: string;
   execution_id: string;

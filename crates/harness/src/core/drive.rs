@@ -10676,6 +10676,7 @@ mod tests {
             tool_id: test_tool_id(tool),
             tool_name: ToolName::new(tool),
             arguments_ref: BlobRef::from_bytes(b"{}"),
+            annotation: None,
         }
     }
 
@@ -12928,6 +12929,7 @@ mod tests {
             tool_id: test_tool_id(tool),
             tool_name: ToolName::new(tool),
             arguments_ref: BlobRef::from_bytes(b"{}"),
+            annotation: None,
         }
     }
 
@@ -14293,6 +14295,57 @@ mod tests {
             CoreAgentCommand::OpenCodeToolScope { scope },
         ));
         (drive, log, execution_id)
+    }
+
+    #[test]
+    fn a_call_sent_again_with_another_annotation_is_the_same_call() {
+        let (mut drive, mut log, execution_id) = echo_program_scope("program-annotation");
+        let admit = |annotation: &str| {
+            let mut call = scoped_call_spec(&execution_id, "1", "local_echo");
+            call.annotation = Some(annotation.to_owned());
+            CoreAgentCommand::AdmitCodeToolCall {
+                call,
+                acknowledged: None,
+            }
+        };
+        log.extend(code_tool_commit(&mut drive, admit("first reason")));
+        // Sent again, say after a lost reply: the same call, nothing new.
+        let again = drive.admit_command(admit("another reason"), 100).unwrap();
+        assert!(!matches!(again, CoreAgentAction::AppendEvents { .. }));
+        let recorded = crate::code_tool_call(
+            drive.state(),
+            &scoped_call_spec(&execution_id, "1", "local_echo").origin,
+        )
+        .unwrap();
+        assert_eq!(recorded.spec.annotation.as_deref(), Some("first reason"));
+        // A different call is still refused.
+        let mut changed = scoped_call_spec(&execution_id, "1", "local_echo");
+        changed.arguments_ref = BlobRef::from_bytes(b"{\"other\":1}");
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::AdmitCodeToolCall {
+                        call: changed,
+                        acknowledged: None,
+                    },
+                    100
+                )
+                .is_err()
+        );
+        // An annotation is bounded.
+        let mut long = scoped_call_spec(&execution_id, "2", "local_echo");
+        long.annotation = Some("x".repeat(crate::MAX_CODE_TOOL_ANNOTATION_BYTES + 1));
+        assert!(
+            drive
+                .admit_command(
+                    CoreAgentCommand::AdmitCodeToolCall {
+                        call: long,
+                        acknowledged: None,
+                    },
+                    100
+                )
+                .is_err()
+        );
     }
 
     #[test]

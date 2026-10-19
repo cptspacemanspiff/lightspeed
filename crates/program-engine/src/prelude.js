@@ -70,11 +70,22 @@
         ancestors.length = 0;
         return stringify(clone(value, ancestors));
     }
-    function invoke(id, args) {
+    // A call's options: `why`, the reason the program gives for it, shown
+    // with the call. Not part of its arguments.
+    function annotation(options) {
+        if (options === undefined || options === null) return undefined;
+        if (typeof options !== "object") throw new NativeTypeError("call options must be an object");
+        const why = options.why;
+        if (why === undefined || why === null) return undefined;
+        if (typeof why !== "string") throw new NativeTypeError("why must be a string");
+        return why;
+    }
+    function invoke(id, args, options) {
         const json = serialize(args);
+        const why = annotation(options);
         let request;
         const promise = new NativePromise(function (resolve, reject) {
-            request = send(id, json);
+            request = why === undefined ? send(id, json) : send(id, json, why);
             pending[request] = { resolve, reject };
         });
         return { request, promise };
@@ -103,10 +114,10 @@
         return promise;
     }
     // A call as `env` exposes it: argument errors reject its promise.
-    function call(id, args) {
+    function call(id, args, options) {
         let issued;
         try {
-            issued = invoke(id, args);
+            issued = invoke(id, args, options);
         } catch (error) {
             return NativePromise.reject(error);
         }
@@ -133,16 +144,16 @@
             const id = binding.binding_id;
             if (binding.name === "time.sleep") {
                 sleepId = id;
-                place(env, binding.name, freeze(function (args) {
-                    return sleep(args);
+                place(env, binding.name, freeze(function (args, options) {
+                    return sleep(args, options);
                 }));
                 continue;
             }
             if (binding.name === "input.open") {
-                place(env, binding.name, freeze(function (spec) {
+                place(env, binding.name, freeze(function (spec, options) {
                     let issued;
                     try {
-                        issued = invoke(id, spec);
+                        issued = invoke(id, spec, options);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -156,10 +167,10 @@
             if (binding.name === "input.handle") {
                 // Take back a request an earlier run detached: the handle
                 // is this run's again, withdrawn at its exit unless detached.
-                place(env, binding.name, freeze(function (requestId) {
+                place(env, binding.name, freeze(function (requestId, options) {
                     let issued;
                     try {
-                        issued = invoke(id, { id: requestId });
+                        issued = invoke(id, { id: requestId }, options);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -172,10 +183,10 @@
             }
             if (binding.name === "agent.run" || binding.name === "program.run") {
                 const noun = binding.name === "agent.run" ? "agent" : "program";
-                place(env, binding.name, freeze(function (args) {
+                place(env, binding.name, freeze(function (args, options) {
                     let issued;
                     try {
-                        issued = invoke(id, childArgs(args));
+                        issued = invoke(id, childArgs(args), options);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -191,10 +202,10 @@
                 // handle is this run's again, cancelled at its exit unless
                 // detached.
                 const noun = binding.name === "agent.handle" ? "agent" : "program";
-                place(env, binding.name, freeze(function (childId) {
+                place(env, binding.name, freeze(function (childId, options) {
                     let issued;
                     try {
-                        issued = invoke(id, { id: childId });
+                        issued = invoke(id, { id: childId }, options);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -207,10 +218,10 @@
             }
             if (binding.name === "agent.spawn" || binding.name === "program.spawn") {
                 const noun = binding.name === "agent.spawn" ? "agent" : "program";
-                place(env, binding.name, freeze(function (args) {
+                place(env, binding.name, freeze(function (args, options) {
                     let issued;
                     try {
-                        issued = invoke(id, childArgs(args));
+                        issued = invoke(id, childArgs(args), options);
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -221,8 +232,8 @@
                 }));
                 continue;
             }
-            place(env, binding.name, freeze(function (args) {
-                return call(id, args);
+            place(env, binding.name, freeze(function (args, options) {
+                return call(id, args, options);
             }));
         }
         return deepFreeze(env);
@@ -279,13 +290,13 @@
     // `time.sleep` is one durable call that completes once its delay has
     // elapsed; the clock is clamped to its deadline.
     let sleepId = null;
-    function sleep(args) {
+    function sleep(args, options) {
         if (sleepId === null) {
             return NativePromise.reject(new NativeError("Waiting requires the time.sleep contract"));
         }
         let issued;
         try {
-            issued = invoke(sleepId, args);
+            issued = invoke(sleepId, args, options);
         } catch (error) {
             return NativePromise.reject(error);
         }

@@ -4169,7 +4169,7 @@ const DELEGATING_PROGRAM: &str = r#"
         async run(input, env) {
             const agent = input.agent;
             const both = await Promise.all(["one", "two"].map(word =>
-                env.agent.run({ agent, input: "CHECK " + word, label: word })));
+                env.agent.run({ agent, input: "CHECK " + word, label: word }, { why: "check " + word })));
             const spawned = await env.agent.spawn({ agent, input: "CHECK three" });
             const third = await spawned.result();
             let failed = null;
@@ -4329,6 +4329,13 @@ async fn a_program_runs_child_agents_and_catches_their_failures() -> anyhow::Res
                 calls[0].arguments.preview.contains("CHECK"),
                 "{:?}",
                 calls[0]
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|call| call.annotation.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("check one"), Some("check two"), None, None, None, None]
             );
             assert!(
                 calls[0]

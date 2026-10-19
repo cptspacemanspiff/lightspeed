@@ -218,6 +218,7 @@ impl Fixture {
             binding_id,
             arguments_ref: self.store.put_bytes(serde_json::to_vec(&args)?).await?,
             acknowledged: None,
+            annotation: None,
         })
     }
 

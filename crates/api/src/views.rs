@@ -100,6 +100,9 @@ pub struct ProgramCallView {
     pub contract: Option<String>,
     /// The session tool that served it.
     pub tool: String,
+    /// Why the program made the call, as it said (`{ why }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
     pub status: ProgramCallStatusView,
     /// The program asked to cancel it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

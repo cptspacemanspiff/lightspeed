@@ -470,7 +470,9 @@ function CallRow({
             {CALL_STATUS_LABEL[call.status]}
           </Badge>
           {took && <span className="shrink-0 text-muted-foreground">{took}</span>}
-          <span className="min-w-0 truncate text-muted-foreground">{oneLine(call.arguments.preview)}</span>
+          {call.annotation
+            ? <span className="min-w-0 truncate italic text-muted-foreground" title={call.annotation}>{call.annotation}</span>
+            : <span className="min-w-0 truncate text-muted-foreground">{oneLine(call.arguments.preview)}</span>}
         </button>
         {call.childSessionId && (
           <Link className="shrink-0 underline-offset-2 hover:underline" to={sessionHref(call.childSessionId)}>
@@ -485,6 +487,9 @@ function CallRow({
       </div>
       {open && (
         <div className={cn("flex flex-col gap-2 px-7 pb-2")}>
+          {call.annotation && (
+            <p className="text-xs"><span className="font-medium">Why: </span>{call.annotation}</p>
+          )}
           <Preview label="Arguments" preview={call.arguments} loadFullText={loadFullText} />
           {call.output && <Preview label="Result" preview={call.output} loadFullText={loadFullText} />}
           {call.error && <Preview label="Error" preview={call.error} loadFullText={loadFullText} />}

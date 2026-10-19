@@ -108,6 +108,7 @@ impl GatewayAgentApi {
             request_id: record.request_id.clone(),
             contract: record.contract.clone(),
             tool: record.tool_name.clone(),
+            annotation: record.annotation.clone(),
             status: match record.status {
                 ProgramCallStatus::Pending => api::ProgramCallStatusView::Pending,
                 ProgramCallStatus::Waiting => api::ProgramCallStatusView::Waiting,

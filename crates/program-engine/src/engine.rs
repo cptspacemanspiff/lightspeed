@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
 };
 
-use rquickjs::{Ctx, Exception, Function, Module, Object, Promise, Value as JsValue};
+use rquickjs::{Ctx, Exception, Function, Module, Object, Promise, Value as JsValue, prelude::Opt};
 use serde_json::Value;
 
 use crate::*;
@@ -163,7 +163,11 @@ pub(crate) fn prepare_context<'js>(
         .collect();
     let send = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, binding_id: String, json: String| -> rquickjs::Result<String> {
+        move |ctx: Ctx<'js>,
+              binding_id: String,
+              json: String,
+              why: Opt<String>|
+              -> rquickjs::Result<String> {
             let mut state = send_state.borrow_mut();
             let failure = if !allowed.contains_key(&binding_id) {
                 Some(error(ExecutionErrorKind::Internal, "unrecognized binding"))
@@ -201,6 +205,16 @@ pub(crate) fn prepare_context<'js>(
                 request_id: request_id.clone(),
                 binding_id,
                 arguments,
+                annotation: why.0.map(|mut why| {
+                    if why.len() > crate::MAX_ANNOTATION_BYTES {
+                        let end = (0..=crate::MAX_ANNOTATION_BYTES)
+                            .rev()
+                            .find(|index| why.is_char_boundary(*index))
+                            .unwrap_or(0);
+                        why.truncate(end);
+                    }
+                    why
+                }),
             };
             outbox.borrow_mut().push(request);
             state.calls += 1;

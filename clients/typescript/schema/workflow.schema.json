@@ -1374,6 +1374,13 @@
             "null"
           ]
         },
+        "annotation": {
+          "description": "From a program: why it made the call (`{ why }`). Shown with the\ncall; a resent request may carry a different one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "arguments_ref": {
           "type": "string"
         },

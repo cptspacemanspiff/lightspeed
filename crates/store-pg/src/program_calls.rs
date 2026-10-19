@@ -71,6 +71,7 @@ async fn apply(
             tool_id,
             tool_name,
             arguments_ref,
+            annotation,
             seq,
             admitted_at_ms,
         } => sqlx::query(
@@ -78,9 +79,9 @@ async fn apply(
             INSERT INTO program_calls (
                 universe_id, session_id, execution_id, request_id, run_id, seq,
                 tool_call_id, binding_id, tool_id, tool_name, arguments_ref, status,
-                admitted_at_ms
+                admitted_at_ms, annotation
             )
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13
             WHERE EXISTS (
                 SELECT 1 FROM program_scopes
                 WHERE universe_id = $1 AND session_id = $2 AND execution_id = $3
@@ -99,7 +100,8 @@ async fn apply(
         .bind(tool_id)
         .bind(tool_name)
         .bind(arguments_ref.as_str().to_owned())
-        .bind(u64_to_i64(admitted_at_ms, "admitted_at_ms")?),
+        .bind(u64_to_i64(admitted_at_ms, "admitted_at_ms")?)
+        .bind(annotation),
         ProgramCallChange::Waiting {
             execution_id,
             request_id,
@@ -194,7 +196,8 @@ impl PgStore {
             r#"
             SELECT c.execution_id, c.request_id, c.run_id, c.seq, c.tool_call_id,
                 s.contracts ->> c.binding_id AS contract, c.tool_id, c.tool_name,
-                c.arguments_ref, c.status, c.cancel_requested, c.output_ref, c.error_ref,
+                c.arguments_ref, c.annotation, c.status, c.cancel_requested, c.output_ref,
+                c.error_ref,
                 c.duration_ms, c.admitted_at_ms, c.completed_at_ms, c.started_execution_id,
                 r.request_id AS input_request_id
             FROM program_calls c
@@ -306,6 +309,7 @@ fn program_call_from_row(
         tool_id: row.try_get("tool_id").map_err(get)?,
         tool_name: row.try_get("tool_name").map_err(get)?,
         arguments_ref: blob(row.try_get("arguments_ref").map_err(get)?)?,
+        annotation: row.try_get("annotation").map_err(get)?,
         status: parse_status(&status)?,
         cancel_requested: row.try_get("cancel_requested").map_err(get)?,
         output_ref: row

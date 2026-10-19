@@ -443,6 +443,7 @@ impl ProgramRunner {
                         binding_id: request.binding_id,
                         arguments_ref,
                         acknowledged: (acknowledged > 0).then_some(acknowledged),
+                        annotation: request.annotation,
                     },
                     Default::default(),
                 )

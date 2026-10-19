@@ -119,7 +119,14 @@ pub struct HostRequest {
     pub request_id: String,
     pub binding_id: String,
     pub arguments: Value,
+    /// Why the program made the call (`{ why }`), cut to
+    /// `MAX_ANNOTATION_BYTES`. Shown with the call; not an argument.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
 }
+
+/// The most of a call's `why` kept.
+pub const MAX_ANNOTATION_BYTES: usize = 1_000;
 
 /// A program's request to cancel something it holds: one of its calls the
 /// host already admitted, or a promise it has a handle to (an opened input

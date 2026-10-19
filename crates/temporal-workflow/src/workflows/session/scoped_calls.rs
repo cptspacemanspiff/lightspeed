@@ -494,6 +494,7 @@ fn invocation_command(
             tool_id: binding.tool_id.clone(),
             tool_name: binding.tool_name.clone(),
             arguments_ref: request.arguments_ref,
+            annotation: request.annotation,
         },
         acknowledged: request.acknowledged,
     })
@@ -1369,6 +1370,7 @@ mod tests {
                         tool_id: tool_id.clone(),
                         tool_name: tool_id,
                         arguments_ref: BlobRef::from_bytes(b"{}"),
+                        annotation: None,
                     },
                     promise_id_base: base,
                     status: CodeToolCallStatus::Pending,
@@ -1457,6 +1459,7 @@ mod tests {
             binding_id: "z-first".into(),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
+            annotation: None,
         };
         assert!(invocation_command(&state, request.clone()).is_ok());
         assert_eq!(
@@ -1606,6 +1609,7 @@ mod tests {
             binding_id: format!("binding:sha256:{:064x}", 1),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
+            annotation: None,
         };
         let resent = invocation_command(&state, invoke("call-1")).unwrap_err();
         assert_eq!(resent.kind, Rejection::Conflict);

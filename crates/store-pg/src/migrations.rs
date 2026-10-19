@@ -136,9 +136,14 @@ pub const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "program_calls",
         sql: include_str!("../migrations/015_program_calls.sql"),
     },
+    EmbeddedMigration {
+        version: 16,
+        name: "program_call_annotations",
+        sql: include_str!("../migrations/016_program_call_annotations.sql"),
+    },
 ];
 
-pub const REQUIRED_SCHEMA_REVISION: i64 = 15;
+pub const REQUIRED_SCHEMA_REVISION: i64 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaStatus {

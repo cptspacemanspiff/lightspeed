@@ -65,6 +65,10 @@ pub struct InvokeCodeToolRequest {
     /// again, so the session may stop holding them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged: Option<u64>,
+    /// From a program: why it made the call (`{ why }`). Shown with the
+    /// call; a resent request may carry a different one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
 }
 
 /// Close admission immediately. Cancellation additionally requests cleanup of
@@ -497,6 +501,7 @@ mod tests {
             binding_id: "binding-a".to_owned(),
             arguments_ref: BlobRef::from_bytes(b"{}"),
             acknowledged: None,
+            annotation: None,
         };
         let id = update_id(INVOKE_CODE_TOOL_UPDATE, &request);
         assert_eq!(id, update_id(INVOKE_CODE_TOOL_UPDATE, &request));
