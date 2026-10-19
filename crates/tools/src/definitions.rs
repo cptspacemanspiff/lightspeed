@@ -182,6 +182,12 @@ pub fn resolve(
         crate::subagents::PROGRAM_SPAWN_TOOL_ID => {
             subagent_tool_definition(SubagentToolKind::ProgramSpawn)?
         }
+        crate::subagents::AGENT_HANDLE_TOOL_ID => {
+            crate::subagents::child_handle_definition(SubagentToolKind::Spawn)?
+        }
+        crate::subagents::PROGRAM_HANDLE_TOOL_ID => {
+            crate::subagents::child_handle_definition(SubagentToolKind::ProgramSpawn)?
+        }
         "mcp.find_tools" => FunctionDefinition::new(
             "mcp_find_tools",
             format!(

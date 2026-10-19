@@ -23,6 +23,9 @@ pub struct ToolsetConfig {
     /// Register `input.remind` and `input.reassign`, which act on a
     /// program's open input requests. Program sessions only.
     pub input_controls: bool,
+    /// The spawning kinds whose detached children a later run may take
+    /// back (`agent.handle`, `program.handle`). Program sessions only.
+    pub child_handles: Vec<crate::subagents::SubagentToolKind>,
 }
 
 impl ToolsetConfig {
@@ -34,6 +37,7 @@ impl ToolsetConfig {
             environment_read: false,
             environment_selection: false,
             input_controls: false,
+            child_handles: Vec::new(),
         }
     }
 
@@ -539,6 +543,18 @@ pub fn register_toolset(config: &ToolsetConfig) -> ToolResult<RegisteredToolset>
                 ToolExecutionSpec::default(),
             ))?;
         }
+    }
+    for id in config
+        .child_handles
+        .iter()
+        .filter_map(|kind| kind.handle_tool_id())
+    {
+        add(register(
+            id,
+            BuiltinSettings::default(),
+            ToolParallelism::ParallelSafe,
+            ToolExecutionSpec::default(),
+        ))?;
     }
     Ok(RegisteredToolset { tools })
 }

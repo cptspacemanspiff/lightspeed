@@ -181,6 +181,25 @@
                 }));
                 continue;
             }
+            if (binding.name === "agent.handle" || binding.name === "program.handle") {
+                // Take back a child an earlier run spawned and detached: the
+                // handle is this run's again, cancelled at its exit unless
+                // detached.
+                const noun = binding.name === "agent.handle" ? "agent" : "program";
+                place(env, binding.name, freeze(function (childId) {
+                    let issued;
+                    try {
+                        issued = invoke(id, { id: childId });
+                    } catch (error) {
+                        return NativePromise.reject(error);
+                    }
+                    const taken = issued.promise.then(function (taken) {
+                        return childHandle(taken.executionId, taken.promise, noun);
+                    });
+                    return withCancel(taken, issued.request);
+                }));
+                continue;
+            }
             if (binding.name === "agent.spawn" || binding.name === "program.spawn") {
                 const noun = binding.name === "agent.spawn" ? "agent" : "program";
                 place(env, binding.name, freeze(function (args) {
@@ -394,8 +413,8 @@
     }
     // A spawned child: `result` awaits its result (an agent's envelope, a
     // program's output), `cancel` stops it and waits until it has settled,
-    // and `detach` keeps it running past the run's exits (no later run can
-    // take it back yet).
+    // and `detach` keeps it running past the run's exits, until a later run
+    // takes it back with `env.agent.handle(id)` or `env.program.handle(id)`.
     function childHandle(id, promise, noun) {
         let settled = null;
         const result = function () {

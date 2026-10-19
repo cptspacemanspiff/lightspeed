@@ -79,7 +79,10 @@ impl SessionPreparationService {
     /// A program session's toolset: built-ins on the canonical presentation
     /// and no provider-hosted tools, since no model presents them. Program
     /// contracts bind to exactly these tools.
-    pub(crate) fn program_toolset_config(config: &mut ToolsetConfig) {
+    pub(crate) fn program_toolset_config(
+        config: &mut ToolsetConfig,
+        session_config: &SessionConfig,
+    ) {
         config.builtin.presentation = tools::toolset::BuiltinToolPresentation::Canonical;
         config.web.search = None;
         config.concurrency.durable_sleep = config.concurrency.timer;
@@ -87,6 +90,17 @@ impl SessionPreparationService {
         // cancels, and its handle reminds and reassigns.
         config.concurrency.enabled = true;
         config.input_controls = true;
+        // A child the program spawns and detaches can be taken back by a
+        // later run.
+        config.child_handles = session_config
+            .features
+            .subagents
+            .as_ref()
+            .map(tools::subagents::SubagentToolKind::granted)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|kind| kind.handle_tool_id().is_some())
+            .collect();
     }
 
     /// The tool contracts a program session with this configuration offers.
@@ -102,7 +116,7 @@ impl SessionPreparationService {
             session_config.features.environments.is_some(),
             false,
         );
-        Self::program_toolset_config(&mut config);
+        Self::program_toolset_config(&mut config, session_config);
         let toolset = register_toolset(&config)
             .map_err(|e| AgentApiError::internal(format!("build session tools: {e}")))?;
         let mut tools = toolset.tools.into_values().collect::<Vec<_>>();
@@ -580,7 +594,7 @@ impl SessionPreparationService {
             jobs,
         );
         if source.driver.is_program() {
-            Self::program_toolset_config(&mut config);
+            Self::program_toolset_config(&mut config, session_config);
         }
         enable_concurrency_for_workflow_tools(&mut config, materialized.iter().copied());
         let mut toolset = register_toolset(&config)

@@ -16,6 +16,34 @@ use crate::{
     runtime::ToolInvocationOutput,
 };
 
+/// The reply promise of the call to the workflow tool `tool_id` that started
+/// the execution `execution_id`, if this session made one.
+pub fn started_call_promise<'a>(
+    state: &'a harness::CoreAgentState,
+    tool_id: &str,
+    execution_id: &str,
+) -> Option<&'a harness::Promise> {
+    let binding = state
+        .workflow_tools
+        .bindings
+        .get(&harness::WorkflowToolId::new(tool_id))?;
+    let WorkflowToolTarget::Start { start } = &binding.target else {
+        return None;
+    };
+    state
+        .workflow_tools
+        .start_requests
+        .values()
+        .filter(|invocation| invocation.tool_id == binding.definition.tool_id)
+        .find(|invocation| {
+            workflow_tool_execution_id(&invocation.invocation_id, &start.recipe_fingerprint)
+                == execution_id
+        })
+        .and_then(|invocation| invocation.completion_promises.as_ref())
+        .and_then(|promises| promises.get(REPLY_COMPLETION_KEY))
+        .and_then(|promise_id| state.promises.promises.get(promise_id))
+}
+
 /// Structured acknowledgement persisted by the generic workflow-tool adapter.
 /// Joined calls replace this internal acknowledgement with their eventual reply.
 #[derive(serde::Serialize, schemars::JsonSchema)]

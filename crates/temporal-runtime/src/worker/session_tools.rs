@@ -1035,21 +1035,30 @@ impl SessionTools {
         self.succeeded_tool_result(call, &output, visible).await
     }
 
-    /// `input.handle`: give the calling run back a request an earlier run of
-    /// this session opened and detached. The handle's promise is read from
+    /// `input.handle`, `agent.handle` and `program.handle`: give the calling
+    /// run back what an earlier run of this session started and detached (an
+    /// input request, a spawned child). The handle's promise is read from
     /// the session's own state; the result's adopt effect makes it the run's
     /// again, so the run's exit withdraws it unless the run detaches it.
-    async fn invoke_input_handle_call(
+    async fn invoke_handle_call(
         &self,
         session_id: &harness::SessionId,
         run_id: harness::RunId,
         call: &harness::ToolInvocationRequest,
+        handled: Handled,
     ) -> Result<ToolInvocationResult, CoreAgentIoError> {
-        let args = match self
-            .read_tool_args::<tools::human_input::InputHandleArgs>(call)
-            .await
-        {
-            Ok(args) => args,
+        let id = match handled {
+            Handled::InputRequest => self
+                .read_tool_args::<tools::human_input::InputHandleArgs>(call)
+                .await
+                .map(|args| args.id),
+            Handled::Child(_) => self
+                .read_tool_args::<tools::subagents::ChildHandleArgs>(call)
+                .await
+                .map(|args| args.id),
+        };
+        let id = match id {
+            Ok(id) => id,
             Err(error) => {
                 return failed_result(self.blobs.as_ref(), call.call_id.clone(), error.to_string())
                     .await;
@@ -1073,16 +1082,18 @@ impl SessionTools {
                 .await
                 .map_err(io_error)?;
         let state = &loaded.reduced.core_state;
-        let Some(promise) = tools::human_input::opened_request_promise(state, &args.id) else {
+        let Some(promise) =
+            tools::workflow_tool::started_call_promise(state, handled.workflow_tool_id(), &id)
+        else {
             return failed_result(
                 self.blobs.as_ref(),
                 call.call_id.clone(),
-                format!("unknown input request {}", args.id),
+                format!("unknown {} {id}", handled.noun()),
             )
             .await;
         };
-        // A request an earlier run kept without detaching was withdrawn at
-        // its exit; it was never this run's to take.
+        // What an earlier run kept without detaching was withdrawn at its
+        // exit; it was never this run's to take.
         let mut effects = Vec::new();
         match promise.scope {
             harness::PromiseScope::Session => {
@@ -1096,26 +1107,41 @@ impl SessionTools {
                     self.blobs.as_ref(),
                     call.call_id.clone(),
                     format!(
-                        "input request {} was not detached by the run that opened it",
-                        args.id
+                        "{} {id} was not detached by the run that started it",
+                        handled.noun()
                     ),
                 )
                 .await;
             }
         }
-        let output = tools::human_input::InputHandleOutput {
-            execution_id: args.id,
-            promise: promise.promise_id.as_str().to_owned(),
-            status: match promise.status {
-                harness::PromiseStatus::Pending => "pending",
-                harness::PromiseStatus::Resolved => "resolved",
-                harness::PromiseStatus::Failed => "failed",
-                harness::PromiseStatus::Cancelled => "cancelled",
+        let promise_id = promise.promise_id.as_str().to_owned();
+        let status = match promise.status {
+            harness::PromiseStatus::Pending => "pending",
+            harness::PromiseStatus::Resolved => "resolved",
+            harness::PromiseStatus::Failed => "failed",
+            harness::PromiseStatus::Cancelled => "cancelled",
+        }
+        .to_owned();
+        let mut result = match handled {
+            Handled::InputRequest => {
+                let output = tools::human_input::InputHandleOutput {
+                    execution_id: id,
+                    promise: promise_id,
+                    status,
+                };
+                let visible = serde_json::to_string(&output).map_err(io_error)?;
+                self.succeeded_tool_result(call, &output, visible).await?
             }
-            .to_owned(),
+            Handled::Child(_) => {
+                let output = tools::subagents::ChildHandleOutput {
+                    execution_id: id,
+                    promise: promise_id,
+                    status,
+                };
+                let visible = serde_json::to_string(&output).map_err(io_error)?;
+                self.succeeded_tool_result(call, &output, visible).await?
+            }
         };
-        let visible = serde_json::to_string(&output).map_err(io_error)?;
-        let mut result = self.succeeded_tool_result(call, &output, visible).await?;
         result.effects = effects;
         Ok(result)
     }
@@ -1839,6 +1865,39 @@ fn unsupported_environment_data_transport(transport: impl std::fmt::Display) -> 
     ))
 }
 
+/// What a handle tool gives back: an `input.open` request, or a child a
+/// spawning kind started.
+#[derive(Clone, Copy)]
+enum Handled {
+    InputRequest,
+    Child(tools::subagents::SubagentToolKind),
+}
+
+impl Handled {
+    fn by(tool_id: &str) -> Option<Self> {
+        if tool_id == tools::human_input::INPUT_HANDLE_TOOL_ID {
+            return Some(Self::InputRequest);
+        }
+        tools::subagents::SubagentToolKind::from_handle_tool_id(tool_id).map(Self::Child)
+    }
+
+    /// The workflow tool whose call started what the handle names.
+    fn workflow_tool_id(self) -> &'static str {
+        match self {
+            Self::InputRequest => tools::human_input::INPUT_OPEN_WORKFLOW_TOOL_ID,
+            Self::Child(kind) => kind.workflow_tool_id(),
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::InputRequest => "input request",
+            Self::Child(kind) if kind.is_program() => "child program",
+            Self::Child(_) => "child agent",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BatchCallRoute {
     Workflow,
@@ -2214,13 +2273,13 @@ impl SessionTools {
                 .await
                 .map(ToolCallExecution::Completed);
         }
-        if call
+        if let Some(handled) = call
             .tool_id
             .as_ref()
-            .is_some_and(|id| id.as_str() == tools::human_input::INPUT_HANDLE_TOOL_ID)
+            .and_then(|id| Handled::by(id.as_str()))
         {
             return self
-                .invoke_input_handle_call(&request.session_id, request.run_id, &call)
+                .invoke_handle_call(&request.session_id, request.run_id, &call, handled)
                 .await
                 .map(ToolCallExecution::Completed);
         }

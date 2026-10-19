@@ -892,6 +892,76 @@ fn a_child_program_returns_its_output_and_fails_by_its_status() {
 }
 
 #[test]
+fn a_detached_child_is_taken_back_by_its_id() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const agent = await env.agent.handle("wtx:sha256:agent");
+                const program = await env.program.handle("wtx:sha256:program");
+                const results = [(await agent.result()).output, await program.result()];
+                let failure = null;
+                try { await env.program.handle("wtx:sha256:other"); } catch (error) { failure = error.message; }
+                return { ids: [agent.id, program.id], results, failure };
+            }
+        };
+    "#;
+    let contracts = ["agent.handle", "program.handle", "promise.await"];
+    let (requests, report) = run_program(program_input(source, &contracts, SEED), |request| {
+        let handle = |id: &str, promise: &str| json!({"executionId": id, "promise": promise, "status": "pending"});
+        let outcome = match (request.binding_id.as_str(), &request.arguments) {
+            ("opaque-agent.handle", arguments) => {
+                handle(arguments["id"].as_str().unwrap(), "promise_3")
+            }
+            ("opaque-program.handle", arguments) if arguments["id"] == "wtx:sha256:program" => {
+                handle("wtx:sha256:program", "promise_4")
+            }
+            ("opaque-program.handle", _) => {
+                return (
+                    Err(HostError {
+                        kind: "tool_failed".into(),
+                        message: "unknown child program wtx:sha256:other".into(),
+                        value: None,
+                    }),
+                    None,
+                );
+            }
+            ("opaque-promise.await", arguments) if arguments["promises"][0] == "promise_3" => {
+                json!({"outcome": "completed", "results": [{"promise_id": "promise_3",
+                    "status": "resolved", "output": agent_envelope("completed", Some("seen"), None)}]})
+            }
+            ("opaque-promise.await", _) => json!({"outcome": "completed", "results": [
+                {"promise_id": "promise_4", "status": "resolved", "output": {"verdict": "kept"}}
+            ]}),
+            (other, _) => panic!("unexpected call {other}"),
+        };
+        (Ok(outcome), None)
+    });
+    assert_eq!(report.error, None);
+    let calls = requests
+        .iter()
+        .map(|request| (request.binding_id.as_str(), request.arguments.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            ("opaque-agent.handle", json!({"id": "wtx:sha256:agent"})),
+            ("opaque-program.handle", json!({"id": "wtx:sha256:program"})),
+            ("opaque-promise.await", json!({"promises": ["promise_3"]})),
+            ("opaque-promise.await", json!({"promises": ["promise_4"]})),
+            ("opaque-program.handle", json!({"id": "wtx:sha256:other"})),
+        ]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "ids": ["wtx:sha256:agent", "wtx:sha256:program"],
+            "results": ["seen", {"verdict": "kept"}],
+            "failure": "unknown child program wtx:sha256:other",
+        }))
+    );
+}
+
+#[test]
 fn a_spawned_child_agent_is_a_handle_over_its_promise() {
     let source = r#"
         export default {

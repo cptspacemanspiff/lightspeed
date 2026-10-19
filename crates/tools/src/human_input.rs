@@ -515,27 +515,7 @@ pub fn opened_request_promise<'a>(
     state: &'a harness::CoreAgentState,
     execution_id: &str,
 ) -> Option<&'a harness::Promise> {
-    let binding = state
-        .workflow_tools
-        .bindings
-        .get(&harness::WorkflowToolId::new(INPUT_OPEN_WORKFLOW_TOOL_ID))?;
-    let harness::WorkflowToolTarget::Start { start } = &binding.target else {
-        return None;
-    };
-    state
-        .workflow_tools
-        .start_requests
-        .values()
-        .filter(|invocation| invocation.tool_id == binding.definition.tool_id)
-        .find(|invocation| {
-            harness::workflow_tool_execution_id(
-                &invocation.invocation_id,
-                &start.recipe_fingerprint,
-            ) == execution_id
-        })
-        .and_then(|invocation| invocation.completion_promises.as_ref())
-        .and_then(|promises| promises.get(harness::REPLY_COMPLETION_KEY))
-        .and_then(|promise_id| state.promises.promises.get(promise_id))
+    crate::workflow_tool::started_call_promise(state, INPUT_OPEN_WORKFLOW_TOOL_ID, execution_id)
 }
 
 pub fn input_handle_definition() -> crate::runtime::FunctionDefinition {

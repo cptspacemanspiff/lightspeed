@@ -4,7 +4,9 @@
 //! same ways. All are system workflow-tool bindings whose start-on-call recipe
 //! runs the sub-agent execution workflow (which runs program children too);
 //! the session runtime only admits the call, pins the grant, and hands the
-//! invocation to the generic start machinery.
+//! invocation to the generic start machinery. `agent.handle` and
+//! `program.handle` give a program's later run back a child an earlier run
+//! spawned and detached.
 
 use crate::catalog::{
     SUBAGENT_CATALOG_CONTEXT_KEY, catalog_context_input, catalog_publication_command,
@@ -34,6 +36,10 @@ pub const PROGRAM_RUN_WORKFLOW_TOOL_ID: &str = "subprogram-run";
 pub const PROGRAM_SPAWN_WORKFLOW_TOOL_ID: &str = "subprogram-spawn";
 pub const PROGRAM_RUN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subprogram.run.v1";
 pub const PROGRAM_SPAWN_WORKFLOW_SEMANTIC_TYPE: &str = "lightspeed.subprogram.spawn.v1";
+pub const AGENT_HANDLE_TOOL_NAME: &str = "agent_handle";
+pub const AGENT_HANDLE_TOOL_ID: &str = "subagent.handle";
+pub const PROGRAM_HANDLE_TOOL_NAME: &str = "program_handle";
+pub const PROGRAM_HANDLE_TOOL_ID: &str = "subprogram.handle";
 pub const SUBAGENT_WORKFLOW_TYPE: &str = "SubagentExecutionWorkflow";
 pub const MAX_SUBAGENT_INPUT_BYTES: usize = 256 * 1024;
 pub const MAX_SUBAGENT_LABEL_BYTES: usize = 200;
@@ -147,6 +153,24 @@ impl SubagentToolKind {
             .into_iter()
             .find(|kind| kind.workflow_tool_id() == tool_id)
     }
+
+    /// The session tool that gives a later run back a child this kind
+    /// spawned and a run detached. Only the spawning kinds have one.
+    pub fn handle_tool_id(self) -> Option<&'static str> {
+        match self {
+            Self::Spawn => Some(AGENT_HANDLE_TOOL_ID),
+            Self::ProgramSpawn => Some(PROGRAM_HANDLE_TOOL_ID),
+            Self::Run | Self::ProgramRun => None,
+        }
+    }
+
+    /// The spawning kind whose children the handle tool `tool_id` takes
+    /// back.
+    pub fn from_handle_tool_id(tool_id: &str) -> Option<Self> {
+        [Self::Spawn, Self::ProgramSpawn]
+            .into_iter()
+            .find(|kind| kind.handle_tool_id() == Some(tool_id))
+    }
 }
 
 pub fn is_subagent_workflow_tool_id(tool_id: &str) -> bool {
@@ -215,6 +239,53 @@ impl ProgramCallArgs {
         }
         validate_label(self.label.as_deref())
     }
+}
+
+/// A child an earlier run of this session spawned and detached, named by the
+/// id its spawn handle carried.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChildHandleArgs {
+    /// The child's id, from its spawn handle.
+    pub id: String,
+}
+
+/// The child's handle parts, as its spawn returned them: its execution id
+/// and the promise that settles with its result, now the calling run's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildHandleOutput {
+    pub execution_id: String,
+    pub promise: String,
+    /// pending, resolved, failed or cancelled.
+    pub status: String,
+}
+
+/// `agent_handle` or `program_handle`, for the spawning `kind`.
+pub fn child_handle_definition(
+    kind: SubagentToolKind,
+) -> ToolResult<crate::runtime::FunctionDefinition> {
+    let (name, description) = match kind {
+        SubagentToolKind::Spawn => (
+            AGENT_HANDLE_TOOL_NAME,
+            "Take back a child agent an earlier run of this session spawned and detached. The calling run owns it again: it is cancelled at the run's exit unless detached again.",
+        ),
+        SubagentToolKind::ProgramSpawn => (
+            PROGRAM_HANDLE_TOOL_NAME,
+            "Take back a child program an earlier run of this session spawned and detached. The calling run owns it again: it is cancelled at the run's exit unless detached again.",
+        ),
+        SubagentToolKind::Run | SubagentToolKind::ProgramRun => {
+            return Err(ToolError::InvalidRequest {
+                message: format!("{} children have no handles", kind.tool_name()),
+            });
+        }
+    };
+    Ok(crate::runtime::FunctionDefinition::new(
+        name,
+        description,
+        crate::definitions::input_schema_for::<ChildHandleArgs>(),
+    )
+    .with_output_schema(crate::definitions::output_schema_for::<ChildHandleOutput>()))
 }
 
 fn validate_label(label: Option<&str>) -> ToolResult<()> {

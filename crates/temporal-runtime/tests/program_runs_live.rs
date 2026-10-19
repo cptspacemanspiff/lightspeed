@@ -4204,6 +4204,165 @@ const CHECKER_PROGRAM: &str = r#"
     };
 "#;
 
+/// Sleeps `ms` before answering.
+const SLOW_CHECKER_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            if (input.ms) await env.time.sleep({ ms: input.ms });
+            return { claim: input.claim, slept: input.ms ?? 0, verdict: "supported" };
+        }
+    };
+"#;
+
+/// Spawns a child and returns its id, detaching it when asked; or takes
+/// back the child `take` names and returns its result.
+const KEEPING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            if (input.take) {
+                try {
+                    const child = await env.program.handle(input.take);
+                    return { claim: input.claim, slept: 0, result: await child.result() };
+                } catch (error) {
+                    return { claim: input.claim, slept: 0, failed: error.message };
+                }
+            }
+            const child = await env.program.spawn({
+                program: input.checker,
+                input: { claim: input.claim, ms: input.ms },
+            });
+            if (input.detach) await child.detach();
+            return { claim: input.claim, slept: 0, id: child.id };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_later_run_takes_back_a_child_program_an_earlier_run_detached() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let checker = api::ProfileId::new(format!("live_checker_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&checker, SLOW_CHECKER_PROGRAM, &[("time.sleep", None)]),
+            })
+            .await?;
+            let profile_id = api::ProfileId::new(format!("live_program_{suffix}"));
+            let mut profile = program_profile(
+                &profile_id,
+                KEEPING_PROGRAM,
+                &[
+                    ("program.spawn", None),
+                    ("program.handle", None),
+                    ("promise.await", None),
+                    ("promise.detach", None),
+                ],
+            );
+            profile
+                .document
+                .config
+                .as_mut()
+                .and_then(|config| config.features.as_mut())
+                .expect("features")
+                .subagents = Some(api::SubagentsFeature {
+                version: api::CURRENT_FEATURE_VERSION,
+                agents: Vec::new(),
+                programs: vec![api::SubagentProgramRef {
+                    profile_id: checker.clone(),
+                }],
+                max_depth: 2,
+                max_descendants: None,
+                max_per_run: 4,
+                max_concurrent: 4,
+                deadline_ms: 120_000,
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let output = |input: Value| {
+                let api = api.clone();
+                let store = store.clone();
+                let session_id = session_id.clone();
+                async move {
+                    let run = start_program_run(&api, &session_id, input).await?;
+                    let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+                    anyhow::ensure!(run.status == api::RunStatus::Completed, "{run:?}");
+                    read_json(&store, &run.output.as_ref().expect("output").content_ref).await
+                }
+            };
+            let checker = checker.as_str();
+
+            // A child still running when its run ends, taken back by the next
+            // run, which awaits it.
+            let kept =
+                output(json!({"claim": "slow", "checker": checker, "ms": 3000, "detach": true}))
+                    .await?;
+            let taken = output(json!({"claim": "take", "take": kept["id"]})).await?;
+            assert_eq!(
+                taken["result"],
+                json!({"claim": "slow", "slept": 3000, "verdict": "supported"}),
+                "{taken}"
+            );
+
+            // A child that finished between runs. (It sleeps a little: a
+            // child already finished cannot be detached.)
+            let kept =
+                output(json!({"claim": "quick", "checker": checker, "ms": 500, "detach": true}))
+                    .await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while !programs::session_state(&store, &session_id)
+                .await?
+                .promises
+                .promises
+                .values()
+                .any(|promise| {
+                    promise.scope == harness::PromiseScope::Session
+                        && promise.status == harness::PromiseStatus::Resolved
+                })
+            {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the detached child never finished"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let taken = output(json!({"claim": "take", "take": kept["id"]})).await?;
+            assert_eq!(
+                taken["result"],
+                json!({"claim": "quick", "slept": 500, "verdict": "supported"}),
+                "{taken}"
+            );
+
+            // A child its run did not detach was cancelled at that run's exit.
+            let dropped =
+                output(json!({"claim": "dropped", "checker": checker, "ms": 3000})).await?;
+            let id = dropped["id"].as_str().expect("id");
+            let refused = output(json!({"claim": "take", "take": id})).await?;
+            assert_eq!(
+                refused["failed"],
+                json!(format!(
+                    "child program {id} was not detached by the run that started it"
+                )),
+                "{refused}"
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [profile_id, api::ProfileId::new(checker)] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
 const PROGRAM_CALLER_PROGRAM: &str = r#"
     export default {
         async run(input, env) {
@@ -4584,7 +4743,11 @@ async fn each_run_of_a_program_may_create_its_own_children_per_run() -> anyhow::
                 let output =
                     read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
                 assert_eq!(output["ran"], json!(2), "{claim}: {output}");
-                assert_eq!(output["refused"], json!([2, "agent_rejected"]), "{claim}: {output}");
+                assert_eq!(
+                    output["refused"],
+                    json!([2, "agent_rejected"]),
+                    "{claim}: {output}"
+                );
             }
 
             let _ = api

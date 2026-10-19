@@ -74,6 +74,8 @@ const CONTRACTS: &[ContractDefinition] = contracts! {
     "agent.spawn" => crate::subagents::AGENT_SPAWN_TOOL_ID,
     "program.run" => crate::subagents::PROGRAM_RUN_TOOL_ID,
     "program.spawn" => crate::subagents::PROGRAM_SPAWN_TOOL_ID,
+    "agent.handle" => crate::subagents::AGENT_HANDLE_TOOL_ID,
+    "program.handle" => crate::subagents::PROGRAM_HANDLE_TOOL_ID,
 };
 
 /// Every contract a program can require, in name order.
@@ -334,13 +336,15 @@ impl ContractError {
 }
 
 /// Contracts that are no use without another: an open input request is
-/// answered by awaiting its promise, and so is one taken back or a spawned
-/// child agent or program.
+/// answered by awaiting its promise, and so is one taken back, and a spawned
+/// child agent or program, whether just spawned or taken back.
 const COMPANIONS: &[(&str, &str)] = &[
     ("input.open", "promise.await"),
     ("input.handle", "promise.await"),
     ("agent.spawn", "promise.await"),
     ("program.spawn", "promise.await"),
+    ("agent.handle", "promise.await"),
+    ("program.handle", "promise.await"),
 ];
 
 /// Pin a program's required contracts against what a session offers. A
@@ -666,7 +670,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn program_contracts_bind_with_the_program_tools_and_spawn_needs_await() {
-        let mut tools = register_toolset(&config(true))
+        let mut config = config(true);
+        config.child_handles = crate::subagents::SubagentToolKind::PROGRAMS.to_vec();
+        let mut tools = register_toolset(&config)
             .unwrap()
             .tools
             .into_values()
@@ -679,6 +685,7 @@ mod tests {
         for (name, tool) in [
             ("program.run", "program_run"),
             ("program.spawn", "program_spawn"),
+            ("program.handle", "program_handle"),
         ] {
             let contract = available
                 .iter()
@@ -687,12 +694,16 @@ mod tests {
             assert_eq!(contract.tool_name.as_str(), tool);
         }
         assert!(!names(&available).contains(&"agent.run"));
-        assert_eq!(
-            pin_requirements(&available, [("program.spawn", None)])
-                .unwrap_err()
-                .kind(),
-            "contract_incomplete"
-        );
+        assert!(!names(&available).contains(&"agent.handle"));
+        for handle in ["program.spawn", "program.handle"] {
+            assert_eq!(
+                pin_requirements(&available, [(handle, None)])
+                    .unwrap_err()
+                    .kind(),
+                "contract_incomplete",
+                "{handle}"
+            );
+        }
         pin_requirements(
             &available,
             [("program.spawn", None), ("promise.await", None)],
