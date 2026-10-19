@@ -361,6 +361,9 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
     if (name === "subagents") {
       const agents = subagentProfileIds(feature.agents);
       next.agents = agents.map((profileId) => ({ profileId }));
+      // The editor offers agents only; keep a grant's programs as authored.
+      const programs = subagentProfileIds(feature.programs);
+      if (programs.length) next.programs = programs.map((profileId) => ({ profileId }));
       for (const key of ["maxDepth", "maxPerRun", "maxDescendants", "maxConcurrent", "deadlineMs"] as const) {
         const value = parseNumber(numberString(feature[key]));
         if (value !== undefined && value > 0) next[key] = value;

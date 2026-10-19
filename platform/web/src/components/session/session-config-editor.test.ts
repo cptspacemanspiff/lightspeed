@@ -355,6 +355,7 @@ describe("sub-agent feature config", () => {
       features: {
         subagents: {
           agents: [{ profileId: "primary" }],
+          programs: [{ profileId: "checker" }],
           maxDepth: 3,
           maxPerRun: 8,
           maxDescendants: 24,
