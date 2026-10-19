@@ -63,6 +63,12 @@ export function useSessionResources(universeId: string, config: unknown, activeE
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
+/// "2 agents", "1 program", "2 agents, 1 program"; "0 agents" for neither.
+function childGrantLabel(agents: number, programs: number): string {
+  const parts = [agents > 0 && plural(agents, "agent"), programs > 0 && plural(programs, "program")].filter(Boolean);
+  return parts.length ? parts.join(", ") : plural(0, "agent");
+}
+
 /// What the session can reach, as chips in the strip under its header:
 /// its environment, attached workspaces, MCP servers, sub-agent profiles, and
 /// web, code-mode, and timer tools. Each chip opens the details and where to
@@ -154,7 +160,8 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
         </Chip>
       )}
       {agents && (
-        <Chip icon={Network} label={plural(agents.profiles.length, "agent")} muted={agents.profiles.length === 0} title="Sub-agent profiles">
+        <Chip icon={Network} label={childGrantLabel(agents.profiles.length, agents.programs.length)}
+          muted={agents.profiles.length + agents.programs.length === 0} title="Sub-agent and program profiles">
           <Heading title="Sub-agent profiles" detail="Profiles the agent may run as sub-agents." />
           {agents.profiles.length === 0
             ? <Empty>No profiles are listed.</Empty>
@@ -162,6 +169,15 @@ export function SessionResourceChips({ resources, slug, onConfigure }: {
               <Row key={profile}
                 primary={<Link to={`/u/${slug}/profiles/${encodeURIComponent(profile)}`} className="font-mono hover:underline">{profile}</Link>} />
             ))}
+          {agents.programs.length > 0 && (
+            <>
+              <Heading title="Program profiles" detail="Programs it may run as sub-programs." />
+              {agents.programs.map((profile) => (
+                <Row key={profile}
+                  primary={<Link to={`/u/${slug}/profiles/${encodeURIComponent(profile)}`} className="font-mono hover:underline">{profile}</Link>} />
+              ))}
+            </>
+          )}
           {(agents.maxDepth !== undefined || agents.maxConcurrent !== undefined) && (
             <Note>{[agents.maxDepth !== undefined && `Up to ${agents.maxDepth} levels deep`, agents.maxConcurrent !== undefined && `${agents.maxConcurrent} open at once`].filter(Boolean).join(" · ")}.</Note>
           )}

@@ -35,7 +35,8 @@ export interface SessionResources {
   mcp?: {
     servers: Array<{ serverId: string; label: string; tools: string[] | null; toolTotal?: number; approval: boolean; tone: ResourceTone; status?: string }>;
   };
-  agents?: { profiles: string[]; maxDepth?: number; maxConcurrent?: number };
+  /// The sub-agents grant: agent profiles, and program profiles, it may run.
+  agents?: { profiles: string[]; programs: string[]; maxDepth?: number; maxConcurrent?: number };
   web?: { search: boolean; fetch: boolean };
   codeMode?: boolean;
   timers: boolean;
@@ -158,6 +159,7 @@ export function sessionResources(
     const feature = record(features.subagents);
     result.agents = {
       profiles: list(feature.agents).flatMap((agent) => text(agent.profileId) ?? []),
+      programs: list(feature.programs).flatMap((program) => text(program.profileId) ?? []),
       ...(typeof feature.maxDepth === "number" ? { maxDepth: feature.maxDepth } : {}),
       ...(typeof feature.maxConcurrent === "number" ? { maxConcurrent: feature.maxConcurrent } : {}),
     };

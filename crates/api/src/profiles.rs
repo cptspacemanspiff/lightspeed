@@ -158,6 +158,7 @@ impl AgentProfile {
             description: self.description.clone(),
             revision: self.revision,
             updated_at_ms: self.updated_at_ms,
+            program: self.document.program.is_some(),
         }
     }
 }
@@ -172,6 +173,11 @@ pub struct AgentProfileSummary {
     pub description: Option<String>,
     pub revision: u64,
     pub updated_at_ms: i64,
+    /// Whether sessions from this profile run a program (the profile has a
+    /// `program`). A sub-agents grant lists program profiles under
+    /// `programs`, the others under `agents`.
+    #[serde(default)]
+    pub program: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

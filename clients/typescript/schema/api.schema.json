@@ -2804,6 +2804,11 @@
         "profileId": {
           "$ref": "#/definitions/ProfileId"
         },
+        "program": {
+          "default": false,
+          "description": "Whether sessions from this profile run a program (the profile has a\n`program`). A sub-agents grant lists program profiles under\n`programs`, the others under `agents`.",
+          "type": "boolean"
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,

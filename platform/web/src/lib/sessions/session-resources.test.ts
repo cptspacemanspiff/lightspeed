@@ -53,7 +53,7 @@ it("names grants from the catalogs and flags what is missing or unhealthy", () =
     { serverId: "github", label: "GitHub", tools: ["issues"], toolTotal: 3, approval: true, tone: "ok", status: "active" },
     { serverId: "linear", label: "linear", tools: null, approval: false, tone: "problem", status: "needsAuthConfig" },
   ]);
-  expect(resources.agents).toEqual({ profiles: ["reviewer"], maxDepth: 2, maxConcurrent: 4 });
+  expect(resources.agents).toEqual({ profiles: ["reviewer"], programs: [], maxDepth: 2, maxConcurrent: 4 });
   expect(resources.web).toEqual({ search: true, fetch: false });
   expect(resources.codeMode).toBeUndefined();
   expect(resources.timers).toBe(false);
@@ -80,4 +80,12 @@ it("includes code mode as a resource only when its feature grant is present", ()
 
 it("treats sleeping machines as idle because tools wake them", () => {
   expect(["ready", "paused", "booting", "failed"].map(environmentTone)).toEqual(["ok", "idle", "busy", "problem"]);
+});
+
+it("lists the programs a sub-agents grant may run", () => {
+  const resources = sessionResources(
+    { features: { subagents: { agents: [], programs: [{ profileId: "claim-check" }] } } },
+    null,
+  );
+  expect(resources.agents).toEqual({ profiles: [], programs: ["claim-check"] });
 });

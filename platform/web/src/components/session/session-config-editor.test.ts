@@ -383,6 +383,13 @@ describe("sub-agent feature config", () => {
       },
     });
   });
+
+  it("accepts a grant of programs alone and refuses one listing neither", () => {
+    const programsOnly = normalizeSessionConfig({ features: { subagents: { programs: ["checker"] } } });
+    expect(programsOnly).toEqual({ features: { subagents: { agents: [], programs: [{ profileId: "checker" }] } } });
+    expect(configError(programsOnly!)).toBeNull();
+    expect(configError({ features: { subagents: { agents: [] } } })).toBe("Sub-agents require at least one agent or program profile.");
+  });
 });
 
 describe("MCP feature config", () => {

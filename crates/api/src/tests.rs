@@ -3832,3 +3832,37 @@ fn code_mode_feature_defaults_and_public_field_names_are_stable() {
     assert_eq!(value["maxOutstandingToolCalls"], 16);
     assert!(serde_json::from_value::<CodeModeFeature>(json!({"maxToolCallz":4})).is_err());
 }
+
+#[test]
+fn a_profile_summary_says_whether_the_profile_runs_a_program() {
+    let profile = |program: Option<ProgramSpec>| AgentProfile {
+        profile_id: ProfileId::new("checker"),
+        display_name: None,
+        description: None,
+        revision: 1,
+        document: ProfileDocument {
+            program,
+            ..ProfileDocument::default()
+        },
+        created_at_ms: 0,
+        updated_at_ms: 0,
+    };
+    assert!(!profile(None).summary().program);
+    let program = ProgramSpec {
+        source: ProgramSource::Text {
+            text: "export default { async run(input) { return input; } };".to_owned(),
+        },
+        semantics_version: 1,
+        input_schema: None,
+        output_schema: None,
+        limits: None,
+        requires: Vec::new(),
+        approvals: None,
+    };
+    let summary = profile(Some(program)).summary();
+    assert!(summary.program);
+    assert_eq!(
+        serde_json::to_value(&summary).unwrap()["program"],
+        json!(true)
+    );
+}

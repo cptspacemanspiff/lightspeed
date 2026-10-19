@@ -17,7 +17,11 @@ export function capabilitySummary(config: Record<string, unknown> | undefined): 
   const labels = Object.keys(features).map((key) => {
     const value = features[key] as Record<string, unknown> | undefined;
     if (key === "mcp" && Array.isArray(value?.servers)) return `MCP servers (${value.servers.length})`;
-    if (key === "subagents" && Array.isArray(value?.agents)) return `Sub-agents (${value.agents.length})`;
+    if (key === "subagents") {
+      const agents = Array.isArray(value?.agents) ? value.agents.length : 0;
+      const programs = Array.isArray(value?.programs) ? value.programs.length : 0;
+      return programs ? `Sub-agents (${agents}) and programs (${programs})` : `Sub-agents (${agents})`;
+    }
     return FEATURE_LABELS[key] ?? key;
   });
   const model = (config?.model as { model?: string } | undefined)?.model;

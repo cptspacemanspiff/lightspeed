@@ -170,6 +170,8 @@ export interface ProfileSummary {
   description?: string | null;
   revision: number;
   updatedAtMs: number;
+  /// Sessions from this profile run a program.
+  program?: boolean;
 }
 
 export type ProfileSessionRetention = ProfileSessionRetentionView;

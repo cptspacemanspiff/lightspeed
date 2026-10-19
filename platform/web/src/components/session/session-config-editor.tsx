@@ -81,6 +81,8 @@ export type ModelOption = {
 export type ProfileOption = {
   profileId: string;
   displayName?: string | null;
+  /// Sessions from it run a program: a grant lists it under programs.
+  program?: boolean;
 };
 
 export type EnvironmentOption = {
@@ -140,7 +142,7 @@ const featureInfo: Record<
   },
   subagents: {
     title: "Sub-agents",
-    description: "Let the agent run listed profiles as sub-agents (agent_run / agent_spawn) within root-scoped limits.",
+    description: "Let the agent run listed agent profiles (agent_run / agent_spawn) and program profiles (program_run / program_spawn) as children within root-scoped limits.",
     icon: Network,
   },
   codeMode: {
@@ -361,7 +363,6 @@ export function normalizeSessionConfig(value: unknown): SessionConfig | undefine
     if (name === "subagents") {
       const agents = subagentProfileIds(feature.agents);
       next.agents = agents.map((profileId) => ({ profileId }));
-      // The editor offers agents only; keep a grant's programs as authored.
       const programs = subagentProfileIds(feature.programs);
       if (programs.length) next.programs = programs.map((profileId) => ({ profileId }));
       for (const key of ["maxDepth", "maxPerRun", "maxDescendants", "maxConcurrent", "deadlineMs"] as const) {
@@ -463,8 +464,9 @@ export function configError(config: SessionConfig | undefined, pinnedApiKind?: s
     }
   }
   const subagents = record(record(config.features).subagents);
-  if ("subagents" in record(config.features) && !subagentProfileIds(subagents.agents).length) {
-    return "Sub-agents require at least one agent profile.";
+  if ("subagents" in record(config.features)
+    && !subagentProfileIds(subagents.agents).length && !subagentProfileIds(subagents.programs).length) {
+    return "Sub-agents require at least one agent or program profile.";
   }
   const codeError = codeModeError(record(record(config.features).codeMode));
   if (codeError) return codeError;
@@ -1691,6 +1693,9 @@ function SubagentFields({
   const readOnly = useContext(ConfigReadOnlyContext);
   const id = useId();
   const agents = subagentProfileIds(feature.agents);
+  const programs = subagentProfileIds(feature.programs);
+  const agentProfiles = profiles.filter((profile) => !profile.program);
+  const programProfiles = profiles.filter((profile) => profile.program);
   const limits = [
     { key: "maxDepth", label: "Max depth", placeholder: "2", hint: "How deep sub-agents may nest below this session." },
     { key: "maxPerRun", label: "Max per run", placeholder: "16", hint: "Sub-agent sessions created across the tree during one run of the root." },
@@ -1705,14 +1710,29 @@ function SubagentFields({
         <FieldLabel>Agents</FieldLabel>
         <ProfileMultiSelect
           value={agents}
-          profiles={profiles}
+          profiles={agentProfiles}
           onChange={(values) => patch((next) => {
             next.agents = values;
           })}
-          placeholder="Pick the profiles the agent may run"
+          placeholder="Pick the agent profiles it may run"
         />
         <FieldDescription className="text-xs">
           The agent menu. Every listed profile must exist; the model sees ids and descriptions in its sub-agent catalog.
+        </FieldDescription>
+      </Field>
+      <Field className="sm:col-span-2">
+        <FieldLabel>Programs</FieldLabel>
+        <ProfileMultiSelect
+          value={programs}
+          profiles={programProfiles}
+          onChange={(values) => patch((next) => {
+            if (values.length) next.programs = values;
+            else delete next.programs;
+          })}
+          placeholder="Pick the program profiles it may run"
+        />
+        <FieldDescription className="text-xs">
+          The program menu. A child program runs once with the caller&apos;s JSON input and returns its output. A program calls them with program.run and program.spawn, which it must require.
         </FieldDescription>
       </Field>
       <SettingsDisclosure

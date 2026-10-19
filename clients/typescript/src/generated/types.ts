@@ -6443,6 +6443,12 @@ export interface AgentProfileSummary {
   description?: string | null;
   displayName?: string | null;
   profileId: ProfileId;
+  /**
+   * Whether sessions from this profile run a program (the profile has a
+   * `program`). A sub-agents grant lists program profiles under
+   * `programs`, the others under `agents`.
+   */
+  program?: boolean;
   revision: number;
   updatedAtMs: number;
 }
