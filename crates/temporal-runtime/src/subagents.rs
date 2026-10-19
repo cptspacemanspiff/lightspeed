@@ -292,10 +292,11 @@ impl SubagentService {
             if let Err(error) = args.validate() {
                 return self.rejected(error.to_string()).await;
             }
+            // `validate` refused any `env`: a program runs with its own grants.
             ChildCall {
                 profile: args.program,
                 label: args.label,
-                env: args.env,
+                env: None,
                 run: RunStartSource::Program {
                     input: args.input,
                     input_defaults: None,
@@ -425,31 +426,14 @@ impl SubagentService {
                 ))
                 .await;
         }
-        if kind.is_program() {
-            let parent_config = self.runtime.session_config(&parent_session_id).await?;
-            if let Some(excess) = crate::subagent_grants::excess_grant(
-                document
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.features.as_ref()),
-                parent_config
-                    .as_ref()
-                    .and_then(|config| config.features.as_ref()),
-            ) {
-                return self
-                    .rejected_for(
-                        "grant_exceeded",
-                        format!(
-                            "program {profile_id} asks for {excess}, which its caller does not hold"
-                        ),
-                    )
-                    .await;
-            }
-        }
-        // What the child may use: what the calling program named in `env`,
-        // resolved against the contracts its run holds, or else the list
-        // the parent was itself given.
+        // A program child runs with its own profile's grants, whoever calls
+        // it: the caller needs only the program in its grant, and neither
+        // its `env` (refused with the arguments) nor its own narrowing
+        // reaches the child. An agent child may use what the calling
+        // program named in `env`, resolved against the contracts its run
+        // holds, or else the list the parent was itself given.
         let env = match &call.env {
+            _ if kind.is_program() => None,
             Some(names) => {
                 let Some(held) = self
                     .runtime
@@ -478,23 +462,6 @@ impl SubagentService {
             }
             None => parent.origin.as_ref().and_then(|origin| origin.env.clone()),
         };
-        // A program child can call only the contracts it requires.
-        if let (Some(env), Some(program)) = (&env, &profile.document.program)
-            && let Some(missing) = program.requires.iter().find(|required| {
-                !env.iter()
-                    .any(|granted| granted.contract == required.contract)
-            })
-        {
-            return self
-                .rejected_for(
-                    "outside_env",
-                    format!(
-                        "program {profile_id} requires {}, which its caller did not pass in env",
-                        missing.contract
-                    ),
-                )
-                .await;
-        }
         let child_session_id = child_session_id(&start.execution_id);
         let display_name = call.label.clone().or_else(|| {
             profile
@@ -1419,10 +1386,19 @@ mod tests {
         execution_id: &str,
         program: &str,
     ) -> WorkflowToolStartArgs {
+        program_start_args_from(blobs, execution_id, "parent", program).await
+    }
+
+    async fn program_start_args_from(
+        blobs: &InMemoryBlobStore,
+        execution_id: &str,
+        parent: &str,
+        program: &str,
+    ) -> WorkflowToolStartArgs {
         let mut start = start_args(
             blobs,
             execution_id,
-            "parent",
+            parent,
             program,
             program,
             SubagentLimits::default(),
@@ -2024,30 +2000,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_program_child_that_asks_for_more_than_its_caller_holds_is_never_created() {
+    async fn a_program_child_runs_with_grants_its_caller_does_not_hold() {
+        // The caller holds no features at all; the program's own timers
+        // grant is its to use.
         let runtime =
             FakeChildRuntime::with_program("checker", 1, serde_json::json!({ "timers": {} }));
         let h = harness(runtime).await;
         let start = program_start_args(&h.blobs, "wte:c", "checker").await;
-        let refused = rejection(
-            &h.blobs,
-            h.service.prepare(start, 10).await.expect("prepare"),
-        )
-        .await;
-        assert_eq!(refused["reason"], "grant_exceeded");
-        assert!(
-            refused["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("the timers feature")),
-            "{refused}"
-        );
-        assert!(h.runtime.started_sessions.lock().unwrap().is_empty());
-        let children = h
-            .sessions
-            .load_session(&child_session_id("wte:c"))
-            .await
-            .expect("load");
-        assert!(children.is_none(), "no tree slot was taken");
+        let (child, _) = prepared(h.service.prepare(start, 10).await.expect("prepare"));
+        assert!(child.program);
+        assert_eq!(h.runtime.started_sessions.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2781,50 +2743,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_program_child_must_find_every_contract_it_requires_in_env() {
+    async fn a_program_child_takes_no_env_and_no_narrowing_from_its_caller() {
         let runtime =
             FakeChildRuntime::with_program("checker", 1, serde_json::json!({ "timers": {} }));
-        runtime
-            .profiles
-            .lock()
-            .unwrap()
-            .get_mut("checker")
-            .and_then(|profile| profile.document.program.as_mut())
-            .expect("program")
-            .requires = vec![api::ProgramContractRequirement {
-            contract: "time.sleep".to_owned(),
-            digest: None,
-        }];
-        *runtime.parent_config.lock().unwrap() = Some(api::SessionConfig {
-            features: Some(serde_json::from_value(serde_json::json!({ "timers": {} })).unwrap()),
-            ..Default::default()
-        });
-        *runtime.parent_contracts.lock().unwrap() =
-            Some(vec![delegated("time.sleep"), delegated("web.fetch")]);
+        *runtime.parent_contracts.lock().unwrap() = Some(vec![delegated("time.sleep")]);
         let h = harness(runtime).await;
-        let call = |env: &[&str]| serde_json::json!({ "program": "checker", "input": { "claim": "x" }, "env": env });
 
+        // `env` cannot narrow a program: the call is refused before a child
+        // exists.
         let start = program_start_args(&h.blobs, "wte:a", "checker").await;
-        let start = with_arguments(&h.blobs, start, call(&["web.fetch"])).await;
-        let refused = rejection(
+        let start = with_arguments(
+            &h.blobs,
+            start,
+            serde_json::json!({ "program": "checker", "input": { "claim": "x" }, "env": ["time.sleep"] }),
+        )
+        .await;
+        let message = rejection_message(
             &h.blobs,
             h.service.prepare(start, 10).await.expect("prepare"),
         )
         .await;
-        assert_eq!(refused["reason"], "outside_env", "{refused}");
+        assert!(message.contains("own permissions"), "{message}");
         assert!(
-            refused["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("requires time.sleep")),
-            "{refused}"
+            h.sessions
+                .load_session(&child_session_id("wte:a"))
+                .await
+                .expect("load")
+                .is_none()
         );
 
-        let start = program_start_args(&h.blobs, "wte:b", "checker").await;
-        let start = with_arguments(&h.blobs, start, call(&["time.sleep"])).await;
+        // A narrowed parent's list stops at a program child.
+        h.sessions
+            .create_session(CreateSession {
+                metadata: Default::default(),
+                session_id: SessionId::new("narrowed"),
+                display_name: None,
+                origin: Some(SessionOrigin {
+                    kind: SessionOriginKind::Subagent,
+                    parent_session_id: SessionId::new("parent"),
+                    parent_run_id: 1,
+                    root_session_id: SessionId::new("parent"),
+                    depth: 1,
+                    root_run_id: Some(1),
+                    invocation_id: format!("wti:sha256:{}", "e".repeat(64)),
+                    profile_id: "reviewer".to_owned(),
+                    profile_revision: 1,
+                    limits: SubagentLimits::default(),
+                    env: Some(vec![delegated("web.fetch")]),
+                }),
+                delete_after_close_ms: None,
+                created_at_ms: 2,
+            })
+            .await
+            .expect("create narrowed");
+        let start = program_start_args_from(&h.blobs, "wte:b", "narrowed", "checker").await;
         let (child, _) = prepared(h.service.prepare(start, 11).await.expect("prepare"));
-        assert_eq!(
-            child_origin(&h, &child).await.env,
-            Some(vec![delegated("time.sleep")])
-        );
+        assert_eq!(child_origin(&h, &child).await.env, None);
     }
 }

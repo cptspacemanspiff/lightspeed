@@ -262,9 +262,10 @@
         define(node, last, { value: leaf, enumerable: true });
         reflectApply(weakSet, contractOf, [leaf, name]);
     }
-    // A child call names what the child may use with the caller's own
-    // functions from `env` (`env: [env.web.fetch]`); the host gets their
-    // contract names. A parent can hand on only what it holds.
+    // An agent child call names what the child may use with the caller's
+    // own functions from `env` (`env: [env.web.fetch]`); the host gets their
+    // contract names. A parent can hand on only what it holds. A program
+    // child takes no `env`: it runs with its own permissions.
     function childArgs(args) {
         if (args === null || typeof args !== "object" || !hasOwn(args, "env") || args.env === undefined) {
             return args;
@@ -426,7 +427,7 @@
 
     // A child (`noun` is "agent" or "program") that did not complete fails
     // its call with a document of its `status`; one that could not start,
-    // with `{ error }` (and a `reason`, such as "grant_exceeded", when the
+    // with `{ error }` (and a `reason`, such as "outside_env", when the
     // runtime gives one). The program sees `agent_failed` / `program_failed`,
     // `agent_cancelled` / `program_cancelled` (cancelled from elsewhere),
     // `deadline_exceeded` or `agent_rejected` / `program_rejected` as the

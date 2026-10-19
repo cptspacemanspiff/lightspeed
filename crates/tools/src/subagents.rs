@@ -46,8 +46,9 @@ pub const MAX_SUBAGENT_LABEL_BYTES: usize = 200;
 /// The most contracts one call's `env` may name.
 pub const MAX_CHILD_ENV_CONTRACTS: usize = 256;
 
-/// Who calls a child-session tool. A program may narrow what the child holds
-/// with `env`; a model hands the child its profile's grants.
+/// Who calls a child-session tool. A program may narrow what an agent child
+/// holds with `env`; a model hands the child its profile's grants, and a
+/// program child always runs with its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChildCaller {
     Model,
@@ -240,14 +241,20 @@ pub struct ProgramCallArgs {
     /// Human-readable name shown in the sessions tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// The contracts the child may use, each one the calling program holds.
-    /// Omitted, the child keeps its profile's grants.
+    /// Not offered: a program runs with its own profile's grants, whoever
+    /// calls it. Read only so a call naming it is refused plainly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<Vec<String>>,
+    pub env: Option<Value>,
 }
 
 impl ProgramCallArgs {
     pub fn validate(&self) -> ToolResult<()> {
+        if self.env.is_some() {
+            return Err(ToolError::InvalidRequest {
+                message: "env narrows agent children only: a program runs with its own permissions"
+                    .to_owned(),
+            });
+        }
         if self.program.trim().is_empty() {
             return Err(ToolError::InvalidRequest {
                 message: "program must name a profile from the program catalog".to_owned(),
@@ -259,8 +266,7 @@ impl ProgramCallArgs {
                 message: format!("input must be at most {MAX_SUBAGENT_INPUT_BYTES} bytes of JSON"),
             });
         }
-        validate_label(self.label.as_deref())?;
-        validate_env(self.env.as_deref())
+        validate_label(self.label.as_deref())
     }
 }
 
@@ -564,7 +570,7 @@ pub fn subagent_tool_definition(
     } else {
         agent_call_input_schema()
     };
-    if caller == ChildCaller::Program {
+    if caller == ChildCaller::Program && !kind.is_program() {
         input_schema["properties"]["env"] = json!({
             "type": "array",
             "items": {"type": "string"},
@@ -670,8 +676,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_program_is_offered_env_and_its_names_are_contracts() {
-        for kind in [SubagentToolKind::Run, SubagentToolKind::ProgramSpawn] {
+    fn only_a_program_calling_an_agent_is_offered_env_and_its_names_are_contracts() {
+        for kind in [
+            SubagentToolKind::Run,
+            SubagentToolKind::Spawn,
+            SubagentToolKind::ProgramRun,
+            SubagentToolKind::ProgramSpawn,
+        ] {
             let property = |caller| {
                 subagent_tool_definition(kind, caller)
                     .expect("definition")
@@ -680,11 +691,15 @@ mod tests {
                     .cloned()
             };
             assert_eq!(property(ChildCaller::Model), None, "{kind:?}");
-            assert!(property(ChildCaller::Program).is_some(), "{kind:?}");
+            assert_eq!(
+                property(ChildCaller::Program).is_some(),
+                !kind.is_program(),
+                "a program child runs with its own permissions: {kind:?}"
+            );
         }
         let args = |env: Value| {
-            serde_json::from_value::<ProgramCallArgs>(
-                json!({ "program": "checker", "input": {}, "env": env }),
+            serde_json::from_value::<AgentCallArgs>(
+                json!({ "agent": "reviewer", "input": "x", "env": env }),
             )
             .expect("decode")
             .validate()
@@ -693,6 +708,13 @@ mod tests {
         for env in [json!(["web.fetch", "web.fetch"]), json!(["Web Fetch"])] {
             assert!(args(env.clone()).is_err(), "{env}");
         }
+        let refused = serde_json::from_value::<ProgramCallArgs>(
+            json!({ "program": "checker", "input": {}, "env": ["web.fetch"] }),
+        )
+        .expect("decode")
+        .validate()
+        .expect_err("env on a program call");
+        assert!(refused.to_string().contains("own permissions"), "{refused}");
     }
 
     #[test]

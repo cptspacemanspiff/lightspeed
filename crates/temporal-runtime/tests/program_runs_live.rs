@@ -4681,22 +4681,19 @@ async fn a_later_run_takes_back_a_child_program_an_earlier_run_detached() -> any
 }
 
 /// Asks a child agent which tools it has, narrowed to web fetch and not; runs
-/// a child program that needs the timer, given it and not.
+/// a child program that needs the timer on its own grants, and is refused
+/// when it tries to narrow one with `env`.
 const NARROWING_PROGRAM: &str = r#"
     export default {
         async run(input, env) {
             const narrowed = await env.agent.run({ agent: input.agent, input: "TOOLS", env: [env.web.fetch] });
             const full = await env.agent.run({ agent: input.agent, input: "TOOLS" });
-            const ran = await env.program.run({
-                program: input.checker,
-                input: { claim: "timed", ms: 1 },
-                env: [env.time.sleep],
-            });
+            const ran = await env.program.run({ program: input.checker, input: { claim: "timed", ms: 1 } });
             let refused = null;
             try {
                 await env.program.run({ program: input.checker, input: { claim: "x" }, env: [env.web.fetch] });
             } catch (error) {
-                refused = [error.kind, error.value.reason];
+                refused = [error.kind, error.message.includes("own permissions")];
             }
             return { claim: input.claim, slept: 0, narrowed: narrowed.output, full: full.output, ran, refused };
         }
@@ -4798,10 +4795,8 @@ async fn a_program_hands_its_children_only_what_it_names_in_env() -> anyhow::Res
                 output["ran"],
                 json!({"claim": "timed", "slept": 1, "verdict": "supported"})
             );
-            assert_eq!(
-                output["refused"],
-                json!(["program_rejected", "outside_env"])
-            );
+            // The tool refuses it before any child starts.
+            assert_eq!(output["refused"], json!(["tool_failed", true]));
 
             let _ = api
                 .close_session(api::SessionCloseParams {
@@ -4828,20 +4823,18 @@ const PROGRAM_CALLER_PROGRAM: &str = r#"
             let failed = null;
             try { await env.program.run({ program: input.checker, input: { claim: "bad" } }); }
             catch (error) { failed = [error.kind, error.message, error.value.status]; }
-            let refused = null;
-            try { await env.program.run({ program: input.greedy, input: { claim: "x" } }); }
-            catch (error) { refused = [error.kind, error.value.reason]; }
+            const greedy = await env.program.run({ program: input.greedy, input: { claim: "x" } });
             let invalid = null;
             try { await env.program.run({ program: input.checker, input: { nope: 1 } }); }
             catch (error) { invalid = error.kind; }
-            return { claim: input.claim, slept: 0, ran, spawned, failed, refused, invalid };
+            return { claim: input.claim, slept: 0, ran, spawned, failed, greedy, invalid };
         }
     };
 "#;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local Temporal and PostgreSQL; run serially"]
-async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result<()> {
+async fn a_program_runs_child_programs_that_hold_their_own_grants() -> anyhow::Result<()> {
     with_program_workers(InputTimeouts::default(), |api, store, session_id| {
         Box::pin(async move {
             let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -4850,7 +4843,8 @@ async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result
                 profile: program_profile(&checker, CHECKER_PROGRAM, &[]),
             })
             .await?;
-            // A child that also wants web fetch, which its caller lacks.
+            // A child holding web fetch, which its caller lacks: it runs with
+            // its own grants.
             let greedy = api::ProfileId::new(format!("live_greedy_{suffix}"));
             let mut greedy_profile = program_profile(&greedy, CHECKER_PROGRAM, &[]);
             greedy_profile
@@ -4927,13 +4921,13 @@ async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result
                     "ran": {"claim": "one", "slept": 0, "verdict": "supported"},
                     "spawned": {"claim": "two", "slept": 0, "verdict": "supported"},
                     "failed": ["program_failed", "javascript: no sources for bad", "failed"],
-                    "refused": ["program_rejected", "grant_exceeded"],
+                    "greedy": {"claim": "x", "slept": 0, "verdict": "supported"},
                     "invalid": "program_rejected",
                 })
             );
 
-            // Three children ran (the greedy one and the invalid input never
-            // did); each is a closed program session pinned to its profile.
+            // Four children ran (the invalid input never did); each is a
+            // closed program session pinned to its profile.
             let children = api
                 .list_sessions(api::SessionListParams {
                     trees: vec![session_id.as_str().to_owned()],
@@ -4943,7 +4937,7 @@ async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result
                 .await?
                 .result
                 .sessions;
-            assert_eq!(children.len(), 3, "{children:?}");
+            assert_eq!(children.len(), 4, "{children:?}");
             for child in &children {
                 let view = api
                     .read_session(api::SessionReadParams {
@@ -4958,7 +4952,7 @@ async fn a_program_runs_child_programs_within_its_own_grants() -> anyhow::Result
                     matches!(
                         &view.driver,
                         api::SessionDriverView::Program { program_id: Some(id), revision: Some(1), .. }
-                            if id == checker.as_str()
+                            if id == checker.as_str() || id == greedy.as_str()
                     ),
                     "{:?}",
                     view.driver
