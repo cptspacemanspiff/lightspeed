@@ -1017,9 +1017,7 @@ pub fn await_spec_from_args(
     })
 }
 
-pub fn child_session_id(execution_id: &str) -> SessionId {
-    SessionId::new(format!("agent_{}", digest_suffix(execution_id)))
-}
+pub use harness::storage::child_session_id;
 
 fn digest_suffix(value: &str) -> String {
     let digest = BlobRef::from_bytes(value.as_bytes());
@@ -1968,6 +1966,19 @@ mod tests {
             agent_profile_id: "reviewer".to_owned(),
             program: false,
         }
+    }
+
+    #[test]
+    fn transcripts_name_the_children_of_every_child_starting_workflow_tool() {
+        assert_eq!(
+            api_projection::CHILD_SESSION_WORKFLOW_TOOL_IDS,
+            [
+                tools::subagents::AGENT_RUN_WORKFLOW_TOOL_ID,
+                tools::subagents::AGENT_SPAWN_WORKFLOW_TOOL_ID,
+                tools::subagents::PROGRAM_RUN_WORKFLOW_TOOL_ID,
+                tools::subagents::PROGRAM_SPAWN_WORKFLOW_TOOL_ID,
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

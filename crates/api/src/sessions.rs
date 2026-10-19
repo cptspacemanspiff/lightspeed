@@ -1511,6 +1511,11 @@ pub enum SessionEventKindView {
         /// System-derived deterministic execution id of the started plugin
         /// workflow.
         execution_id: String,
+        /// The child session the started workflow creates, for the
+        /// sub-agent and sub-program run and spawn tools. A start refused
+        /// before its child existed names a session that was never created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
         /// Keyed completion promises created atomically with the start
         /// intent.
         completion_promises: std::collections::BTreeMap<String, String>,

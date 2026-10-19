@@ -106,6 +106,19 @@ pub struct DelegatedContract {
     pub tool_name: String,
 }
 
+/// The session a sub-agent or sub-program workflow execution creates. It is
+/// derived from the execution, so a retried start finds the same session,
+/// and a reader that knows the execution (a transcript, a program's call
+/// list) knows the child without asking for it.
+pub fn child_session_id(execution_id: &str) -> SessionId {
+    let digest = BlobRef::from_bytes(execution_id.as_bytes());
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .unwrap_or(digest.as_str());
+    SessionId::new(format!("agent_{}", &hex[..32]))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOriginKind {

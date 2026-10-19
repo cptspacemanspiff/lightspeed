@@ -99,6 +99,10 @@ export interface TranscriptToolCall {
   /// The call began before the loaded history window. Older pages hydrate it.
   continuation?: boolean;
   display?: ToolCallDisplay | null;
+  /// The child session a sub-agent or sub-program call's workflow creates,
+  /// once it was asked to start. A call refused before its child existed
+  /// still names one, so prefer the session its output names.
+  childSessionId?: string;
   attachments?: ToolAttachmentView[];
   effects?: Array<{ kind?: string; data?: Record<string, string> }>;
   /// Observed times of the call's dispatch and terminal result; the window
@@ -373,6 +377,12 @@ export function applyEvents(
         syncToolGroupStatusForCall(next, String(kind.callId));
         break;
       }
+      case "workflowToolStartRequested":
+        if (kind.callId && kind.childSessionId) {
+          const childSessionId = kind.childSessionId;
+          updateToolCall(next, kind.callId, (call) => ({ ...call, childSessionId }));
+        }
+        break;
       case "toolBatchDeferred":
         updateToolGroupStatus(next, String(kind.batchId), "waiting");
         setRunLabel(next, "waiting for tools");

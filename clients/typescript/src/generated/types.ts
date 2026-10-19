@@ -582,6 +582,12 @@ export type SessionEventKindView =
       bindingFingerprint: string;
       callId?: string | null;
       /**
+       * The child session the started workflow creates, for the
+       * sub-agent and sub-program run and spawn tools. A start refused
+       * before its child existed names a session that was never created.
+       */
+      childSessionId?: string | null;
+      /**
        * Keyed completion promises created atomically with the start
        * intent.
        */
@@ -3148,6 +3154,13 @@ export interface ToolCallView {
    */
   attachments?: ToolAttachmentView[];
   callId: string;
+  /**
+   * The child session an `agent_run`, `agent_spawn`, `program_run` or
+   * `program_spawn` call's workflow creates, once that workflow was
+   * asked to start. A call refused before its child existed names a
+   * session that was never created.
+   */
+  childSessionId?: string | null;
   /**
    * When the call's terminal result was committed. The window to
    * `startedAtMs` includes runtime scheduling overhead.

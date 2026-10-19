@@ -1237,3 +1237,13 @@ describe("run attribution and timing", () => {
     expect(state.entries).toMatchObject([{ kind: "tool-group", runId: "run_4", status: "succeeded" }]);
   });
 });
+
+it("names the child session a sub-agent or sub-program call's workflow creates", () => {
+  const state = applyEvents(emptyTranscript(), [
+    event(1, { type: "runStarted" }),
+    event(2, { type: "toolBatchStarted", calls: [{ callId: "call", toolName: "program_run", argumentsRef: "sha256:args", arguments: '{"program":"claim-check"}' }] }),
+    event(3, { type: "workflowToolStartRequested", callId: "call", executionId: "wtx:a", childSessionId: "agent_child" }),
+    event(4, { type: "workflowToolStartRequested", callId: "missing", executionId: "wtx:b", childSessionId: "agent_other" }),
+  ]);
+  expect(state.entries).toMatchObject([{ kind: "tool-group", calls: [{ callId: "call", childSessionId: "agent_child" }] }]);
+});

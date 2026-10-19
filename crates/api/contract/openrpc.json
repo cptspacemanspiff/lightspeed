@@ -15774,6 +15774,13 @@
                   "null"
                 ]
               },
+              "childSessionId": {
+                "description": "The child session the started workflow creates, for the\nsub-agent and sub-program run and spawn tools. A start refused\nbefore its child existed names a session that was never created.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "completionPromises": {
                 "additionalProperties": {
                   "type": "string"
@@ -18880,6 +18887,13 @@
           },
           "callId": {
             "type": "string"
+          },
+          "childSessionId": {
+            "description": "The child session an `agent_run`, `agent_spawn`, `program_run` or\n`program_spawn` call's workflow creates, once that workflow was\nasked to start. A call refused before its child existed names a\nsession that was never created.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "completedAtMs": {
             "description": "When the call's terminal result was committed. The window to\n`startedAtMs` includes runtime scheduling overhead.",

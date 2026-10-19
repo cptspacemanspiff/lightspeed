@@ -107,6 +107,29 @@ describe("step rows", () => {
     expect(subagentSessionId('{"promise":"promise_3"}')).toBeNull();
   });
 
+  it("links a program row to the child its start names, unless the call failed without one", () => {
+    const links = { sessionHref: (id: string) => `/u/acme/sessions/${id}` };
+    const program = (over: Partial<TranscriptToolCall>) => call({
+      toolName: "program_run", output: '{"verdict":"ok"}', childSessionId: "agent_child",
+      display: { group: "agent", verb: "Run program", target: "claim-check" },
+      ...over,
+    });
+    const html = render(group([program({})]), links);
+    expect(html).toContain('href="/u/acme/sessions/agent_child"');
+    expect(text(html)).toContain("Run program claim-check");
+
+    const refused = render(group([program({ status: "failed", isError: true, output: "agent_rejected: refused" })]), links);
+    expect(refused).not.toContain("href=");
+    const failed = render(group([program({
+      status: "failed", isError: true, output: '{"session_id":"agent_failed_child","status":"failed"}',
+    })]), links);
+    expect(failed).toContain('href="/u/acme/sessions/agent_failed_child"');
+
+    expect(batchTitle([program({}), program({ callId: "call-2" })])).toBe("Run 2 programs");
+    const spawn = { display: { group: "agent", verb: "Spawn program" } } as const;
+    expect(batchTitle([program(spawn), program({ ...spawn, callId: "call-2" })])).toBe("Spawn 2 programs");
+  });
+
   it("shortens long environment paths on the row and keeps the full path as the title", () => {
     const full = "/Users/lukas/dev/lightspeed/.lightspeed-dev/envd/workspace/agent_node_demo.js";
     expect(shortenTarget(full)).toBe("…/lightspeed/.lightspeed-dev/envd/workspace/agent_node_demo.js");

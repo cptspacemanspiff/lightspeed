@@ -1672,6 +1672,7 @@ fn run_view_can_expose_tool_batches() {
             status: ToolItemStatus::Succeeded,
             calls: vec![ToolCallView {
                 attachments: Vec::new(),
+                child_session_id: None,
                 tool_id: None,
                 started_at_ms: None,
                 completed_at_ms: None,

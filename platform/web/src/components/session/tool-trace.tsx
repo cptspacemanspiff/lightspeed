@@ -280,11 +280,18 @@ const BATCH_NOUNS: Record<string, string> = {
   Delegate: "agents", Spawn: "agents", Emit: "events", Send: "messages",
 };
 
+/// Verbs that name their object ("Run program") batch as "Run 3 programs".
+const BATCH_PHRASES: Record<string, [verb: string, noun: string]> = {
+  "Run program": ["Run", "programs"], "Spawn program": ["Spawn", "programs"],
+};
+
 /// "Read 3 files", "Run 2 commands", or "3 tool calls" for a mixed batch.
 export function batchTitle(calls: TranscriptToolCall[]): string {
   const verbs = new Set(calls.map((call) => call.display?.verb ?? call.toolName));
   if (verbs.size === 1) {
     const verb = [...verbs][0]!;
+    const phrase = BATCH_PHRASES[verb];
+    if (phrase) return `${phrase[0]} ${calls.length} ${phrase[1]}`;
     const noun = BATCH_NOUNS[verb];
     if (noun) return `${verb} ${calls.length} ${noun}`;
     return `${verb} × ${calls.length}`;
@@ -316,7 +323,11 @@ function ToolCallRow({
   const rawTarget = display?.target ?? toolTarget(call.argumentsJson);
   const target = rawTarget ? presentTarget(call, rawTarget, links) : null;
   const detail = call.continuation ? "started before the loaded history" : display?.detail;
-  const childSession = group === "agent" ? subagentSessionId(call.output) : null;
+  // A finished sub-agent names its session in its result, a failed child
+  // in its failure; otherwise the start says which child it creates.
+  const childSession = group === "agent"
+    ? (subagentSessionId(call.output) ?? (failed ? null : call.childSessionId ?? null))
+    : null;
   const childHref = childSession && links.sessionHref ? links.sessionHref(childSession) : null;
 
   let right: ReactNode = null;

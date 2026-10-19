@@ -829,6 +829,7 @@ impl<'a> CoreAgentProjector<'a> {
                         .map(|call_id| call_id.as_str().to_owned()),
                     arguments_ref: invocation.arguments_ref.as_str().to_owned(),
                     execution_id: execution_id.clone(),
+                    child_session_id: child_session_for_start(invocation, execution_id),
                     completion_promises: invocation
                         .completion_promises
                         .as_ref()
@@ -1276,6 +1277,7 @@ impl<'a> CoreAgentProjector<'a> {
         let result_by_call = self.project_tool_results_for_run(context_entries).await?;
         let effect_by_call = tool_effects_for_run(projection, run_id);
         let attachment_by_call = tool_attachments_for_run(projection, run_id);
+        let child_by_call = child_sessions_for_run(projection, run_id);
         let mut batches = Vec::new();
         let mut completed_batches = BTreeMap::new();
 
@@ -1314,6 +1316,9 @@ impl<'a> CoreAgentProjector<'a> {
                                 .cloned()
                                 .unwrap_or_default(),
                             display: tool_call_display(call.tool_name.as_str(), &arguments),
+                            child_session_id: starts_a_child(call.tool_name.as_str())
+                                .then(|| child_by_call.get(call.call_id.as_str()).cloned())
+                                .flatten(),
                             started_at_ms: None,
                             completed_at_ms: None,
                             duration_ms: None,
@@ -2906,6 +2911,61 @@ fn tool_effects_for_run(
     effects
 }
 
+/// The workflow tools whose execution creates a child session: the run and
+/// spawn tools of `tools::subagents`, for agents and for programs.
+pub const CHILD_SESSION_WORKFLOW_TOOL_IDS: [&str; 4] = [
+    "subagent-run",
+    "subagent-spawn",
+    "subprogram-run",
+    "subprogram-spawn",
+];
+
+/// The child session a workflow start creates, when its tool creates one.
+fn child_session_for_start(
+    invocation: &harness::WorkflowToolInvocation,
+    execution_id: &str,
+) -> Option<String> {
+    CHILD_SESSION_WORKFLOW_TOOL_IDS
+        .contains(&invocation.tool_id.as_str())
+        .then(|| {
+            harness::storage::child_session_id(execution_id)
+                .as_str()
+                .to_owned()
+        })
+}
+
+/// The model tools that start a child session. A code-mode call can start
+/// children too, but it is not one of them.
+fn starts_a_child(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "agent_run" | "agent_spawn" | "program_run" | "program_spawn"
+    )
+}
+
+/// The child session each of a run's model tool calls asked a workflow to
+/// create, by call id. The child's id comes from the workflow execution.
+fn child_sessions_for_run(
+    projection: &CoreAgentProjection<'_>,
+    run_id: RunId,
+) -> BTreeMap<String, String> {
+    projection
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            CoreAgentEvent::WorkflowTool(harness::WorkflowToolEvent::StartRequested {
+                invocation,
+                execution_id,
+            }) if invocation.run_id == run_id => {
+                let call = invocation.context.model_batch()?;
+                let child = child_session_for_start(invocation, execution_id)?;
+                Some((call.tool_call_id.as_str().to_owned(), child))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn tool_attachments_for_run(
     projection: &CoreAgentProjection<'_>,
     run_id: RunId,
@@ -3325,6 +3385,28 @@ fn tool_call_display(tool_name: &str, arguments: &str) -> Option<ToolCallDisplay
                     .or_else(|| first_string(json, &["input"]).map(|input| summary_line(&input)))
             }),
         },
+        // A program's input is JSON, so only a label makes a useful detail.
+        "program_run" | "program_spawn" => ToolCallDisplayView {
+            group: ToolCallDisplayGroup::Agent,
+            verb: if normalized == "program_run" {
+                "Run program"
+            } else {
+                "Spawn program"
+            }
+            .to_owned(),
+            target: json
+                .as_ref()
+                .and_then(|json| first_string(json, &["program"])),
+            detail: json
+                .as_ref()
+                .and_then(|json| first_string(json, &["label"])),
+        },
+        "agent_handle" | "program_handle" => ToolCallDisplayView {
+            group: ToolCallDisplayGroup::Agent,
+            verb: "Take back".to_owned(),
+            target: json.as_ref().and_then(|json| first_string(json, &["id"])),
+            detail: None,
+        },
         "await" | "cancel" | "detach" => ToolCallDisplayView {
             group: ToolCallDisplayGroup::Agent,
             verb: match normalized.as_str() {
@@ -3679,6 +3761,7 @@ mod tests {
             status,
             effects: Vec::new(),
             display: None,
+            child_session_id: None,
             started_at_ms: None,
             completed_at_ms: None,
             duration_ms: None,
@@ -3917,6 +4000,85 @@ mod tests {
             Some("retrieve_subscription")
         );
         assert_eq!(display.tool_name, "stripe.retrieve_subscription");
+    }
+
+    #[test]
+    fn program_calls_display_the_program_and_their_label() {
+        let display = tool_call_display(
+            "program_run",
+            r#"{"program":"claim-check","input":{"claims":["a"]},"label":"Claims"}"#,
+        )
+        .expect("display");
+        assert_eq!(display.group, ToolCallDisplayGroup::Agent);
+        assert_eq!(display.verb, "Run program");
+        assert_eq!(display.target.as_deref(), Some("claim-check"));
+        assert_eq!(display.detail.as_deref(), Some("Claims"));
+
+        let display = tool_call_display(
+            "program_spawn",
+            r#"{"program":"claim-check","input":{"claims":["a"]}}"#,
+        )
+        .expect("display");
+        assert_eq!(display.verb, "Spawn program");
+        assert_eq!(display.detail, None, "a program's JSON input is no detail");
+
+        let display = tool_call_display("program_handle", r#"{"id":"exec-1"}"#).expect("display");
+        assert_eq!(display.group, ToolCallDisplayGroup::Agent);
+        assert_eq!(display.verb, "Take back");
+        assert_eq!(display.target.as_deref(), Some("exec-1"));
+    }
+
+    #[test]
+    fn a_child_starting_call_names_the_session_its_workflow_creates() {
+        let start =
+            |call_id: &str, run_id: u64, tool_id: &str, execution_id: &str| -> CoreAgentEntry {
+                let event: harness::WorkflowToolEvent = serde_json::from_value(serde_json::json!({
+                    "start_requested": {
+                        "invocation": {
+                            "invocation_id": format!("wti:sha256:{}", "b".repeat(64)),
+                            "tool_id": tool_id,
+                            "semantic_type": "lightspeed.subprogram.run.v1",
+                            "schema_revision": 1,
+                            "binding_fingerprint": "wtb:sha256:test",
+                            "session_universe_id": "00000000-0000-0000-0000-000000000001",
+                            "session_id": "session-1",
+                            "run_id": run_id,
+                            "turn_id": 1,
+                            "tool_batch_id": 1,
+                            "tool_call_id": call_id,
+                            "arguments_ref": BlobRef::from_bytes(b"{}"),
+                        },
+                        "execution_id": execution_id,
+                    }
+                }))
+                .expect("decode start event");
+                CoreAgentEntry {
+                    position: SessionPosition {
+                        seq: EventSeq::new(1),
+                    },
+                    observed_at_ms: 1,
+                    joins: CoreAgentJoins::default(),
+                    event: CoreAgentEvent::WorkflowTool(event),
+                }
+            };
+        // Another run's start, and a start of a tool that creates no child.
+        let entries = vec![
+            start("call-1", 1, "subprogram-run", "wtx:a"),
+            start("call-2", 2, "subagent-run", "wtx:b"),
+            start("call-3", 1, "input-request", "wtx:c"),
+        ];
+        let children = child_sessions_for_run(&CoreAgentProjection::new(&entries), RunId::new(1));
+        assert_eq!(
+            children,
+            BTreeMap::from([(
+                "call-1".to_owned(),
+                harness::storage::child_session_id("wtx:a")
+                    .as_str()
+                    .to_owned()
+            )])
+        );
+        assert!(starts_a_child("program_run") && starts_a_child("agent_spawn"));
+        assert!(!starts_a_child("program_handle"));
     }
 
     #[test]

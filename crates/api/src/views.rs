@@ -448,6 +448,12 @@ pub struct ToolCallView {
     pub attachments: Vec<ToolAttachmentView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolCallDisplayView>,
+    /// The child session an `agent_run`, `agent_spawn`, `program_run` or
+    /// `program_spawn` call's workflow creates, once that workflow was
+    /// asked to start. A call refused before its child existed names a
+    /// session that was never created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
     /// When the call was dispatched for execution, from the committed
     /// `toolCallStarted` event. Absent until dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
