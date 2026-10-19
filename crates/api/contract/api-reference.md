@@ -870,6 +870,32 @@ Deletes the catalog document; sessions previously created or configured from it 
 - Params: `ProfileDeleteParams`
 - Result: `AgentApiOutcome<ProfileDeleteResponse>`
 
+### `programs/put`
+
+**Create or replace a program**
+
+Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.
+
+- Access: `{"kind":"universe","action":"manage_profile"}`
+- Group: `profiles`
+- Role: `operator`
+- Target: `none`
+- Params: `ProgramPutParams`
+- Result: `AgentApiOutcome<ProgramPutResponse>`
+
+### `programs/contracts/list`
+
+**List program contracts**
+
+Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.
+
+- Access: `{"kind":"universe","action":"read"}`
+- Group: `profiles`
+- Role: `viewer`
+- Target: `none`
+- Params: `ProgramContractsListParams`
+- Result: `AgentApiOutcome<ProgramContractsListResponse>`
+
 ### `blobs/put`
 
 **Store content-addressed blobs**

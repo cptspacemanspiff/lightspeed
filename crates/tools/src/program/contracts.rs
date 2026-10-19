@@ -160,6 +160,9 @@ pub fn bind_mcp(servers: &[McpServerTools]) -> (Vec<BoundContract>, Vec<String>)
             name,
             tool_id: server.tool_id.clone(),
             tool_name,
+            description: None,
+            input_schema: tool.input_schema.clone(),
+            output_schema: tool.output_schema.clone(),
         });
     }
     unbindable.sort();
@@ -206,14 +209,17 @@ fn contract_segment(name: &str, split_case: bool) -> Option<String> {
         .then(|| segment.to_owned())
 }
 
-/// A contract available in a session: its digest and the session tool
-/// serving it.
+/// A contract available in a session: its digest, the session tool serving
+/// it, and the shape a program sees (the digest covers both schemas).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundContract {
     pub name: String,
     pub digest: String,
     pub tool_id: ToolName,
     pub tool_name: ToolName,
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 impl BoundContract {
@@ -258,6 +264,9 @@ pub fn bind(callables: &[CallableTool]) -> Vec<BoundContract> {
                 ),
                 tool_id: callable.tool_id.clone(),
                 tool_name: callable.definition.name.clone(),
+                description: callable.definition.description.clone(),
+                input_schema: callable.definition.input_schema.clone(),
+                output_schema: callable.definition.output_schema.clone(),
             })
         })
         .collect()

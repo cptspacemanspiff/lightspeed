@@ -71,6 +71,8 @@ export const METHODS = [
   "profiles/list",
   "profiles/put",
   "profiles/delete",
+  "programs/put",
+  "programs/contracts/list",
   "blobs/put",
   "blobs/read",
   "blobs/has",
@@ -548,6 +550,18 @@ export const METHOD_INFO = {
     access: {"action":"manage_profile","kind":"universe"},
     summary: "Delete an agent profile",
     description: "Deletes the catalog document; sessions previously created or configured from it retain their materialized state.",
+  },
+  "programs/put": {
+    scope: "universe",
+    access: {"action":"manage_profile","kind":"universe"},
+    summary: "Create or replace a program",
+    description: "Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.",
+  },
+  "programs/contracts/list": {
+    scope: "universe",
+    access: {"action":"read","kind":"universe"},
+    summary: "List program contracts",
+    description: "Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.",
   },
   "blobs/put": {
     scope: "universe",
@@ -1631,6 +1645,24 @@ export interface MethodMap {
   "profiles/delete": {
     params: Api.ProfileDeleteParams;
     result: Api.AgentApiOutcomeOfProfileDeleteResponse;
+  };
+  /**
+   * Create or replace a program
+   *
+   * Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.
+   */
+  "programs/put": {
+    params: Api.ProgramPutParams;
+    result: Api.AgentApiOutcomeOfProgramPutResponse;
+  };
+  /**
+   * List program contracts
+   *
+   * Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.
+   */
+  "programs/contracts/list": {
+    params: Api.ProgramContractsListParams;
+    result: Api.AgentApiOutcomeOfProgramContractsListResponse;
   };
   /**
    * Store content-addressed blobs
@@ -2880,6 +2912,22 @@ export const rpc = {
    */
   profilesDelete(client: RpcCaller, params: Api.ProfileDeleteParams): Promise<Api.AgentApiOutcomeOfProfileDeleteResponse> {
     return client.call("profiles/delete", params);
+  },
+  /**
+   * Create or replace a program
+   *
+   * Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.
+   */
+  programsPut(client: RpcCaller, params: Api.ProgramPutParams): Promise<Api.AgentApiOutcomeOfProgramPutResponse> {
+    return client.call("programs/put", params);
+  },
+  /**
+   * List program contracts
+   *
+   * Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.
+   */
+  programsContractsList(client: RpcCaller, params: Api.ProgramContractsListParams): Promise<Api.AgentApiOutcomeOfProgramContractsListResponse> {
+    return client.call("programs/contracts/list", params);
   },
   /**
    * Store content-addressed blobs

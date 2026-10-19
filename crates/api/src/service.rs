@@ -104,6 +104,20 @@ pub trait AgentApiService: Send + Sync {
         params: ProfilePutParams,
     ) -> Result<AgentApiOutcome<ProfilePutResponse>, AgentApiError>;
 
+    async fn put_program(
+        &self,
+        _params: ProgramPutParams,
+    ) -> Result<AgentApiOutcome<ProgramPutResponse>, AgentApiError> {
+        Err(AgentApiError::internal("programs are unavailable"))
+    }
+
+    async fn list_program_contracts(
+        &self,
+        _params: ProgramContractsListParams,
+    ) -> Result<AgentApiOutcome<ProgramContractsListResponse>, AgentApiError> {
+        Err(AgentApiError::internal("programs are unavailable"))
+    }
+
     async fn delete_profile(
         &self,
         params: ProfileDeleteParams,

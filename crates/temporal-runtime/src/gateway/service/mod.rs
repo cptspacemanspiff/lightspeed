@@ -2391,6 +2391,31 @@ impl AgentApiService for GatewayAgentApi {
             .map(AgentApiOutcome::new)
     }
 
+    async fn put_program(
+        &self,
+        params: api::ProgramPutParams,
+    ) -> Result<AgentApiOutcome<api::ProgramPutResponse>, AgentApiError> {
+        self.authorize_method(
+            api::METHOD_PROGRAMS_PUT,
+            Some(ResourceRef::Profile(params.program_id.as_str().to_owned())),
+        )
+        .await?;
+        self.put_program_record(params)
+            .await
+            .map(AgentApiOutcome::new)
+    }
+
+    async fn list_program_contracts(
+        &self,
+        params: api::ProgramContractsListParams,
+    ) -> Result<AgentApiOutcome<api::ProgramContractsListResponse>, AgentApiError> {
+        self.authorize_method(api::METHOD_PROGRAMS_CONTRACTS_LIST, None)
+            .await?;
+        self.list_program_contracts_record(params)
+            .await
+            .map(AgentApiOutcome::new)
+    }
+
     async fn delete_profile(
         &self,
         params: ProfileDeleteParams,

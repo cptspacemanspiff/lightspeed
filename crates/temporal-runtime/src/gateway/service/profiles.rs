@@ -319,6 +319,141 @@ impl GatewayAgentApi {
         Ok(program)
     }
 
+    /// Check a program the way a session started from it would be, plus
+    /// compiling its source and its schemas, then store it as a program
+    /// profile. The first problem refuses it.
+    pub(super) async fn put_program_record(
+        &self,
+        params: api::ProgramPutParams,
+    ) -> Result<api::ProgramPutResponse, AgentApiError> {
+        let refused = |message: String| {
+            AgentApiError::invalid_request(format!("program {}: {message}", params.program_id))
+        };
+        match self
+            .read_profile(ProfileReadParams {
+                profile_id: params.program_id.clone(),
+            })
+            .await
+        {
+            Ok(existing) if existing.result.profile.document.program.is_none() => {
+                return Err(refused(
+                    "an agent profile has this id; programs/put replaces only programs".to_owned(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if is_not_found(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let session_config = self.session_config_for_start(params.config.clone()).await?;
+        let pinned = self.pin_program(&params.program, None).await?;
+        let source = match &params.program.source {
+            api::ProgramSource::Text { text } => text.clone(),
+            api::ProgramSource::TextRef { .. } => {
+                let bytes = self
+                    .store
+                    .read_bytes(&pinned.source_ref)
+                    .await
+                    .map_err(map_blob_store_error)?;
+                String::from_utf8(bytes)
+                    .map_err(|_| refused("the source is not UTF-8".to_owned()))?
+            }
+        };
+        let limits = harness::CodeModeLimits::default();
+        program_engine::check_source(&source, limits.max_source_bytes, limits.max_memory_bytes)
+            .map_err(|error| refused(format!("the source does not compile: {error}")))?;
+        for (field, schema) in [
+            ("inputSchema", &params.program.input_schema),
+            ("outputSchema", &params.program.output_schema),
+        ] {
+            if let Some(schema) = schema {
+                jsonschema::validator_for(schema)
+                    .map_err(|error| refused(format!("{field} is not a JSON Schema: {error}")))?;
+            }
+        }
+        let available = self
+            .program_contracts_for(&params.program.requires, &session_config)
+            .await?;
+        tools::program::contracts::pin_requirements(
+            &available,
+            params
+                .program
+                .requires
+                .iter()
+                .map(|requirement| (requirement.contract.as_str(), requirement.digest.as_deref())),
+        )
+        .map_err(|error| refused(error.to_string()))?;
+        let contracts = params
+            .program
+            .requires
+            .iter()
+            .filter_map(|requirement| {
+                available
+                    .iter()
+                    .find(|contract| contract.name == requirement.contract)
+            })
+            .map(program_contract_view)
+            .collect();
+        let profile = self
+            .put_profile_record(ProfilePutParams {
+                profile: api::AgentProfileInput {
+                    profile_id: params.program_id,
+                    display_name: params.display_name,
+                    description: params.description,
+                    document: api::ProfileDocument {
+                        config: params.config,
+                        program: Some(params.program),
+                        ..api::ProfileDocument::default()
+                    },
+                },
+                expected_revision: params.expected_revision,
+            })
+            .await?
+            .profile;
+        Ok(api::ProgramPutResponse { profile, contracts })
+    }
+
+    /// The contracts a program with these grants may require.
+    pub(super) async fn list_program_contracts_record(
+        &self,
+        params: api::ProgramContractsListParams,
+    ) -> Result<api::ProgramContractsListResponse, AgentApiError> {
+        let with_mcp = params
+            .config
+            .as_ref()
+            .and_then(|config| config.features.as_ref())
+            .is_some_and(|features| features.mcp.is_some());
+        let session_config = self.session_config_for_start(params.config).await?;
+        let mut contracts = self
+            .preparation_service()
+            .program_contracts(&session_config, with_mcp)
+            .await?
+            .iter()
+            .map(program_contract_view)
+            .collect::<Vec<_>>();
+        contracts.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(api::ProgramContractsListResponse { contracts })
+    }
+
+    /// The contracts a session with this configuration offers, reaching the
+    /// MCP servers only when one is required.
+    async fn program_contracts_for(
+        &self,
+        requires: &[api::ProgramContractRequirement],
+        session_config: &SessionConfig,
+    ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
+        if requires.is_empty() {
+            return Ok(Vec::new());
+        }
+        let with_mcp = requires.iter().any(|requirement| {
+            requirement
+                .contract
+                .starts_with(&format!("{}.", tools::program::contracts::MCP_FAMILY))
+        });
+        self.preparation_service()
+            .program_contracts(session_config, with_mcp)
+            .await
+    }
+
     /// Pin a program's required contracts to what a session with this
     /// configuration offers. A contract the configuration does not grant,
     /// or whose digest differs from the one the program names, refuses the
@@ -331,14 +466,8 @@ impl GatewayAgentApi {
         if spec.requires.is_empty() {
             return Ok(Vec::new());
         }
-        let with_mcp = spec.requires.iter().any(|requirement| {
-            requirement
-                .contract
-                .starts_with(&format!("{}.", tools::program::contracts::MCP_FAMILY))
-        });
         let available = self
-            .preparation_service()
-            .program_contracts(session_config, with_mcp)
+            .program_contracts_for(&spec.requires, session_config)
             .await?;
         tools::program::contracts::pin_requirements(
             &available,
@@ -436,6 +565,18 @@ pub(super) fn map_profile_error(error: ProfileError) -> AgentApiError {
         )),
         ProfileError::InvalidInput { message } => AgentApiError::invalid_request(message),
         ProfileError::Store { message } => AgentApiError::internal(message),
+    }
+}
+
+fn program_contract_view(
+    contract: &tools::program::contracts::BoundContract,
+) -> api::ProgramContractView {
+    api::ProgramContractView {
+        name: contract.name.clone(),
+        digest: contract.digest.clone(),
+        description: contract.description.clone(),
+        input_schema: contract.input_schema.clone(),
+        output_schema: contract.output_schema.clone(),
     }
 }
 

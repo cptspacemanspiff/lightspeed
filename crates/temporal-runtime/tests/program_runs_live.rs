@@ -5485,3 +5485,169 @@ async fn a_program_keeps_its_per_run_call_cap_while_its_session_drops_finished_w
     )
     .await
 }
+
+const PUT_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            await env.time.sleep({ ms: 1 }, { why: "pace" });
+            return { slept: true };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_is_checked_before_it_is_put_and_its_contracts_are_listed() -> anyhow::Result<()>
+{
+    with_program_workers(InputTimeouts::default(), |api, _store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let program_id = api::ProfileId::new(format!("live_put_{suffix}"));
+            let timers = || {
+                Some(api::SessionConfig {
+                    features: Some(api::FeaturesConfig {
+                        timers: Some(api::TimersFeature {
+                            version: api::CURRENT_FEATURE_VERSION,
+                        }),
+                        ..api::FeaturesConfig::default()
+                    }),
+                    ..api::SessionConfig::default()
+                })
+            };
+            let spec = |source: &str, requires: &[&str]| api::ProgramSpec {
+                source: api::ProgramSource::Text {
+                    text: source.to_owned(),
+                },
+                semantics_version: 1,
+                input_schema: Some(json!({ "type": "object" })),
+                output_schema: None,
+                limits: None,
+                requires: requires
+                    .iter()
+                    .map(|contract| api::ProgramContractRequirement {
+                        contract: (*contract).to_owned(),
+                        digest: None,
+                    })
+                    .collect(),
+                approvals: None,
+            };
+            let put = |program_id: &api::ProfileId,
+                       program: api::ProgramSpec,
+                       config: Option<api::SessionConfig>| {
+                api.put_program(api::ProgramPutParams {
+                    program_id: program_id.clone(),
+                    display_name: Some("Put program".to_owned()),
+                    description: None,
+                    program,
+                    config,
+                    expected_revision: None,
+                })
+            };
+            let refusal = |result: Result<_, api::AgentApiError>| {
+                let error = result.expect_err("refused");
+                assert_eq!(
+                    error.kind,
+                    api::AgentApiErrorKind::InvalidRequest,
+                    "{error:?}"
+                );
+                error.message
+            };
+
+            // What a program may require follows its grants.
+            let names = async |config| -> anyhow::Result<Vec<String>> {
+                Ok(api
+                    .list_program_contracts(api::ProgramContractsListParams { config })
+                    .await?
+                    .result
+                    .contracts
+                    .into_iter()
+                    .map(|contract| contract.name)
+                    .collect())
+            };
+            let with_timers = names(timers()).await?;
+            assert!(
+                with_timers.iter().any(|name| name == "time.sleep"),
+                "{with_timers:?}"
+            );
+            assert!(
+                with_timers.iter().any(|name| name == "input.request"),
+                "{with_timers:?}"
+            );
+            let without = names(None).await?;
+            assert!(
+                !without.iter().any(|name| name == "time.sleep"),
+                "{without:?}"
+            );
+
+            // Refused, and nothing stored: a syntax error, a contract its
+            // own grants do not bind, a schema that is not one.
+            let message = refusal(put(&program_id, spec("export default {", &[]), timers()).await);
+            assert!(message.contains("does not compile"), "{message}");
+            let message = refusal(put(&program_id, spec(PUT_PROGRAM, &["time.sleep"]), None).await);
+            assert!(message.contains("time.sleep"), "{message}");
+            let mut bad_schema = spec(PUT_PROGRAM, &["time.sleep"]);
+            bad_schema.input_schema = Some(json!({ "type": 5 }));
+            let message = refusal(put(&program_id, bad_schema, timers()).await);
+            assert!(message.contains("inputSchema"), "{message}");
+            assert!(
+                api.read_profile(api::ProfileReadParams {
+                    profile_id: program_id.clone()
+                })
+                .await
+                .is_err()
+            );
+
+            // Put, it names the contract it requires with its argument
+            // schema, and a session runs it.
+            let put_program = put(&program_id, spec(PUT_PROGRAM, &["time.sleep"]), timers())
+                .await?
+                .result;
+            assert!(put_program.profile.document.program.is_some());
+            assert_eq!(
+                put_program
+                    .contracts
+                    .iter()
+                    .map(|contract| contract.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["time.sleep"]
+            );
+            assert!(
+                put_program.contracts[0].input_schema["properties"]["ms"].is_object(),
+                "{:?}",
+                put_program.contracts[0]
+            );
+            start_program_session(&api, &session_id, &program_id).await?;
+            let run = start_program_run(&api, &session_id, json!({})).await?;
+            let run = wait_for_terminal_run(&api, &session_id, &run.id).await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+
+            // An agent profile's id is not a program's to take.
+            let agent_id = api::ProfileId::new(format!("live_put_agent_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: api::AgentProfileInput {
+                    profile_id: agent_id.clone(),
+                    display_name: None,
+                    description: None,
+                    document: api::ProfileDocument::default(),
+                },
+            })
+            .await?;
+            let message =
+                refusal(put(&agent_id, spec(PUT_PROGRAM, &["time.sleep"]), timers()).await);
+            assert!(message.contains("agent profile"), "{message}");
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [program_id, agent_id] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}

@@ -429,6 +429,73 @@ pub struct ProfilePutResponse {
     pub profile: AgentProfile,
 }
 
+/// Create or replace a program: a profile whose sessions run it. It runs
+/// with its own grants, `config`, whoever starts or calls it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramPutParams {
+    /// The program's profile id; the id other grants list it under.
+    pub program_id: ProfileId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// What it does and the input it takes, shown in catalogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub program: ProgramSpec,
+    /// The program's grants: the features its required contracts come
+    /// from (sub-agents with the agents and programs it may run, timers,
+    /// web, environments, MCP servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<SessionConfig>,
+    /// Checked only when the program already exists; absent replaces (or
+    /// creates) unconditionally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramPutResponse {
+    pub profile: AgentProfile,
+    /// The contracts the program requires, as its grants bind them.
+    pub contracts: Vec<ProgramContractView>,
+}
+
+/// What a program with these grants may require.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramContractsListParams {
+    /// The grants, as a program's profile config; absent, a program with
+    /// none, which still has the human-input contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<SessionConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramContractsListResponse {
+    /// By name.
+    pub contracts: Vec<ProgramContractView>,
+}
+
+/// A tool contract: a program calls `env.<name>(args)`, for `agent.run`
+/// `env.agent.run({ agent, input })`, and lists the name in `requires`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramContractView {
+    pub name: String,
+    /// Pins the contract's shape; `requires` may name it to refuse a
+    /// session whose contract differs.
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The JSON Schema of the call's argument.
+    pub input_schema: serde_json::Value,
+    /// The JSON Schema of the call's result, when the contract declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDeleteParams {

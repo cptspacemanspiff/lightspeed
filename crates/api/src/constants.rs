@@ -75,6 +75,8 @@ pub const METHOD_PROFILES_READ: &str = "profiles/read";
 pub const METHOD_PROFILES_LIST: &str = "profiles/list";
 pub const METHOD_PROFILES_PUT: &str = "profiles/put";
 pub const METHOD_PROFILES_DELETE: &str = "profiles/delete";
+pub const METHOD_PROGRAMS_PUT: &str = "programs/put";
+pub const METHOD_PROGRAMS_CONTRACTS_LIST: &str = "programs/contracts/list";
 
 // ── Universe: content-addressed storage and VFS ─────────────────────────────
 

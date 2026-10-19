@@ -1920,3 +1920,24 @@ fn steps_own_the_calls_made_through_their_env_and_note_what_they_say() {
         .unwrap();
     assert!(fetched_a.after_calls >= 1);
 }
+
+#[test]
+fn a_source_check_compiles_without_running_and_reports_syntax_errors() {
+    const MEMORY: u64 = 16 * 1024 * 1024;
+    // Compiling runs nothing: the top-level throw never happens.
+    check_source(
+        "throw new Error('ran'); export default { async run(input) { return input; } };",
+        64 * 1024,
+        MEMORY,
+    )
+    .expect("a module that compiles");
+    let error = check_source(
+        "export default { async run(input) { return input; ",
+        64 * 1024,
+        MEMORY,
+    )
+    .expect_err("a syntax error");
+    assert!(!error.is_empty(), "{error}");
+    let error = check_source(&"x".repeat(100), 10, MEMORY).expect_err("too large");
+    assert!(error.contains("over 10 bytes"), "{error}");
+}

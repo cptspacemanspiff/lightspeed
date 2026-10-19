@@ -1651,6 +1651,56 @@
     },
     {
       "access": {
+        "action": "manage_profile",
+        "kind": "universe"
+      },
+      "description": "Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.",
+      "group": "profiles",
+      "method": "programs/put",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/ProgramPutParams"
+        },
+        "type": "ProgramPutParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfProgramPutResponse"
+        },
+        "type": "AgentApiOutcome<ProgramPutResponse>"
+      },
+      "role": "operator",
+      "scope": "universe",
+      "summary": "Create or replace a program",
+      "target": null
+    },
+    {
+      "access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "description": "Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.",
+      "group": "profiles",
+      "method": "programs/contracts/list",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/ProgramContractsListParams"
+        },
+        "type": "ProgramContractsListParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfProgramContractsListResponse"
+        },
+        "type": "AgentApiOutcome<ProgramContractsListResponse>"
+      },
+      "role": "viewer",
+      "scope": "universe",
+      "summary": "List program contracts",
+      "target": null
+    },
+    {
+      "access": {
         "action": "use_resource",
         "kind": "universe"
       },

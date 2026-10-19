@@ -6484,6 +6484,71 @@ export interface ProfileReadResponse {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfProgramContractsListResponse".
+ */
+export interface AgentApiOutcomeOfProgramContractsListResponse {
+  notifications?: AgentNotification[];
+  result: ProgramContractsListResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramContractsListResponse".
+ */
+export interface ProgramContractsListResponse {
+  /**
+   * By name.
+   */
+  contracts: ProgramContractView[];
+}
+/**
+ * A tool contract: a program calls `env.<name>(args)`, for `agent.run`
+ * `env.agent.run({ agent, input })`, and lists the name in `requires`.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramContractView".
+ */
+export interface ProgramContractView {
+  description?: string | null;
+  /**
+   * Pins the contract's shape; `requires` may name it to refuse a
+   * session whose contract differs.
+   */
+  digest: string;
+  /**
+   * The JSON Schema of the call's argument.
+   */
+  inputSchema: {
+    [k: string]: unknown;
+  };
+  name: string;
+  /**
+   * The JSON Schema of the call's result, when the contract declares one.
+   */
+  outputSchema?: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfProgramPutResponse".
+ */
+export interface AgentApiOutcomeOfProgramPutResponse {
+  notifications?: AgentNotification[];
+  result: ProgramPutResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramPutResponse".
+ */
+export interface ProgramPutResponse {
+  /**
+   * The contracts the program requires, as its grants bind them.
+   */
+  contracts: ProgramContractView[];
+  profile: AgentProfile;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentApiOutcomeOfRunApprovalsDecideResponse".
  */
 export interface AgentApiOutcomeOfRunApprovalsDecideResponse {
@@ -8724,6 +8789,19 @@ export interface ProfileReadParams {
   profileId: ProfileId;
 }
 /**
+ * What a program with these grants may require.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramContractsListParams".
+ */
+export interface ProgramContractsListParams {
+  /**
+   * The grants, as a program's profile config; absent, a program with
+   * none, which still has the human-input contracts.
+   */
+  config?: SessionConfig | null;
+}
+/**
  * Defaults for a program run's input requests.
  *
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
@@ -8741,6 +8819,36 @@ export interface ProgramInputDefaults {
    * unanswered.
    */
   escalateTo?: string[];
+}
+/**
+ * Create or replace a program: a profile whose sessions run it. It runs
+ * with its own grants, `config`, whoever starts or calls it.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "ProgramPutParams".
+ */
+export interface ProgramPutParams {
+  /**
+   * The program's grants: the features its required contracts come
+   * from (sub-agents with the agents and programs it may run, timers,
+   * web, environments, MCP servers).
+   */
+  config?: SessionConfig | null;
+  /**
+   * What it does and the input it takes, shown in catalogs.
+   */
+  description?: string | null;
+  displayName?: string | null;
+  /**
+   * Checked only when the program already exists; absent replaces (or
+   * creates) unconditionally.
+   */
+  expectedRevision?: number | null;
+  program: ProgramSpec;
+  /**
+   * The program's profile id; the id other grants list it under.
+   */
+  programId: ProfileId;
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema

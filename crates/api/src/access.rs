@@ -186,7 +186,7 @@ impl MethodGroup {
             Self::Transcriptions
         } else if group("vfs/") {
             Self::Vfs
-        } else if group("profiles/") {
+        } else if group("profiles/") || group("programs/") {
             Self::Profiles
         } else if group("models/") {
             Self::Models
@@ -490,6 +490,8 @@ mod tests {
             ("blobs/put", Some(MethodGroup::BlobsPut)),
             ("vfs/workspaces/create", Some(MethodGroup::Vfs)),
             ("profiles/put", Some(MethodGroup::Profiles)),
+            ("programs/put", Some(MethodGroup::Profiles)),
+            ("programs/contracts/list", Some(MethodGroup::Profiles)),
             ("models/list", Some(MethodGroup::Models)),
             ("mcp/servers/put", Some(MethodGroup::Mcp)),
             ("environments/jobs/create", Some(MethodGroup::Environments)),

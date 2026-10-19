@@ -258,6 +258,28 @@ pub struct ExecutionReport {
     pub metrics: ExecutionMetrics,
 }
 
+/// Compile a program's module without running any of it, as a check before
+/// it is saved: a syntax error, or a source over `max_source_bytes`, comes
+/// back as its message. What the module does when it runs (its default
+/// export, its calls) shows only when it runs.
+pub fn check_source(
+    source: &str,
+    max_source_bytes: u64,
+    max_memory_bytes: u64,
+) -> Result<(), String> {
+    if source.len() as u64 > max_source_bytes {
+        return Err(format!("the source is over {max_source_bytes} bytes"));
+    }
+    let runtime = rquickjs::Runtime::new().map_err(|failure| failure.to_string())?;
+    runtime.set_memory_limit(max_memory_bytes as usize);
+    let context = rquickjs::Context::full(&runtime).map_err(|failure| failure.to_string())?;
+    context.with(|ctx| {
+        rquickjs::Module::declare(ctx.clone(), "program.js", source)
+            .map(|_| ())
+            .map_err(|failure| engine::js_error(&ctx, failure).message)
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("invalid execution input: {0}")]

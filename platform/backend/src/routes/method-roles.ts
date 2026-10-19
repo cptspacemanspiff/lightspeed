@@ -89,6 +89,8 @@ export const METHOD_ROLES: Readonly<Record<string, UniverseRole>> = {
   "profiles/list": "viewer",
   "profiles/put": "operator",
   "profiles/read": "viewer",
+  "programs/contracts/list": "viewer",
+  "programs/put": "operator",
   "session/close": "contributor",
   "session/config/put": "operator",
   "session/context/append": "contributor",

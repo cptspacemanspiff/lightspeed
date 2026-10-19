@@ -464,6 +464,10 @@ api_methods! {
         ["Create or replace an agent profile", "Stores the complete profile document. Use expectedRevision from profiles/read when replacing to prevent lost updates; absence writes unconditionally."], access: MethodAccess::Universe(UniverseAction::ManageProfile),
     METHOD_PROFILES_DELETE => delete_profile(ProfileDeleteParams) -> ProfileDeleteResponse =>
         ["Delete an agent profile", "Deletes the catalog document; sessions previously created or configured from it retain their materialized state."], access: MethodAccess::Universe(UniverseAction::ManageProfile),
+    METHOD_PROGRAMS_PUT => put_program(ProgramPutParams) -> ProgramPutResponse =>
+        ["Create or replace a program", "Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas."], access: MethodAccess::Universe(UniverseAction::ManageProfile),
+    METHOD_PROGRAMS_CONTRACTS_LIST => list_program_contracts(ProgramContractsListParams) -> ProgramContractsListResponse =>
+        ["List program contracts", "Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools."], access: MethodAccess::Universe(UniverseAction::Read),
     METHOD_BLOBS_PUT => put_blobs(BlobPutParams) -> BlobPutResponse =>
         ["Store content-addressed blobs", "Decodes and stores a batch of base64 payloads, returning immutable content references in request order. Re-uploading identical bytes is naturally deduplicated."], access: MethodAccess::Universe(UniverseAction::UseResource),
     METHOD_BLOBS_READ => read_blob(BlobReadParams) -> BlobReadResponse =>

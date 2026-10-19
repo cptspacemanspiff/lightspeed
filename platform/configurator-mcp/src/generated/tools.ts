@@ -9472,6 +9472,2276 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_programs_put",
+    "method": "programs/put",
+    "group": "profiles",
+    "summary": "Create or replace a program",
+    "description": "Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.",
+    "paramsType": "ProgramPutParams",
+    "resultType": "AgentApiOutcome<ProgramPutResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "description": "Create or replace a program: a profile whose sessions run it. It runs\nwith its own grants, `config`, whoever starts or calls it.",
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The program's grants: the features its required contracts come\nfrom (sub-agents with the agents and programs it may run, timers,\nweb, environments, MCP servers)."
+        },
+        "description": {
+          "description": "What it does and the input it takes, shown in catalogs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "description": "Checked only when the program already exists; absent replaces (or\ncreates) unconditionally.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "program": {
+          "$ref": "#/definitions/ProgramSpec"
+        },
+        "programId": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProfileId"
+            }
+          ],
+          "description": "The program's profile id; the id other grants list it under."
+        }
+      },
+      "required": [
+        "programId",
+        "program"
+      ],
+      "type": "object",
+      "definitions": {
+        "CodeModeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants JavaScript composition through `code_execute`. Available script tools\nare the session's ordinary callable tools, optionally narrowed by allowedTools.\nTypeScript, ambient filesystem/network access, and recursive code execution\nare unavailable. An empty allowedTools list grants pure computation only.",
+          "properties": {
+            "allowedTools": {
+              "description": "Logical tool ids (for example vfs.read_file), not provider wire names.\nAbsent permits every currently callable grant; an empty list permits none.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "maxCatalogBytes": {
+              "default": 1048576,
+              "description": "Pinned callable catalog bytes, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxMemoryBytes": {
+              "default": 67108864,
+              "description": "Interpreter heap, at most 512 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxOutputBytes": {
+              "default": 1048576,
+              "description": "Combined text() output and return value, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxOutstandingToolCalls": {
+              "default": 16,
+              "description": "Concurrent pending calls, at most 64 and no greater than maxToolCalls.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxRequestBytes": {
+              "default": 1048576,
+              "description": "Serialized arguments per tool request, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxResultBytes": {
+              "default": 1048576,
+              "description": "Serialized completion per tool request, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxSourceBytes": {
+              "default": 262144,
+              "description": "UTF-8 source bytes, at most 1 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxStackBytes": {
+              "default": 1048576,
+              "description": "Interpreter native stack, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxToolCalls": {
+              "default": 128,
+              "description": "Calls per script, at most 1,024.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeoutMs": {
+              "default": 60000,
+              "description": "Total attempt time including input loading, interpreter capacity waits,\nJavaScript evaluation, and tool waits; at most 600,000 milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "CompactionPolicy": {
+          "oneOf": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "disabled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerTriggered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerStandalone",
+                  "type": "string"
+                },
+                "targetTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ContextConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "compaction": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CompactionPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omitted policies resolve to harness-managed standalone compaction. Disabled permits explicit API compaction but never automatic compaction or context-limit recovery."
+            },
+            "inputLimitTokens": {
+              "description": "Optional input capacity override for this model route. Omission uses reported capacity where available; unknown limits recover from context-length errors.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentAccess": {
+          "description": "Per-attachment environment access, an ordered ladder: `edit` adds file\nediting to `read`, `exec` adds processes, `jobs` adds durable jobs.\nProcesses can write files regardless of the file-tool level, so\nread-only files with commands is deliberately not expressible.",
+          "enum": [
+            "read",
+            "edit",
+            "exec",
+            "jobs"
+          ],
+          "type": "string"
+        },
+        "EnvironmentAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One environment the session may use. Exactly one of `environmentId` and\n`inherit` identifies the machine. `inherit` is valid only in a profile\ndocument applied to a sub-agent: it resolves to the delegating parent's\nactive environment at spawn and is stored on the child as a concrete id.\nIf the parent's environment is also listed explicitly, the explicit\nattachment wins; if the parent has none, the inherit attachment is dropped.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/EnvironmentAccess"
+            },
+            "default": {
+              "description": "Activated when a profile is applied while the session has no active\nenvironment; creation is the trivial case. Never overrides a live\nselection and never applies on a plain `session/config/put`.",
+              "type": "boolean"
+            },
+            "environmentId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inherit": {
+              "type": "boolean"
+            },
+            "workingDirectory": {
+              "description": "Absolute machine working directory for file tools, commands, jobs,\nand sources; absent uses the machine's advertised default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "access"
+          ],
+          "type": "object"
+        },
+        "EnvironmentPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Prompt loading scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/prompts and\n.lightspeed/prompts under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Skill discovery scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/skills and\n.lightspeed/skills under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants session environments. The `environments` list is the allowed set:\nthe session can select, read, and run work only on a listed machine, each\nwith its own access grant and working directory. The installed tool\nsurface is the union of every attachment's grant; a call the active\nmachine's grant does not cover fails at execution, so switching machines\nnever changes the toolset. `{}` grants the feature with no reachable\nmachine.",
+          "properties": {
+            "environments": {
+              "description": "The environments this session may use; unique ids, at most one\ndefault, at most one `inherit` (profiles only).",
+              "items": {
+                "$ref": "#/definitions/EnvironmentAttachment"
+              },
+              "type": "array"
+            },
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment prompt loading; absent disables sourced instructions."
+            },
+            "selection": {
+              "default": false,
+              "description": "Exposes `environment_list`, `environment_activate`, and\n`environment_deactivate` over the attached environments.\n`environment_read` is available whenever environments are enabled, and\nexternal API/profile activation remains available when this is false.",
+              "type": "boolean"
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment skill discovery. Absent disables discovery."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "FeaturesConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
+          "properties": {
+            "codeMode": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeModeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "environments": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mcp": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/McpFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subagents": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SubagentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "timers": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TimersFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vfs": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "web": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "GenerationConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Turn-shaping defaults applied to every LLM generation. Per-run overrides\nride `session/runs/start`.",
+          "properties": {
+            "maxOutputTokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "parallelToolUse": {
+              "description": "Whether the model may call several tools in one turn; absent leaves\nthe provider default.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "processingTier": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelProcessingTier"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider processing class. In session/profile config this becomes the\ndefault for every run; in run config it overrides that run. Currently\nsupported only by the built-in OpenAI provider."
+            },
+            "reasoningEffort": {
+              "description": "Reasoning effort tier as a provider-native string (e.g. \"none\",\n\"high\", \"xhigh\", \"max\"); validated against the session's provider.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toolChoice": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ToolChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LimitsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Run budget defaults enforced by the harness drive loop.",
+          "properties": {
+            "maxToolRounds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxTurns": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "McpFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants remote MCP tools by declaring attached servers from the universe MCP\ncatalog. Server ids must be unique; an empty list grants no MCP tools.",
+          "properties": {
+            "servers": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/McpServerAttachment"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "McpServerAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A selected universe MCP server. Its catalog record owns connection,\nexecution, exposure, approval, and auth; the attachment may only narrow the\nrecord's tool allowlist for this session.",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "tools": {
+              "description": "Non-empty subset of the record's allowed tools exposed to this\nsession, under both injection and search; absent exposes the record's\nfull allowlist.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "serverId"
+          ],
+          "type": "object"
+        },
+        "ModelConfig": {
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ModelProcessingTier": {
+          "description": "Provider processing class used by session defaults and per-run overrides.",
+          "enum": [
+            "standard",
+            "fast",
+            "flex"
+          ],
+          "type": "string"
+        },
+        "ProfileId": {
+          "type": "string"
+        },
+        "ProgramApprovals": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Settings for a program's approval requests.",
+          "properties": {
+            "assignees": {
+              "description": "Who decides. Without assignees anyone with inbox access may.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "description": "How long a call waits for a decision, in milliseconds. Defaults to\nthe deployment's input deadline, and is bounded like it.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "escalateTo": {
+              "description": "Who takes a request over, once and with a fresh deadline, when its\ndeadline passes undecided.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remindAfterMs": {
+              "description": "Remind the assignees on this interval while the call waits.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramContractRequirement": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One tool contract a program calls.",
+          "properties": {
+            "contract": {
+              "description": "Canonical contract name: dotted lowercase identifiers, for example\n`vfs.read_file`.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "The digest (`contract-sha256:<hex>`) of the contract the program was written\nagainst. When given, a session whose contract has a different digest\nis refused; when omitted, the session pins the current digest.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "contract"
+          ],
+          "type": "object"
+        },
+        "ProgramLimitsInput": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Per-run budgets of a program, each across all of a run's executions;\nomitted fields take the runtime defaults. A run has no wall-clock limit:\ncancel an abandoned run through the session.",
+          "properties": {
+            "contextRetained": {
+              "description": "How many runs' program contexts (the state `ctx.complete` hands\nover) stay in the session's active context; older ones leave it as\nruns complete. The session log keeps them all. 10 when omitted.",
+              "format": "uint32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "inputDeadlineMs": {
+              "description": "How long a human-input request waits when the call sets no deadline,\nwithin the deployment's bounds (by default 1 second to 30 days); the\ndeployment's default (7 days unless overridden) when omitted.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCalls": {
+              "description": "Tool calls a run may make. 50,000 when omitted.",
+              "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxCompute": {
+              "description": "Work a run's program may do, in QuickJS interrupt checks: a count\nthat is the same on every replay, not CPU time. A tight loop uses\none about every 20 to 150 microseconds; native work such as JSON\nparsing barely counts. 250,000 when omitted.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxInFlight": {
+              "description": "Tool calls a run may have outstanding at once. 64 when omitted.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxWorkflowCalls": {
+              "description": "Calls a run may make to each workflow tool: child agents and\nprograms (each tool counted apart), input requests, approvals.\n1,000 when omitted. Sessions a model drives allow 32 per tool.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ProgramSource": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Borrowed CAS content: saving a profile does not retain the blob.",
+              "properties": {
+                "blobRef": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "textRef",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "blobRef"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ProgramSpec": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A deterministic JavaScript program: a module whose default export has a\n`run(input, env, ctx)` handler.",
+          "properties": {
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramApprovals"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who decides the program's calls to tools that need approval, and\nhow long such a call waits. A call that needs approval waits in the\ninbox; approving runs it, rejecting fails it with kind\n`approval_rejected`, and an unanswered one fails with\n`deadline_exceeded`."
+            },
+            "inputSchema": {
+              "description": "JSON Schema that run input must satisfy."
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProgramLimitsInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputSchema": {
+              "description": "JSON Schema that run output must satisfy."
+            },
+            "requires": {
+              "description": "The tool contracts the program calls, such as `vfs.read_file` or\n`time.sleep`. Only these reach the program's `env`. A session created\nfrom the profile pins each to its digest and is refused if one is not\ngranted by the session's configuration.",
+              "items": {
+                "$ref": "#/definitions/ProgramContractRequirement"
+              },
+              "type": "array"
+            },
+            "semanticsVersion": {
+              "default": 1,
+              "description": "The guest API version the program was written against.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/definitions/ProgramSource"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        "SessionConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Declared session configuration document.\n\nSparse and capability-oriented: an omitted section means defaults, an\nabsent feature is not granted (no tools, no access). The document is\nreplaced whole via `session/config/put`; reads return exactly the stored\ndocument, so read-modify-write round-trips.",
+          "properties": {
+            "context": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ContextConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "features": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/FeaturesConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "generation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GenerationConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LimitsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+            }
+          },
+          "type": "object"
+        },
+        "SubagentAgentRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
+        "SubagentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
+          "properties": {
+            "agents": {
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
+              "items": {
+                "$ref": "#/definitions/SubagentAgentRef"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "default": 3600000,
+              "description": "Per-child run deadline in milliseconds; at most the execution\nceiling of 24 hours.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxConcurrent": {
+              "default": 4,
+              "description": "Open sessions under the root at any time, excluding the root.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDepth": {
+              "default": 2,
+              "description": "A child at depth `d` may spawn only while `d + 1 <= maxDepth`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
+              "default": 16,
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "TimersFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants timer promises through the sleep tool plus the base concurrency\ntools (await/cancel/detach).",
+          "properties": {
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "ToolChoice": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "auto",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "none",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "requiredAny",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "toolId": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "specific",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "toolId"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "VfsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants the session virtual filesystem. Workspace attachments declare the\nsession-visible namespace and the VFS catalog is surfaced. The file tool\nsurface is derived from the attachments: any attachment installs the read\ntools, any `edit` attachment adds the write tools, and with the\nenvironments feature granted the matching transfer tools appear. `{}`\ngrants a VFS with no attachments, no tools, and no sourcing.",
+          "properties": {
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt-instruction sourcing from the VFS. Absent disables loading;\nan empty block discovers conventional attached roots."
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent VFS skill discovery. Absent disables discovery and removes\nits runtime catalog; an empty block discovers conventional attached roots."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "description": "Absolute VFS tool working directory; absent uses /.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaces": {
+              "description": "Catalog resources exposed in the session's workspace namespace at\ndisjoint absolute paths.",
+              "items": {
+                "$ref": "#/definitions/WorkspaceAttachment"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "VfsPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/prompts and .lightspeed/prompts beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "VfsSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/skills and .lightspeed/skills beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "WebFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants network access through the web toolset; `fetch` and `search` are\nindependently granted, and a web block granting neither is rejected.",
+          "properties": {
+            "fetch": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFetchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "WebFetchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "type": "object"
+        },
+        "WebSearchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "allowedDomains": {
+              "description": "Absent means all domains; an explicit list must be non-empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "blockedDomains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "WorkspaceAccess": {
+          "description": "Per-attachment VFS access; `edit` implies `read`.",
+          "enum": [
+            "read",
+            "edit"
+          ],
+          "type": "string"
+        },
+        "WorkspaceAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One catalog resource mounted into the session namespace. Exactly one of\n`workspaceId` and `snapshotRef` names the resource; snapshots are\nimmutable and must be attached with `read` access.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/WorkspaceAccess"
+            },
+            "path": {
+              "type": "string"
+            },
+            "snapshotRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaceId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "access"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  {
+    "name": "lightspeed_programs_contracts_list",
+    "method": "programs/contracts/list",
+    "group": "profiles",
+    "summary": "List program contracts",
+    "description": "Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.",
+    "paramsType": "ProgramContractsListParams",
+    "resultType": "AgentApiOutcome<ProgramContractsListResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": {
+        "not": {}
+      },
+      "description": "What a program with these grants may require.",
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The grants, as a program's profile config; absent, a program with\nnone, which still has the human-input contracts."
+        }
+      },
+      "type": "object",
+      "definitions": {
+        "CodeModeFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants JavaScript composition through `code_execute`. Available script tools\nare the session's ordinary callable tools, optionally narrowed by allowedTools.\nTypeScript, ambient filesystem/network access, and recursive code execution\nare unavailable. An empty allowedTools list grants pure computation only.",
+          "properties": {
+            "allowedTools": {
+              "description": "Logical tool ids (for example vfs.read_file), not provider wire names.\nAbsent permits every currently callable grant; an empty list permits none.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "maxCatalogBytes": {
+              "default": 1048576,
+              "description": "Pinned callable catalog bytes, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxMemoryBytes": {
+              "default": 67108864,
+              "description": "Interpreter heap, at most 512 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxOutputBytes": {
+              "default": 1048576,
+              "description": "Combined text() output and return value, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxOutstandingToolCalls": {
+              "default": 16,
+              "description": "Concurrent pending calls, at most 64 and no greater than maxToolCalls.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxRequestBytes": {
+              "default": 1048576,
+              "description": "Serialized arguments per tool request, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxResultBytes": {
+              "default": 1048576,
+              "description": "Serialized completion per tool request, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxSourceBytes": {
+              "default": 262144,
+              "description": "UTF-8 source bytes, at most 1 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxStackBytes": {
+              "default": 1048576,
+              "description": "Interpreter native stack, at most 8 MiB.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxToolCalls": {
+              "default": 128,
+              "description": "Calls per script, at most 1,024.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeoutMs": {
+              "default": 60000,
+              "description": "Total attempt time including input loading, interpreter capacity waits,\nJavaScript evaluation, and tool waits; at most 600,000 milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "CompactionPolicy": {
+          "oneOf": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "disabled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerTriggered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "compactThresholdTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "const": "providerStandalone",
+                  "type": "string"
+                },
+                "targetTokens": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ContextConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "compaction": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CompactionPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omitted policies resolve to harness-managed standalone compaction. Disabled permits explicit API compaction but never automatic compaction or context-limit recovery."
+            },
+            "inputLimitTokens": {
+              "description": "Optional input capacity override for this model route. Omission uses reported capacity where available; unknown limits recover from context-length errors.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentAccess": {
+          "description": "Per-attachment environment access, an ordered ladder: `edit` adds file\nediting to `read`, `exec` adds processes, `jobs` adds durable jobs.\nProcesses can write files regardless of the file-tool level, so\nread-only files with commands is deliberately not expressible.",
+          "enum": [
+            "read",
+            "edit",
+            "exec",
+            "jobs"
+          ],
+          "type": "string"
+        },
+        "EnvironmentAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One environment the session may use. Exactly one of `environmentId` and\n`inherit` identifies the machine. `inherit` is valid only in a profile\ndocument applied to a sub-agent: it resolves to the delegating parent's\nactive environment at spawn and is stored on the child as a concrete id.\nIf the parent's environment is also listed explicitly, the explicit\nattachment wins; if the parent has none, the inherit attachment is dropped.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/EnvironmentAccess"
+            },
+            "default": {
+              "description": "Activated when a profile is applied while the session has no active\nenvironment; creation is the trivial case. Never overrides a live\nselection and never applies on a plain `session/config/put`.",
+              "type": "boolean"
+            },
+            "environmentId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inherit": {
+              "type": "boolean"
+            },
+            "workingDirectory": {
+              "description": "Absolute machine working directory for file tools, commands, jobs,\nand sources; absent uses the machine's advertised default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "access"
+          ],
+          "type": "object"
+        },
+        "EnvironmentPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Prompt loading scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/prompts and\n.lightspeed/prompts under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Skill discovery scope resolved on the selected machine, never on the worker.",
+          "properties": {
+            "roots": {
+              "description": "Optional source directories, absolute or relative to the environment\nworking directory. Explicit nonempty lists replace all defaults,\nincluding home roots. Defaults are .agents/skills and\n.lightspeed/skills under working directory and execution home.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "EnvironmentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants session environments. The `environments` list is the allowed set:\nthe session can select, read, and run work only on a listed machine, each\nwith its own access grant and working directory. The installed tool\nsurface is the union of every attachment's grant; a call the active\nmachine's grant does not cover fails at execution, so switching machines\nnever changes the toolset. `{}` grants the feature with no reachable\nmachine.",
+          "properties": {
+            "environments": {
+              "description": "The environments this session may use; unique ids, at most one\ndefault, at most one `inherit` (profiles only).",
+              "items": {
+                "$ref": "#/definitions/EnvironmentAttachment"
+              },
+              "type": "array"
+            },
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment prompt loading; absent disables sourced instructions."
+            },
+            "selection": {
+              "default": false,
+              "description": "Exposes `environment_list`, `environment_activate`, and\n`environment_deactivate` over the attached environments.\n`environment_read` is available whenever environments are enabled, and\nexternal API/profile activation remains available when this is false.",
+              "type": "boolean"
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent environment skill discovery. Absent disables discovery."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "FeaturesConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Capability grants. An absent feature is not granted; `{}` grants it with\ndefaults. Every block carries a behavior `version` that pins semantics.",
+          "properties": {
+            "codeMode": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CodeModeFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "environments": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mcp": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/McpFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subagents": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SubagentsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "timers": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TimersFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vfs": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "web": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "GenerationConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Turn-shaping defaults applied to every LLM generation. Per-run overrides\nride `session/runs/start`.",
+          "properties": {
+            "maxOutputTokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "parallelToolUse": {
+              "description": "Whether the model may call several tools in one turn; absent leaves\nthe provider default.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "processingTier": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelProcessingTier"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider processing class. In session/profile config this becomes the\ndefault for every run; in run config it overrides that run. Currently\nsupported only by the built-in OpenAI provider."
+            },
+            "reasoningEffort": {
+              "description": "Reasoning effort tier as a provider-native string (e.g. \"none\",\n\"high\", \"xhigh\", \"max\"); validated against the session's provider.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toolChoice": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ToolChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "LimitsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Run budget defaults enforced by the harness drive loop.",
+          "properties": {
+            "maxToolRounds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxTurns": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "McpFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants remote MCP tools by declaring attached servers from the universe MCP\ncatalog. Server ids must be unique; an empty list grants no MCP tools.",
+          "properties": {
+            "servers": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/McpServerAttachment"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "McpServerAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "A selected universe MCP server. Its catalog record owns connection,\nexecution, exposure, approval, and auth; the attachment may only narrow the\nrecord's tool allowlist for this session.",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "tools": {
+              "description": "Non-empty subset of the record's allowed tools exposed to this\nsession, under both injection and search; absent exposes the record's\nfull allowlist.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "serverId"
+          ],
+          "type": "object"
+        },
+        "ModelConfig": {
+          "properties": {
+            "apiKind": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "apiKind",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ModelProcessingTier": {
+          "description": "Provider processing class used by session defaults and per-run overrides.",
+          "enum": [
+            "standard",
+            "fast",
+            "flex"
+          ],
+          "type": "string"
+        },
+        "ProfileId": {
+          "type": "string"
+        },
+        "SessionConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Declared session configuration document.\n\nSparse and capability-oriented: an omitted section means defaults, an\nabsent feature is not granted (no tools, no access). The document is\nreplaced whole via `session/config/put`; reads return exactly the stored\ndocument, so read-modify-write round-trips.",
+          "properties": {
+            "context": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ContextConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "features": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/FeaturesConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "generation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GenerationConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LimitsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "At creation, omission uses the profile model or universe agentRun\ndefault. On configuration replacement or profile application to an\nexisting session, omission preserves its current model. Documents read\nback from a session always carry the model. Provider identity and API\nkind are fixed for the session lifetime; the model name may change."
+            }
+          },
+          "type": "object"
+        },
+        "SubagentAgentRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
+        "SubagentProgramRef": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "profileId": {
+              "$ref": "#/definitions/ProfileId"
+            }
+          },
+          "required": [
+            "profileId"
+          ],
+          "type": "object"
+        },
+        "SubagentsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants delegation to child sessions: `agent_run` (joined, result inline)\nand `agent_spawn` (promise, joined with `await`) over the listed agent\nprofiles, and `program_run` / `program_spawn` over the listed program\nprofiles. At least one of the two lists must be non-empty. Limits are\nroot-scoped and attenuating: every descendant of a root session, agent or\nprogram, counts against the root, and a nested grant can narrow but never\nwiden the limits pinned on its origin.",
+          "properties": {
+            "agents": {
+              "default": [],
+              "description": "The agent menu. Every id must name an existing agent profile; the\nmodel picks by id and reads descriptions from the sub-agent catalog.",
+              "items": {
+                "$ref": "#/definitions/SubagentAgentRef"
+              },
+              "type": "array"
+            },
+            "deadlineMs": {
+              "default": 3600000,
+              "description": "Per-child run deadline in milliseconds; at most the execution\nceiling of 24 hours.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxConcurrent": {
+              "default": 4,
+              "description": "Open sessions under the root at any time, excluding the root.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDepth": {
+              "default": 2,
+              "description": "A child at depth `d` may spawn only while `d + 1 <= maxDepth`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxDescendants": {
+              "description": "Lifetime total of sessions ever created under the root, closed ones\nincluded. No lifetime limit when omitted; `maxPerRun` still bounds\neach run.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxPerRun": {
+              "default": 16,
+              "description": "Sessions created under the root during one run of the root, counted\nacross the whole tree (children of children included).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "programs": {
+              "description": "The program menu. Every id must name an existing program profile (one\nwith a `program`); a child program runs once with the caller's input\nand returns its output.",
+              "items": {
+                "$ref": "#/definitions/SubagentProgramRef"
+              },
+              "type": "array"
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "TimersFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants timer promises through the sleep tool plus the base concurrency\ntools (await/cancel/detach).",
+          "properties": {
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "ToolChoice": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "auto",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "none",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "requiredAny",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "toolId": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "specific",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "toolId"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "VfsFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants the session virtual filesystem. Workspace attachments declare the\nsession-visible namespace and the VFS catalog is surfaced. The file tool\nsurface is derived from the attachments: any attachment installs the read\ntools, any `edit` attachment adds the write tools, and with the\nenvironments feature granted the matching transfer tools appear. `{}`\ngrants a VFS with no attachments, no tools, and no sourcing.",
+          "properties": {
+            "prompts": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsPromptsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt-instruction sourcing from the VFS. Absent disables loading;\nan empty block discovers conventional attached roots."
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/VfsSkillsConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Independent VFS skill discovery. Absent disables discovery and removes\nits runtime catalog; an empty block discovers conventional attached roots."
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "description": "Absolute VFS tool working directory; absent uses /.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaces": {
+              "description": "Catalog resources exposed in the session's workspace namespace at\ndisjoint absolute paths.",
+              "items": {
+                "$ref": "#/definitions/WorkspaceAttachment"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "VfsPromptsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/prompts and .lightspeed/prompts beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "VfsSkillsConfig": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "roots": {
+              "description": "Absent searches .agents/skills and .lightspeed/skills beneath each\nworkspace attachment. Explicit roots replace these defaults and must be\nnon-empty absolute paths contained in workspace attachments.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "WebFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "Grants network access through the web toolset; `fetch` and `search` are\nindependently granted, and a web block granting neither is rejected.",
+          "properties": {
+            "fetch": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebFetchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchFeature"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "version": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "WebFetchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "type": "object"
+        },
+        "WebSearchFeature": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "properties": {
+            "allowedDomains": {
+              "description": "Absent means all domains; an explicit list must be non-empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "blockedDomains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "WorkspaceAccess": {
+          "description": "Per-attachment VFS access; `edit` implies `read`.",
+          "enum": [
+            "read",
+            "edit"
+          ],
+          "type": "string"
+        },
+        "WorkspaceAttachment": {
+          "additionalProperties": {
+            "not": {}
+          },
+          "description": "One catalog resource mounted into the session namespace. Exactly one of\n`workspaceId` and `snapshotRef` names the resource; snapshots are\nimmutable and must be attached with `read` access.",
+          "properties": {
+            "access": {
+              "$ref": "#/definitions/WorkspaceAccess"
+            },
+            "path": {
+              "type": "string"
+            },
+            "snapshotRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspaceId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "access"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  {
     "name": "lightspeed_blobs_put",
     "method": "blobs/put",
     "group": "blobs/put",

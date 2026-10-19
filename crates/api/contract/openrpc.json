@@ -1951,6 +1951,40 @@
         ],
         "type": "object"
       },
+      "AgentApiOutcomeOfProgramContractsListResponse": {
+        "properties": {
+          "notifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotification"
+            },
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProgramContractsListResponse"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object"
+      },
+      "AgentApiOutcomeOfProgramPutResponse": {
+        "properties": {
+          "notifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotification"
+            },
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProgramPutResponse"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object"
+      },
       "AgentApiOutcomeOfRunApprovalsDecideResponse": {
         "properties": {
           "notifications": {
@@ -14024,6 +14058,69 @@
         ],
         "type": "object"
       },
+      "ProgramContractView": {
+        "description": "A tool contract: a program calls `env.<name>(args)`, for `agent.run`\n`env.agent.run({ agent, input })`, and lists the name in `requires`.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "Pins the contract's shape; `requires` may name it to refuse a\nsession whose contract differs.",
+            "type": "string"
+          },
+          "inputSchema": {
+            "description": "The JSON Schema of the call's argument."
+          },
+          "name": {
+            "type": "string"
+          },
+          "outputSchema": {
+            "description": "The JSON Schema of the call's result, when the contract declares one."
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "inputSchema"
+        ],
+        "type": "object"
+      },
+      "ProgramContractsListParams": {
+        "additionalProperties": false,
+        "description": "What a program with these grants may require.",
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The grants, as a program's profile config; absent, a program with\nnone, which still has the human-input contracts."
+          }
+        },
+        "type": "object"
+      },
+      "ProgramContractsListResponse": {
+        "properties": {
+          "contracts": {
+            "description": "By name.",
+            "items": {
+              "$ref": "#/components/schemas/ProgramContractView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "contracts"
+        ],
+        "type": "object"
+      },
       "ProgramInputDefaults": {
         "description": "Defaults for a program run's input requests.",
         "properties": {
@@ -14177,6 +14274,80 @@
           "kind",
           "afterCalls",
           "recordedAtMs"
+        ],
+        "type": "object"
+      },
+      "ProgramPutParams": {
+        "additionalProperties": false,
+        "description": "Create or replace a program: a profile whose sessions run it. It runs\nwith its own grants, `config`, whoever starts or calls it.",
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The program's grants: the features its required contracts come\nfrom (sub-agents with the agents and programs it may run, timers,\nweb, environments, MCP servers)."
+          },
+          "description": {
+            "description": "What it does and the input it takes, shown in catalogs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "description": "Checked only when the program already exists; absent replaces (or\ncreates) unconditionally.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "program": {
+            "$ref": "#/components/schemas/ProgramSpec"
+          },
+          "programId": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProfileId"
+              }
+            ],
+            "description": "The program's profile id; the id other grants list it under."
+          }
+        },
+        "required": [
+          "programId",
+          "program"
+        ],
+        "type": "object"
+      },
+      "ProgramPutResponse": {
+        "properties": {
+          "contracts": {
+            "description": "The contracts the program requires, as its grants bind them.",
+            "items": {
+              "$ref": "#/components/schemas/ProgramContractView"
+            },
+            "type": "array"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/AgentProfile"
+          }
+        },
+        "required": [
+          "profile",
+          "contracts"
         ],
         "type": "object"
       },
@@ -22197,6 +22368,62 @@
       },
       "x-lightspeed-group": "profiles",
       "x-lightspeed-role": "operator",
+      "x-lightspeed-target": null
+    },
+    {
+      "description": "Checks a program, then stores it as a program profile: grants valid as a session's, source compiles, schemas are JSON Schema, every required contract bound by its own grants; the first problem refuses it. It runs with its own grants whoever calls it. An agent profile's id is refused. Returns the profile and its required contracts with their schemas.",
+      "name": "programs/put",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/ProgramPutParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/AgentApiOutcomeOfProgramPutResponse"
+        }
+      },
+      "summary": "Create or replace a program",
+      "x-lightspeed-access": {
+        "action": "manage_profile",
+        "kind": "universe"
+      },
+      "x-lightspeed-group": "profiles",
+      "x-lightspeed-role": "operator",
+      "x-lightspeed-target": null
+    },
+    {
+      "description": "Lists the tool contracts a program with these grants may require and call as env.<name>(args): each one's name, digest, description and argument and result schemas. MCP contracts come from the granted servers' current tools.",
+      "name": "programs/contracts/list",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/ProgramContractsListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/AgentApiOutcomeOfProgramContractsListResponse"
+        }
+      },
+      "summary": "List program contracts",
+      "x-lightspeed-access": {
+        "action": "read",
+        "kind": "universe"
+      },
+      "x-lightspeed-group": "profiles",
+      "x-lightspeed-role": "viewer",
       "x-lightspeed-target": null
     },
     {
