@@ -44,8 +44,9 @@ use tools::human_input::{
 /// The model of the child agents programs start. A brief `CHECK <word>` is
 /// answered `checked <word>`; one containing `FAIL` fails the child's run. A
 /// brief `PROGRAM <profile> <claim>` calls `program_run` with that claim and
-/// answers with what came back. A program session never plans a model turn,
-/// so a request without a brief is a bug.
+/// answers with what came back; `TOOLS` is answered with the ids of the
+/// tools the child was offered, comma-separated. A program session never
+/// plans a model turn, so a request without a brief is a bug.
 struct ChildAgentModel {
     blobs: Arc<dyn BlobStore>,
 }
@@ -220,14 +221,26 @@ impl CoreAgentLlm for ChildAgentModel {
                 facts,
             });
         }
-        let word = brief
-            .split("CHECK ")
-            .nth(1)
-            .and_then(|rest| rest.split(|c: char| !c.is_alphanumeric()).next())
-            .unwrap_or("nothing");
+        let text = if brief.trim() == "TOOLS" {
+            let mut offered = request
+                .request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>();
+            offered.sort_unstable();
+            offered.join(",")
+        } else {
+            let word = brief
+                .split("CHECK ")
+                .nth(1)
+                .and_then(|rest| rest.split(|c: char| !c.is_alphanumeric()).next())
+                .unwrap_or("nothing");
+            format!("checked {word}")
+        };
         let output_ref = self
             .put(
-                serde_json::to_vec(&json!([{ "type": "text", "text": format!("checked {word}") }]))
+                serde_json::to_vec(&json!([{ "type": "text", "text": text }]))
                     .expect("text blocks"),
             )
             .await?;
@@ -247,7 +260,7 @@ impl CoreAgentLlm for ChildAgentModel {
                         harness::ANTHROPIC_MESSAGES_TEXT_BLOCKS_PROVIDER_KIND.to_owned(),
                     ),
                 },
-                preview: Some(format!("checked {word}")),
+                preview: Some(text),
                 origin: None,
                 provenance_ref: None,
                 token_estimate: None,
@@ -4354,6 +4367,145 @@ async fn a_later_run_takes_back_a_child_program_an_earlier_run_detached() -> any
                 })
                 .await;
             for profile_id in [profile_id, api::ProfileId::new(checker)] {
+                api.delete_profile(api::ProfileDeleteParams { profile_id })
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Asks a child agent which tools it has, narrowed to web fetch and not; runs
+/// a child program that needs the timer, given it and not.
+const NARROWING_PROGRAM: &str = r#"
+    export default {
+        async run(input, env) {
+            const narrowed = await env.agent.run({ agent: input.agent, input: "TOOLS", env: [env.web.fetch] });
+            const full = await env.agent.run({ agent: input.agent, input: "TOOLS" });
+            const ran = await env.program.run({
+                program: input.checker,
+                input: { claim: "timed", ms: 1 },
+                env: [env.time.sleep],
+            });
+            let refused = null;
+            try {
+                await env.program.run({ program: input.checker, input: { claim: "x" }, env: [env.web.fetch] });
+            } catch (error) {
+                refused = [error.kind, error.value.reason];
+            }
+            return { claim: input.claim, slept: 0, narrowed: narrowed.output, full: full.output, ran, refused };
+        }
+    };
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires local Temporal and PostgreSQL; run serially"]
+async fn a_program_hands_its_children_only_what_it_names_in_env() -> anyhow::Result<()> {
+    with_program_workers(InputTimeouts::default(), |api, store, session_id| {
+        Box::pin(async move {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let features = |value: Value| -> anyhow::Result<api::FeaturesConfig> {
+                Ok(serde_json::from_value(value)?)
+            };
+            let checker = api::ProfileId::new(format!("live_checker_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: program_profile(&checker, SLOW_CHECKER_PROGRAM, &[("time.sleep", None)]),
+            })
+            .await?;
+            // A child agent whose profile grants web fetch and timers.
+            let agent = api::ProfileId::new(format!("live_child_{suffix}"));
+            api.create_profile(api::ProfileCreateParams {
+                profile: api::AgentProfileInput {
+                    profile_id: agent.clone(),
+                    display_name: Some("Live child".to_owned()),
+                    description: None,
+                    document: api::ProfileDocument {
+                        program: None,
+                        metadata: Default::default(),
+                        config: Some(api::SessionConfig {
+                            features: Some(features(
+                                json!({ "web": { "fetch": {} }, "timers": {} }),
+                            )?),
+                            ..api::SessionConfig::default()
+                        }),
+                        instructions: Some(api::ProfileInstructions::Text {
+                            text: "You are a scripted child agent.".to_owned(),
+                        }),
+                        retention: None,
+                    },
+                },
+            })
+            .await?;
+            let profile_id = api::ProfileId::new(format!("live_program_{suffix}"));
+            let mut profile = program_profile(
+                &profile_id,
+                NARROWING_PROGRAM,
+                &[
+                    ("agent.run", None),
+                    ("program.run", None),
+                    ("web.fetch", None),
+                    ("time.sleep", None),
+                ],
+            );
+            profile.document.config = Some(api::SessionConfig {
+                features: Some(features(json!({
+                    "web": { "fetch": {} },
+                    "timers": {},
+                    "subagents": {
+                        "agents": [{ "profileId": agent.as_str() }],
+                        "programs": [{ "profileId": checker.as_str() }],
+                        "maxDepth": 2,
+                        "maxPerRun": 8,
+                        "maxConcurrent": 4,
+                        "deadlineMs": 120000,
+                    },
+                }))?),
+                ..api::SessionConfig::default()
+            });
+            api.create_profile(api::ProfileCreateParams { profile })
+                .await?;
+            start_program_session(&api, &session_id, &profile_id).await?;
+            let run = start_program_run(
+                &api,
+                &session_id,
+                json!({"claim": "narrow", "agent": agent.as_str(), "checker": checker.as_str()}),
+            )
+            .await?;
+            let run = support::live::wait_for_terminal_run_with_timeout(
+                &api,
+                &session_id,
+                &run.id,
+                Duration::from_secs(120),
+            )
+            .await?;
+            assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+            let output =
+                read_json(&store, &run.output.as_ref().expect("output").content_ref).await?;
+            // Narrowed, the agent has web fetch alone; otherwise its profile's
+            // tools, the timer's among them.
+            assert_eq!(output["narrowed"], json!("web.fetch"), "{output}");
+            let full = output["full"].as_str().expect("full tools");
+            assert!(
+                full.contains("web.fetch") && full.contains("concurrency."),
+                "{output}"
+            );
+            assert_eq!(
+                output["ran"],
+                json!({"claim": "timed", "slept": 1, "verdict": "supported"})
+            );
+            assert_eq!(
+                output["refused"],
+                json!(["program_rejected", "outside_env"])
+            );
+
+            let _ = api
+                .close_session(api::SessionCloseParams {
+                    session_id: session_id.to_string(),
+                    force: true,
+                })
+                .await;
+            for profile_id in [profile_id, agent, checker] {
                 api.delete_profile(api::ProfileDeleteParams { profile_id })
                     .await?;
             }

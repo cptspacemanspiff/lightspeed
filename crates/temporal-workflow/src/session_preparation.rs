@@ -237,6 +237,10 @@ pub struct SessionProfilePreparation {
 pub struct SessionToolsetRequest {
     pub source: SessionToolsetSource,
     pub validate_configuration: bool,
+    /// The session being prepared, whose origin may narrow its tools.
+    /// Requests from before it was sent prepare without narrowing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
 }
 
 /// Compute a minimal patch from the currently published tools to an observed desired set.

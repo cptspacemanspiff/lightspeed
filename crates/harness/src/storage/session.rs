@@ -87,6 +87,23 @@ pub struct SessionOrigin {
     /// Effective limits pinned at spawn: the parent's grant attenuated by
     /// the parent's own origin limits.
     pub limits: SubagentLimits,
+    /// The capabilities this session may use, when its caller narrowed them:
+    /// a program's `env` list, or the list its parent was itself given.
+    /// Absent, the session holds its profile's grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<DelegatedContract>>,
+}
+
+/// One capability a delegating program handed its child: the contract and
+/// the tool that served it in the caller's session, the same tool in the
+/// child's. An MCP tool is its server's tool (`tool_id`) and the server tool
+/// it calls (`tool_name`, `<tool_id>__<remote name>`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedContract {
+    pub contract: String,
+    pub digest: String,
+    pub tool_id: String,
+    pub tool_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1865,6 +1882,7 @@ mod tests {
             profile_id: "reviewer".to_owned(),
             profile_revision: 1,
             limits,
+            env: None,
         }
     }
 
@@ -2379,6 +2397,7 @@ mod tests {
                             profile_id: "child".into(),
                             profile_revision: 1,
                             limits: SubagentLimits::default(),
+                            env: None,
                         }),
                         delete_after_close_ms: None,
                         created_at_ms: 1,

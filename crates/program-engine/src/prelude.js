@@ -22,8 +22,13 @@
     const stringSplit = String.prototype.split;
     const arraySlice = Array.prototype.slice;
     const floor = Math.floor;
+    const NativeWeakMap = WeakMap;
+    const weakGet = WeakMap.prototype.get;
+    const weakSet = WeakMap.prototype.set;
     const pending = create(null);
     const bindingIds = create(null);
+    // The contract each function in `env` calls, for a child call's `env`.
+    const contractOf = new NativeWeakMap();
 
     // Clone only JSON data, rejecting silent JSON.stringify losses such as
     // undefined fields, functions, non-finite numbers, accessors and array holes.
@@ -170,7 +175,7 @@
                 place(env, binding.name, freeze(function (args) {
                     let issued;
                     try {
-                        issued = invoke(id, args);
+                        issued = invoke(id, childArgs(args));
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -205,7 +210,7 @@
                 place(env, binding.name, freeze(function (args) {
                     let issued;
                     try {
-                        issued = invoke(id, args);
+                        issued = invoke(id, childArgs(args));
                     } catch (error) {
                         return NativePromise.reject(error);
                     }
@@ -234,6 +239,33 @@
         const last = segments[segments.length - 1];
         if (hasOwn(node, last)) throw new NativeError("Contract " + name + " conflicts with another contract");
         define(node, last, { value: leaf, enumerable: true });
+        reflectApply(weakSet, contractOf, [leaf, name]);
+    }
+    // A child call names what the child may use with the caller's own
+    // functions from `env` (`env: [env.web.fetch]`); the host gets their
+    // contract names. A parent can hand on only what it holds.
+    function childArgs(args) {
+        if (args === null || typeof args !== "object" || !hasOwn(args, "env") || args.env === undefined) {
+            return args;
+        }
+        const handed = args.env;
+        if (!isArray(handed)) throw new NativeTypeError("env must be an array of functions from env");
+        const names = [];
+        const seen = create(null);
+        for (let i = 0; i < handed.length; i++) {
+            const name = typeof handed[i] === "function"
+                ? reflectApply(weakGet, contractOf, [handed[i]])
+                : undefined;
+            if (name === undefined) throw new NativeTypeError("env entries must be functions from env");
+            if (seen[name] === true) continue;
+            seen[name] = true;
+            names[names.length] = name;
+        }
+        const copy = create(null);
+        const fields = keys(args);
+        for (let i = 0; i < fields.length; i++) copy[fields[i]] = args[fields[i]];
+        copy.env = names;
+        return copy;
     }
     function deepFreeze(node) {
         const names = keys(node);

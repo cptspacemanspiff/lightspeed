@@ -72,6 +72,7 @@ async fn create(store: &PgStore, id: &str, parent: Option<&str>) {
                 profile_id: "child".into(),
                 profile_revision: 1,
                 limits: SubagentLimits::default(),
+                env: None,
             }),
             delete_after_close_ms: None,
             created_at_ms: 1,

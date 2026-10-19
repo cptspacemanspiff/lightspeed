@@ -426,6 +426,7 @@ async fn pg_live_clone_copies_resources_and_links_sessions() {
         profile_id: "reviewer".to_owned(),
         profile_revision: 3,
         limits,
+        env: None,
     };
     let child = store
         .create_session(CreateSession {

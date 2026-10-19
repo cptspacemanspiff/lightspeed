@@ -59,6 +59,9 @@ pub struct BuiltinSettings {
     pub blocked_domains: Vec<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub mcp_server_index: String,
+    /// The tool is offered to a program rather than a model.
+    #[serde(skip_serializing_if = "is_default")]
+    pub program_caller: bool,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -174,13 +177,17 @@ pub fn resolve(
                 .definition()?
         }
         "code.execute" => crate::code::code_execute_tool_definition()?,
-        crate::subagents::AGENT_RUN_TOOL_ID => subagent_tool_definition(SubagentToolKind::Run)?,
-        crate::subagents::AGENT_SPAWN_TOOL_ID => subagent_tool_definition(SubagentToolKind::Spawn)?,
+        crate::subagents::AGENT_RUN_TOOL_ID => {
+            subagent_tool_definition(SubagentToolKind::Run, child_caller(&settings))?
+        }
+        crate::subagents::AGENT_SPAWN_TOOL_ID => {
+            subagent_tool_definition(SubagentToolKind::Spawn, child_caller(&settings))?
+        }
         crate::subagents::PROGRAM_RUN_TOOL_ID => {
-            subagent_tool_definition(SubagentToolKind::ProgramRun)?
+            subagent_tool_definition(SubagentToolKind::ProgramRun, child_caller(&settings))?
         }
         crate::subagents::PROGRAM_SPAWN_TOOL_ID => {
-            subagent_tool_definition(SubagentToolKind::ProgramSpawn)?
+            subagent_tool_definition(SubagentToolKind::ProgramSpawn, child_caller(&settings))?
         }
         crate::subagents::AGENT_HANDLE_TOOL_ID => {
             crate::subagents::child_handle_definition(SubagentToolKind::Spawn)?
@@ -249,6 +256,14 @@ pub fn resolve(
         binding: Some(ToolBinding::new(definition.name.clone(), id.as_str())),
         definition: Definition::Function(definition),
     }])
+}
+
+fn child_caller(settings: &BuiltinSettings) -> crate::subagents::ChildCaller {
+    if settings.program_caller {
+        crate::subagents::ChildCaller::Program
+    } else {
+        crate::subagents::ChildCaller::Model
+    }
 }
 
 fn settings_from_spec(id: &ToolName, spec: &BuiltinToolSpec) -> ToolResult<BuiltinSettings> {

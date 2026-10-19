@@ -892,6 +892,60 @@ fn a_child_program_returns_its_output_and_fails_by_its_status() {
 }
 
 #[test]
+fn a_child_call_hands_on_the_callers_own_functions_by_contract_name() {
+    let source = r#"
+        export default {
+            async run(input, env) {
+                const ran = await env.program.run({
+                    program: "checker",
+                    input: {},
+                    env: [env.web.fetch, env.time.sleep, env.web.fetch],
+                });
+                const refused = [];
+                for (const handed of [["web.fetch"], [() => 1], "web.fetch"]) {
+                    try { await env.agent.spawn({ agent: "checker", input: "x", env: handed }); }
+                    catch (error) { refused.push(error.message); }
+                }
+                return { ran, refused };
+            }
+        };
+    "#;
+    let contracts = [
+        "program.run",
+        "agent.spawn",
+        "promise.await",
+        "web.fetch",
+        "time.sleep",
+    ];
+    let (requests, report) = run_program(program_input(source, &contracts, SEED), |request| {
+        let outcome = match request.binding_id.as_str() {
+            "opaque-program.run" => json!({"verdict": "ok"}),
+            other => panic!("unexpected call {other}"),
+        };
+        (Ok(outcome), None)
+    });
+    assert_eq!(report.error, None);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.arguments.clone())
+            .collect::<Vec<_>>(),
+        [json!({"program": "checker", "input": {}, "env": ["web.fetch", "time.sleep"]})]
+    );
+    assert_eq!(
+        report.return_value,
+        Some(json!({
+            "ran": {"verdict": "ok"},
+            "refused": [
+                "env entries must be functions from env",
+                "env entries must be functions from env",
+                "env must be an array of functions from env",
+            ],
+        }))
+    );
+}
+
+#[test]
 fn a_detached_child_is_taken_back_by_its_id() {
     let source = r#"
         export default {

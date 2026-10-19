@@ -128,7 +128,7 @@ impl SessionPreparationService {
             tools.extend(
                 tools::subagents::SubagentToolKind::granted(subagents)
                     .into_iter()
-                    .map(tools::subagents::SubagentToolKind::tool_spec),
+                    .map(|kind| kind.tool_spec(tools::subagents::ChildCaller::Program)),
             );
         }
         let mut contracts = tools::program::contracts::bind_toolset(self.store.as_ref(), &tools)
@@ -247,12 +247,13 @@ impl SessionPreparationService {
         Ok(declarations)
     }
 
-    /// The child-session bindings of `kinds`. Agent children reply with
-    /// their result envelope; a program child's reply is its output, which
-    /// its own output schema has already checked.
+    /// The child-session bindings of `kinds`, as `caller` calls them. Agent
+    /// children reply with their result envelope; a program child's reply
+    /// is its output, which its own output schema has already checked.
     pub(crate) async fn core_subagent_workflow_tool_declarations(
         &self,
         kinds: &[tools::subagents::SubagentToolKind],
+        caller: tools::subagents::ChildCaller,
     ) -> Result<Vec<WorkflowToolDeclaration>, AgentApiError> {
         let recipe_bytes = serde_json::to_vec(&temporal_workflow::WorkflowToolRecipeV1 {
             workflow_type: tools::subagents::SUBAGENT_WORKFLOW_TYPE.to_owned(),
@@ -286,7 +287,7 @@ impl SessionPreparationService {
                 (!kind.is_program()).then(|| reply_schema_ref.clone()),
                 harness::SUBAGENT_DEADLINE_CEILING_MS,
             );
-            let tool = kind.tool_spec();
+            let tool = kind.tool_spec(caller);
             declarations.push(WorkflowToolDeclaration::new(
                 WorkflowToolDefinition {
                     tool_id: WorkflowToolId::new(kind.workflow_tool_id()),
@@ -500,9 +501,12 @@ impl SessionPreparationService {
             .collect())
     }
 
+    /// The tools `source` materializes for `session_id`. An agent session a
+    /// program delegated to with `env` keeps only what that list names.
     pub(crate) async fn prepare_toolset(
         &self,
         source: SessionToolsetSource,
+        session_id: Option<&SessionId>,
     ) -> Result<SessionToolsetPreparation, AgentApiError> {
         let session_config = &source.config;
         let jobs = session_config
@@ -518,6 +522,11 @@ impl SessionPreparationService {
             .map(tools::subagents::SubagentToolKind::granted)
             .unwrap_or_default();
         let code_mode = session_config.features.code_mode.is_some();
+        let caller = if source.driver.is_program() {
+            tools::subagents::ChildCaller::Program
+        } else {
+            tools::subagents::ChildCaller::Model
+        };
         let mut declarations = Vec::new();
         if source.driver.is_program() {
             declarations.push(
@@ -534,7 +543,7 @@ impl SessionPreparationService {
         }
         if !subagents.is_empty() {
             declarations.extend(
-                self.core_subagent_workflow_tool_declarations(&subagents)
+                self.core_subagent_workflow_tool_declarations(&subagents, caller)
                     .await?,
             );
         }
@@ -614,12 +623,68 @@ impl SessionPreparationService {
         }
         let mut tools = toolset.tools;
         tools.extend(desired_mcp);
+        // A program child can call only the contracts it requires, which
+        // its preparation already checked against the list.
+        if !source.driver.is_program()
+            && let Some(session_id) = session_id
+            && let Some(env) = self.delegated_env(session_id).await?
+        {
+            narrow_to_env(&mut tools, &env);
+        }
         Ok(SessionToolsetPreparation {
             source,
             declarations,
             tools,
         })
     }
+
+    /// The capabilities a delegating program narrowed this session to, from
+    /// its origin. A session not yet created has none.
+    async fn delegated_env(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<harness::storage::DelegatedContract>>, AgentApiError> {
+        let record = self
+            .store
+            .load_session(session_id)
+            .await
+            .map_err(api_projection::map_session_store_error)?;
+        Ok(record
+            .and_then(|record| record.origin)
+            .and_then(|origin| origin.env))
+    }
+}
+
+/// Keep the tools `env` names: a tool it names by id, and of an MCP server
+/// only the server tools it names. Everything else goes, including tools no
+/// contract serves.
+fn narrow_to_env(
+    tools: &mut BTreeMap<ToolName, harness::ToolSpec>,
+    env: &[harness::storage::DelegatedContract],
+) {
+    tools.retain(|name, spec| {
+        let granted = env
+            .iter()
+            .filter(|contract| contract.tool_id == name.as_str());
+        let harness::ToolKind::RemoteMcp(mcp) = &mut spec.kind else {
+            return granted.count() > 0;
+        };
+        let prefix = format!("{name}__");
+        let remote = granted
+            .filter_map(|contract| contract.tool_name.strip_prefix(&prefix))
+            .filter(|remote| {
+                mcp.allowed_tools
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.iter().any(|tool| tool == remote))
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if remote.is_empty() {
+            return false;
+        }
+        mcp.allowed_tools = Some(remote);
+        true
+    });
 }
 
 impl SessionPreparationService {
@@ -751,7 +816,9 @@ impl SessionPreparationService {
                 Some(environment_id)
             }
         };
-        let toolset = self.prepare_toolset(request.source).await?;
+        let toolset = self
+            .prepare_toolset(request.source, Some(&request.session_id))
+            .await?;
         Ok(temporal_workflow::SessionProfilePreparation {
             toolset,
             instructions,
@@ -770,5 +837,91 @@ impl GatewayAgentApi {
             input_timeouts: self.input_timeouts,
             mcp_inventory: Some(self.mcp_inventory.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delegated(
+        contract: &str,
+        tool_id: &str,
+        tool_name: &str,
+    ) -> harness::storage::DelegatedContract {
+        harness::storage::DelegatedContract {
+            contract: contract.to_owned(),
+            digest: format!("sha256:{contract}"),
+            tool_id: tool_id.to_owned(),
+            tool_name: tool_name.to_owned(),
+        }
+    }
+
+    fn mcp_server(name: &str, allowed: Option<&[&str]>) -> harness::ToolSpec {
+        harness::ToolSpec {
+            name: ToolName::new(name),
+            kind: harness::ToolKind::RemoteMcp(harness::RemoteMcpToolSpec {
+                server_id: "github".to_owned(),
+                record_revision: 1,
+                server_label: "github".to_owned(),
+                server_url: "https://mcp.example.com".to_owned(),
+                description_ref: None,
+                allowed_tools: allowed
+                    .map(|tools| tools.iter().map(|tool| (*tool).to_owned()).collect()),
+                execution: harness::RemoteMcpExecution::Native,
+                exposure: harness::RemoteMcpExposure::Inject,
+                approval: harness::RemoteMcpApprovalPolicy::Never,
+                defer_loading: None,
+                auth_ref: None,
+                auth_required: false,
+                allow_private_network: false,
+            }),
+            parallelism: harness::ToolParallelism::ParallelSafe,
+            execution: harness::ToolExecutionSpec::default(),
+        }
+    }
+
+    #[test]
+    fn a_narrowed_session_keeps_only_the_tools_and_server_tools_its_list_names() {
+        let builtin = |id: &str| {
+            tools::definitions::register(
+                id,
+                Default::default(),
+                harness::ToolParallelism::ParallelSafe,
+                Default::default(),
+            )
+        };
+        let mut tools: BTreeMap<ToolName, harness::ToolSpec> = [
+            builtin("web.fetch"),
+            builtin("vfs.read_file"),
+            builtin("concurrency.await"),
+            mcp_server("mcp_github", None),
+            mcp_server("mcp_slack", None),
+        ]
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+        let env = [
+            delegated("web.fetch", "web.fetch", "web_fetch"),
+            delegated("mcp.github.read", "mcp_github", "mcp_github__read"),
+        ];
+        narrow_to_env(&mut tools, &env);
+        assert_eq!(
+            tools.keys().map(ToolName::as_str).collect::<Vec<_>>(),
+            ["mcp_github", "web.fetch"]
+        );
+        let harness::ToolKind::RemoteMcp(github) = &tools[&ToolName::new("mcp_github")].kind else {
+            panic!("MCP server");
+        };
+        assert_eq!(github.allowed_tools, Some(vec!["read".to_owned()]));
+
+        // A server's own allow-list still bounds what the list names.
+        let mut tools: BTreeMap<ToolName, harness::ToolSpec> =
+            [mcp_server("mcp_github", Some(&["write"]))]
+                .into_iter()
+                .map(|tool| (tool.name.clone(), tool))
+                .collect();
+        narrow_to_env(&mut tools, &env);
+        assert!(tools.is_empty(), "{tools:?}");
     }
 }

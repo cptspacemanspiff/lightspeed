@@ -641,8 +641,9 @@ mod tests {
         let blobs = InMemoryBlobStore::new();
         let without = bind_toolset(&blobs, &tools).await.unwrap();
         assert!(!names(&without).contains(&"agent.run"));
-        tools.push(crate::subagents::SubagentToolKind::Run.tool_spec());
-        tools.push(crate::subagents::SubagentToolKind::Spawn.tool_spec());
+        let program = crate::subagents::ChildCaller::Program;
+        tools.push(crate::subagents::SubagentToolKind::Run.tool_spec(program));
+        tools.push(crate::subagents::SubagentToolKind::Spawn.tool_spec(program));
         let available = bind_toolset(&blobs, &tools).await.unwrap();
         for name in ["agent.run", "agent.spawn"] {
             let contract = available
@@ -656,7 +657,7 @@ mod tests {
             crate::subagents::SubagentToolKind::Run,
             crate::subagents::SubagentToolKind::Spawn,
         ] {
-            let definition = crate::subagents::subagent_tool_definition(kind).unwrap();
+            let definition = crate::subagents::subagent_tool_definition(kind, program).unwrap();
             assert!(definition.output_schema.is_some(), "{kind:?}");
         }
         assert_eq!(
@@ -679,7 +680,7 @@ mod tests {
             .collect::<Vec<_>>();
         let blobs = InMemoryBlobStore::new();
         for kind in crate::subagents::SubagentToolKind::PROGRAMS {
-            tools.push(kind.tool_spec());
+            tools.push(kind.tool_spec(crate::subagents::ChildCaller::Program));
         }
         let available = bind_toolset(&blobs, &tools).await.unwrap();
         for (name, tool) in [

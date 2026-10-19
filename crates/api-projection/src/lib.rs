@@ -5236,6 +5236,7 @@ mod tests {
             profile_id: "reviewer".to_owned(),
             profile_revision: 4,
             limits: harness::SubagentLimits::default(),
+            env: None,
         };
         let projected = session_origin_to_api(&origin).expect("project origin");
         assert_eq!(projected.kind, api::SessionOriginKind::Subagent);

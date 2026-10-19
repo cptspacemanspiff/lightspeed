@@ -661,7 +661,11 @@ impl WorkerActivities {
         {
             return preparation_activity_result(Err(error));
         }
-        preparation_activity_result(service.prepare_toolset(request.source).await)
+        preparation_activity_result(
+            service
+                .prepare_toolset(request.source, request.session_id.as_ref())
+                .await,
+        )
     }
 
     #[activity(name = "WorkflowActivities::prepare_session_profile")]

@@ -363,7 +363,11 @@ fn durable_job_and_agent_results_preserve_their_exact_serialized_names() {
     .validate(&serialized(&ModelJobResultSet { jobs: vec![result] }))
     .expect("job read set");
 
-    let definition = crate::subagents::subagent_tool_definition(SubagentToolKind::Run).unwrap();
+    let definition = crate::subagents::subagent_tool_definition(
+        SubagentToolKind::Run,
+        crate::subagents::ChildCaller::Model,
+    )
+    .unwrap();
     let schema = jsonschema::validator_for(&definition.output_schema.unwrap()).unwrap();
     let result = SubagentResultEnvelope {
         agent: "reviewer".into(),

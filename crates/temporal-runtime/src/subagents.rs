@@ -17,8 +17,8 @@ use harness::{
     BlobRef, PromiseResolution, RunStatus, RunTerminalNotifyIntent, SessionId, SubmissionId,
     media::MediaDescriptor,
     storage::{
-        BlobGraphStore, BlobStore, CreateSession, SessionOrigin, SessionOriginKind, SessionStore,
-        SessionStoreError,
+        BlobGraphStore, BlobStore, CreateSession, DelegatedContract, SessionOrigin,
+        SessionOriginKind, SessionStore, SessionStoreError,
     },
 };
 use temporal_workflow::{
@@ -67,6 +67,15 @@ pub trait SubagentChildRuntime: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<api::SessionConfig>, AgentApiError>;
+
+    /// The contracts a program session's run holds, as its scopes bind
+    /// them, each with the tool serving it: what the run may hand a child
+    /// in `env`. `None` when a model drives the session.
+    async fn program_contracts(
+        &self,
+        session_id: &SessionId,
+        run_id: u64,
+    ) -> Result<Option<Vec<DelegatedContract>>, AgentApiError>;
 
     async fn close_session(&self, session_id: &SessionId, force: bool)
     -> Result<(), AgentApiError>;
@@ -144,6 +153,15 @@ impl SubagentChildRuntime for AgentApiSubagentRuntime {
             .as_ref()
             .map(api_projection::session_config_to_api)
             .transpose()
+    }
+
+    async fn program_contracts(
+        &self,
+        session_id: &SessionId,
+        run_id: u64,
+    ) -> Result<Option<Vec<DelegatedContract>>, AgentApiError> {
+        let loaded = self.api.load_session_state(session_id).await?;
+        Ok(held_program_contracts(&loaded.state, run_id))
     }
 
     async fn close_session(
@@ -277,6 +295,7 @@ impl SubagentService {
             ChildCall {
                 profile: args.program,
                 label: args.label,
+                env: args.env,
                 run: RunStartSource::Program {
                     input: args.input,
                     input_defaults: None,
@@ -290,6 +309,7 @@ impl SubagentService {
             ChildCall {
                 profile: args.agent,
                 label: args.label,
+                env: args.env,
                 run: RunStartSource::Input {
                     items: vec![InputItem::Text {
                         provenance_ref: None,
@@ -426,6 +446,55 @@ impl SubagentService {
                     .await;
             }
         }
+        // What the child may use: what the calling program named in `env`,
+        // resolved against the contracts its run holds, or else the list
+        // the parent was itself given.
+        let env = match &call.env {
+            Some(names) => {
+                let Some(held) = self
+                    .runtime
+                    .program_contracts(&parent_session_id, context.parent_run_id)
+                    .await?
+                else {
+                    return self
+                        .rejected(
+                            "only a program can narrow a child's capabilities with env".to_owned(),
+                        )
+                        .await;
+                };
+                let mut env = Vec::with_capacity(names.len());
+                for name in names {
+                    let Some(contract) = held.iter().find(|held| &held.contract == name) else {
+                        return self
+                            .rejected_for(
+                                "outside_env",
+                                format!("env names {name}, which its caller does not hold"),
+                            )
+                            .await;
+                    };
+                    env.push(contract.clone());
+                }
+                Some(env)
+            }
+            None => parent.origin.as_ref().and_then(|origin| origin.env.clone()),
+        };
+        // A program child can call only the contracts it requires.
+        if let (Some(env), Some(program)) = (&env, &profile.document.program)
+            && let Some(missing) = program.requires.iter().find(|required| {
+                !env.iter()
+                    .any(|granted| granted.contract == required.contract)
+            })
+        {
+            return self
+                .rejected_for(
+                    "outside_env",
+                    format!(
+                        "program {profile_id} requires {}, which its caller did not pass in env",
+                        missing.contract
+                    ),
+                )
+                .await;
+        }
         let child_session_id = child_session_id(&start.execution_id);
         let display_name = call.label.clone().or_else(|| {
             profile
@@ -444,6 +513,7 @@ impl SubagentService {
             profile_id: profile_id.as_str().to_owned(),
             profile_revision: profile.revision,
             limits,
+            env,
         };
         match self
             .sessions
@@ -880,10 +950,46 @@ impl SubagentService {
     }
 }
 
+/// The contracts the program run `run_id` of a session holds, from its
+/// scopes' bindings, or `None` when a model drives the session. Every
+/// execution of a run binds the same contracts.
+fn held_program_contracts(
+    state: &harness::CoreAgentState,
+    run_id: u64,
+) -> Option<Vec<DelegatedContract>> {
+    if !state.lifecycle.driver.is_program() {
+        return None;
+    }
+    let owner = harness::ScopeOwner::Run {
+        run_id: harness::RunId::new(run_id),
+    };
+    let mut held = std::collections::BTreeMap::new();
+    let bindings = state
+        .code_tools
+        .scopes
+        .values()
+        .filter(|scope| scope.spec.owner == owner)
+        .flat_map(|scope| scope.spec.bindings.values());
+    for binding in bindings {
+        if let Some(contract) = &binding.contract {
+            held.entry(contract.contract.clone())
+                .or_insert_with(|| DelegatedContract {
+                    contract: contract.contract.clone(),
+                    digest: contract.digest.clone(),
+                    tool_id: binding.tool_id.as_str().to_owned(),
+                    tool_name: binding.tool_name.as_str().to_owned(),
+                });
+        }
+    }
+    Some(held.into_values().collect())
+}
+
 /// What a child-session call asks for, whichever tool made it.
 struct ChildCall {
     profile: String,
     label: Option<String>,
+    /// The contracts the calling program narrowed the child to.
+    env: Option<Vec<String>>,
     run: RunStartSource,
 }
 
@@ -1055,6 +1161,8 @@ mod tests {
         started_runs: Mutex<Vec<StartedRun>>,
         start_run_error: Mutex<Option<AgentApiError>>,
         parent_config: Mutex<Option<api::SessionConfig>>,
+        /// What the parent's run holds when the parent is a program.
+        parent_contracts: Mutex<Option<Vec<DelegatedContract>>>,
         closed: Mutex<Vec<(String, bool)>>,
         media: Mutex<Vec<MediaDescriptor>>,
     }
@@ -1162,6 +1270,14 @@ mod tests {
             Ok(self.parent_config.lock().unwrap().clone())
         }
 
+        async fn program_contracts(
+            &self,
+            _session_id: &SessionId,
+            _run_id: u64,
+        ) -> Result<Option<Vec<DelegatedContract>>, AgentApiError> {
+            Ok(self.parent_contracts.lock().unwrap().clone())
+        }
+
         async fn close_session(
             &self,
             session_id: &SessionId,
@@ -1239,6 +1355,7 @@ mod tests {
                     agent: agent.to_owned(),
                     input: "review the change".to_owned(),
                     label: Some("reviewer: change".to_owned()),
+                    env: None,
                 })
                 .unwrap(),
             )
@@ -1716,6 +1833,7 @@ mod tests {
                     profile_id: "planner".to_owned(),
                     profile_revision: 1,
                     limits: parent_limits,
+                    env: None,
                 }),
                 delete_after_close_ms: None,
                 created_at_ms: 2,
@@ -2475,5 +2593,212 @@ mod tests {
             h.service.prepare(second, 102).await.expect("third prepare"),
             SubagentPrepareActivityResult::Prepared { .. }
         ));
+    }
+
+    fn delegated(contract: &str) -> DelegatedContract {
+        DelegatedContract {
+            contract: contract.to_owned(),
+            digest: format!("sha256:{contract}"),
+            tool_id: contract.to_owned(),
+            tool_name: contract.replace('.', "_"),
+        }
+    }
+
+    /// `start` with its call arguments replaced by `arguments`.
+    async fn with_arguments(
+        blobs: &InMemoryBlobStore,
+        mut start: WorkflowToolStartArgs,
+        arguments: serde_json::Value,
+    ) -> WorkflowToolStartArgs {
+        start.invocation.arguments_ref = blobs
+            .put_bytes(serde_json::to_vec(&arguments).unwrap())
+            .await
+            .expect("put arguments");
+        start
+    }
+
+    async fn child_origin(h: &Harness, child: &SubagentChildRef) -> SessionOrigin {
+        h.sessions
+            .load_session(&SessionId::new(&child.session_id))
+            .await
+            .expect("load")
+            .expect("child")
+            .origin
+            .expect("origin")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_narrows_its_child_to_the_contracts_it_names_in_env() {
+        let runtime = FakeChildRuntime::with_profile("reviewer", 1);
+        *runtime.parent_contracts.lock().unwrap() =
+            Some(vec![delegated("time.sleep"), delegated("web.fetch")]);
+        let h = harness(runtime).await;
+        let start = start_args(
+            &h.blobs,
+            "wte:a",
+            "parent",
+            "reviewer",
+            "reviewer",
+            SubagentLimits::default(),
+        )
+        .await;
+        let start = with_arguments(
+            &h.blobs,
+            start,
+            serde_json::json!({ "agent": "reviewer", "input": "x", "env": ["web.fetch"] }),
+        )
+        .await;
+        let (child, _) = prepared(h.service.prepare(start, 10).await.expect("prepare"));
+        assert_eq!(
+            child_origin(&h, &child).await.env,
+            Some(vec![delegated("web.fetch")]),
+            "the child holds what was named, as the caller held it"
+        );
+
+        // A contract the program does not hold is refused before any child
+        // exists.
+        let start = start_args(
+            &h.blobs,
+            "wte:b",
+            "parent",
+            "reviewer",
+            "reviewer",
+            SubagentLimits::default(),
+        )
+        .await;
+        let start = with_arguments(
+            &h.blobs,
+            start,
+            serde_json::json!({ "agent": "reviewer", "input": "x", "env": ["vfs.read_file"] }),
+        )
+        .await;
+        let refused = rejection(
+            &h.blobs,
+            h.service.prepare(start, 11).await.expect("prepare"),
+        )
+        .await;
+        assert_eq!(refused["reason"], "outside_env", "{refused}");
+        assert!(
+            h.sessions
+                .load_session(&child_session_id("wte:b"))
+                .await
+                .expect("load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_program_narrows_and_a_narrowed_parent_hands_its_list_on() {
+        // A model drives the parent: it holds no contracts to hand on.
+        let runtime = FakeChildRuntime::with_profile("reviewer", 1);
+        let h = harness(runtime).await;
+        let start = start_args(
+            &h.blobs,
+            "wte:a",
+            "parent",
+            "reviewer",
+            "reviewer",
+            SubagentLimits::default(),
+        )
+        .await;
+        let start = with_arguments(
+            &h.blobs,
+            start,
+            serde_json::json!({ "agent": "reviewer", "input": "x", "env": ["web.fetch"] }),
+        )
+        .await;
+        let message = rejection_message(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert!(message.contains("only a program"), "{message}");
+
+        // A child of a narrowed session gets the same list.
+        h.sessions
+            .create_session(CreateSession {
+                metadata: Default::default(),
+                session_id: SessionId::new("narrowed"),
+                display_name: None,
+                origin: Some(SessionOrigin {
+                    kind: SessionOriginKind::Subagent,
+                    parent_session_id: SessionId::new("parent"),
+                    parent_run_id: 1,
+                    root_session_id: SessionId::new("parent"),
+                    depth: 1,
+                    root_run_id: Some(1),
+                    invocation_id: format!("wti:sha256:{}", "d".repeat(64)),
+                    profile_id: "reviewer".to_owned(),
+                    profile_revision: 1,
+                    limits: SubagentLimits::default(),
+                    env: Some(vec![delegated("web.fetch")]),
+                }),
+                delete_after_close_ms: None,
+                created_at_ms: 2,
+            })
+            .await
+            .expect("create narrowed");
+        let start = start_args(
+            &h.blobs,
+            "wte:c",
+            "narrowed",
+            "reviewer",
+            "reviewer",
+            SubagentLimits::default(),
+        )
+        .await;
+        let (child, _) = prepared(h.service.prepare(start, 12).await.expect("prepare"));
+        assert_eq!(
+            child_origin(&h, &child).await.env,
+            Some(vec![delegated("web.fetch")])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_program_child_must_find_every_contract_it_requires_in_env() {
+        let runtime =
+            FakeChildRuntime::with_program("checker", 1, serde_json::json!({ "timers": {} }));
+        runtime
+            .profiles
+            .lock()
+            .unwrap()
+            .get_mut("checker")
+            .and_then(|profile| profile.document.program.as_mut())
+            .expect("program")
+            .requires = vec![api::ProgramContractRequirement {
+            contract: "time.sleep".to_owned(),
+            digest: None,
+        }];
+        *runtime.parent_config.lock().unwrap() = Some(api::SessionConfig {
+            features: Some(serde_json::from_value(serde_json::json!({ "timers": {} })).unwrap()),
+            ..Default::default()
+        });
+        *runtime.parent_contracts.lock().unwrap() =
+            Some(vec![delegated("time.sleep"), delegated("web.fetch")]);
+        let h = harness(runtime).await;
+        let call = |env: &[&str]| serde_json::json!({ "program": "checker", "input": { "claim": "x" }, "env": env });
+
+        let start = program_start_args(&h.blobs, "wte:a", "checker").await;
+        let start = with_arguments(&h.blobs, start, call(&["web.fetch"])).await;
+        let refused = rejection(
+            &h.blobs,
+            h.service.prepare(start, 10).await.expect("prepare"),
+        )
+        .await;
+        assert_eq!(refused["reason"], "outside_env", "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires time.sleep")),
+            "{refused}"
+        );
+
+        let start = program_start_args(&h.blobs, "wte:b", "checker").await;
+        let start = with_arguments(&h.blobs, start, call(&["time.sleep"])).await;
+        let (child, _) = prepared(h.service.prepare(start, 11).await.expect("prepare"));
+        assert_eq!(
+            child_origin(&h, &child).await.env,
+            Some(vec![delegated("time.sleep")])
+        );
     }
 }

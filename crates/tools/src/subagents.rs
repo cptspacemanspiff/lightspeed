@@ -43,6 +43,16 @@ pub const PROGRAM_HANDLE_TOOL_ID: &str = "subprogram.handle";
 pub const SUBAGENT_WORKFLOW_TYPE: &str = "SubagentExecutionWorkflow";
 pub const MAX_SUBAGENT_INPUT_BYTES: usize = 256 * 1024;
 pub const MAX_SUBAGENT_LABEL_BYTES: usize = 200;
+/// The most contracts one call's `env` may name.
+pub const MAX_CHILD_ENV_CONTRACTS: usize = 256;
+
+/// Who calls a child-session tool. A program may narrow what the child holds
+/// with `env`; a model hands the child its profile's grants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildCaller {
+    Model,
+    Program,
+}
 
 /// A child-session tool: a child agent (`Run`, `Spawn`) or a child program
 /// (`ProgramRun`, `ProgramSpawn`), joined or as a promise.
@@ -90,10 +100,13 @@ impl SubagentToolKind {
         }
     }
 
-    pub fn tool_spec(self) -> harness::ToolSpec {
+    pub fn tool_spec(self, caller: ChildCaller) -> harness::ToolSpec {
         crate::definitions::register(
             self.tool_id(),
-            Default::default(),
+            crate::definitions::BuiltinSettings {
+                program_caller: caller == ChildCaller::Program,
+                ..Default::default()
+            },
             harness::ToolParallelism::ParallelSafe,
             Default::default(),
         )
@@ -188,6 +201,10 @@ pub struct AgentCallArgs {
     /// Human-readable name shown in the sessions tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Program callers only: the contracts the child may use, each one the
+    /// calling program holds. Omitted, the child keeps its profile's grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<String>>,
 }
 
 impl AgentCallArgs {
@@ -207,7 +224,8 @@ impl AgentCallArgs {
                 message: format!("input must be at most {MAX_SUBAGENT_INPUT_BYTES} bytes"),
             });
         }
-        validate_label(self.label.as_deref())
+        validate_label(self.label.as_deref())?;
+        validate_env(self.env.as_deref())
     }
 }
 
@@ -222,6 +240,10 @@ pub struct ProgramCallArgs {
     /// Human-readable name shown in the sessions tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The contracts the child may use, each one the calling program holds.
+    /// Omitted, the child keeps its profile's grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<String>>,
 }
 
 impl ProgramCallArgs {
@@ -237,7 +259,8 @@ impl ProgramCallArgs {
                 message: format!("input must be at most {MAX_SUBAGENT_INPUT_BYTES} bytes of JSON"),
             });
         }
-        validate_label(self.label.as_deref())
+        validate_label(self.label.as_deref())?;
+        validate_env(self.env.as_deref())
     }
 }
 
@@ -286,6 +309,28 @@ pub fn child_handle_definition(
         crate::definitions::input_schema_for::<ChildHandleArgs>(),
     )
     .with_output_schema(crate::definitions::output_schema_for::<ChildHandleOutput>()))
+}
+
+fn validate_env(env: Option<&[String]>) -> ToolResult<()> {
+    let Some(env) = env else {
+        return Ok(());
+    };
+    let invalid = |message: String| Err(ToolError::InvalidRequest { message });
+    if env.len() > MAX_CHILD_ENV_CONTRACTS {
+        return invalid(format!(
+            "env may name at most {MAX_CHILD_ENV_CONTRACTS} contracts"
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for contract in env {
+        if harness::validate_contract_name(contract).is_err() {
+            return invalid(format!("env names an invalid contract: {contract}"));
+        }
+        if !seen.insert(contract) {
+            return invalid(format!("env names {contract} twice"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_label(label: Option<&str>) -> ToolResult<()> {
@@ -498,6 +543,7 @@ pub async fn prepare_subagent_catalog_publication(
 
 pub fn subagent_tool_definition(
     kind: SubagentToolKind,
+    caller: ChildCaller,
 ) -> ToolResult<crate::runtime::FunctionDefinition> {
     let description = match kind {
         SubagentToolKind::Run => {
@@ -513,11 +559,20 @@ pub fn subagent_tool_definition(
             "Start a program from the sub-agent catalog with a JSON input that matches its input schema, and return a promise immediately. Join it later with await (any/all/timeout); cancel stops the program."
         }
     };
-    let input_schema = if kind.is_program() {
+    let mut input_schema = if kind.is_program() {
         program_call_input_schema()
     } else {
         agent_call_input_schema()
     };
+    if caller == ChildCaller::Program {
+        input_schema["properties"]["env"] = json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": true,
+            "maxItems": MAX_CHILD_ENV_CONTRACTS,
+            "description": "The contracts the child may use, each one this program holds. Omitted, the child keeps its profile's grants."
+        });
+    }
     let definition =
         crate::runtime::FunctionDefinition::new(kind.tool_name(), description, input_schema);
     Ok(match kind {
@@ -615,13 +670,39 @@ mod tests {
     }
 
     #[test]
+    fn only_a_program_is_offered_env_and_its_names_are_contracts() {
+        for kind in [SubagentToolKind::Run, SubagentToolKind::ProgramSpawn] {
+            let property = |caller| {
+                subagent_tool_definition(kind, caller)
+                    .expect("definition")
+                    .input_schema["properties"]
+                    .get("env")
+                    .cloned()
+            };
+            assert_eq!(property(ChildCaller::Model), None, "{kind:?}");
+            assert!(property(ChildCaller::Program).is_some(), "{kind:?}");
+        }
+        let args = |env: Value| {
+            serde_json::from_value::<ProgramCallArgs>(
+                json!({ "program": "checker", "input": {}, "env": env }),
+            )
+            .expect("decode")
+            .validate()
+        };
+        args(json!(["web.fetch", "mcp.github.read"])).expect("contract names");
+        for env in [json!(["web.fetch", "web.fetch"]), json!(["Web Fetch"])] {
+            assert!(args(env.clone()).is_err(), "{env}");
+        }
+    }
+
+    #[test]
     fn binding_identity_round_trips() {
         for kind in [SubagentToolKind::Run, SubagentToolKind::Spawn] {
             assert_eq!(
                 SubagentToolKind::from_binding(kind.workflow_tool_id(), kind.semantic_type()),
                 Some(kind)
             );
-            let bundle = subagent_tool_definition(kind).expect("bundle");
+            let bundle = subagent_tool_definition(kind, ChildCaller::Model).expect("bundle");
             assert_eq!(bundle.name.as_str(), kind.tool_name());
         }
         assert_eq!(

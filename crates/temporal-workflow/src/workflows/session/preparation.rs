@@ -436,6 +436,7 @@ async fn configure(
         crate::SessionToolsetRequest {
             source: source.clone(),
             validate_configuration: true,
+            session_id: Some(drive.session_id().clone()),
         },
         activity_options(),
     );
@@ -647,6 +648,7 @@ pub(super) async fn run_preparation_loop(ctx: WorkflowContext<AgentSessionWorkfl
             crate::SessionToolsetRequest {
                 source: pending.source,
                 validate_configuration: false,
+                session_id: ctx.state(|state| state.session_id.clone()),
             },
             activity_options(),
         );
