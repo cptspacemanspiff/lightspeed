@@ -112,6 +112,7 @@ impl SessionPreparationService {
         session_config: &SessionConfig,
         with_mcp: bool,
         declared: &[harness::ToolSpec],
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
         let mut config = Self::session_toolset_config(
             session_config,
@@ -142,7 +143,7 @@ impl SessionPreparationService {
                 AgentApiError::internal("MCP inventory is not configured for program contracts")
             })?;
             let mcp_tools = self
-                .desired_mcp_tools(&session_config.features)
+                .desired_mcp_tools(&session_config.features, held)
                 .await?
                 .into_values()
                 .collect::<Vec<_>>();
@@ -504,6 +505,52 @@ impl SessionPreparationService {
             .collect())
     }
 
+    /// The credentials a session holds for MCP servers, by server id: its
+    /// bot's `mcpCredentials` when it is one of a bot's sessions. Only the
+    /// runtime creates `bot:v1:` session ids, so a session can't claim a bot
+    /// it doesn't belong to; an id two existing bots could both claim gets
+    /// neither's.
+    pub(crate) async fn held_mcp_credentials(
+        &self,
+        session_id: Option<&SessionId>,
+    ) -> Result<BTreeMap<String, auth::AuthGrantId>, AgentApiError> {
+        let Some(session_id) = session_id else {
+            return Ok(BTreeMap::new());
+        };
+        let mut owners = Vec::new();
+        for bot_id in ::bots::ids::bot_id_candidates(session_id.as_str()) {
+            match ::bots::BotStore::read_bot(self.store.as_ref(), &bot_id).await {
+                Ok(record) => owners.push(record),
+                Err(::bots::BotError::BotNotFound { .. }) => {}
+                Err(error) => {
+                    return Err(AgentApiError::internal(format!(
+                        "read bot {bot_id}: {error}"
+                    )));
+                }
+            }
+        }
+        let [owner] = owners.as_slice() else {
+            if owners.len() > 1 {
+                tracing::warn!(%session_id, "two bots could own this session; it holds neither's MCP credentials");
+            }
+            return Ok(BTreeMap::new());
+        };
+        owner
+            .document
+            .mcp_credentials
+            .iter()
+            .map(|(server_id, grant_id)| {
+                let grant_id = auth::AuthGrantId::try_new(grant_id.clone()).map_err(|error| {
+                    AgentApiError::internal(format!(
+                        "bot {} names an invalid credential for {server_id}: {error}",
+                        owner.bot_id
+                    ))
+                })?;
+                Ok((server_id.clone(), grant_id))
+            })
+            .collect()
+    }
+
     /// The tools `source` materializes for `session_id`. An agent session a
     /// program delegated to with `env` keeps only what that list names.
     pub(crate) async fn prepare_toolset(
@@ -614,7 +661,10 @@ impl SessionPreparationService {
         register_workflow_tools(&mut toolset, materialized.iter().copied()).map_err(|e| {
             AgentApiError::invalid_request(format!("materialize workflow tools: {e}"))
         })?;
-        let desired_mcp = self.desired_mcp_tools(&session_config.features).await?;
+        let held = self.held_mcp_credentials(session_id).await?;
+        let desired_mcp = self
+            .desired_mcp_tools(&session_config.features, &held)
+            .await?;
         if let Some(name) = toolset
             .tools
             .keys()

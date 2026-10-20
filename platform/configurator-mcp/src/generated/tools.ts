@@ -13121,6 +13121,81 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
     }
   },
   {
+    "name": "lightspeed_auth_grants_sublease",
+    "method": "auth/grants/sublease",
+    "group": "auth",
+    "summary": "Create a sub-lease of a GitHub App grant",
+    "description": "Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.",
+    "paramsType": "AuthGrantSubleaseParams",
+    "resultType": "AgentApiOutcome<AuthGrantSubleaseResponse>",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "A sub-lease of a GitHub App grant: a grant whose tokens are narrowed to\nsome of its parent's repositories and at most its parent's permissions.",
+      "properties": {
+        "audience": {
+          "description": "Where the tokens may be sent; defaults to the parent's audience.\nA sub-lease for GitHub's MCP server names its URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exposure": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthGrantExposure"
+            }
+          ],
+          "default": "brokered"
+        },
+        "grantId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentGrantId": {
+          "description": "The GitHub App grant (an installation, or another sub-lease) to narrow.",
+          "type": "string"
+        },
+        "permissions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Permission name to `read`, `write` or `admin`, each at most the\nparent's level, e.g. `{\"issues\": \"write\"}`.",
+          "type": "object"
+        },
+        "repositories": {
+          "description": "Repository names in the installation's account, without the owner.\nAt least one: a token request without a list would cover every\nrepository of the installation.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "parentGrantId",
+        "repositories",
+        "permissions"
+      ],
+      "type": "object",
+      "definitions": {
+        "AuthGrantExposure": {
+          "enum": [
+            "brokered",
+            "retrievable"
+          ],
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
     "name": "lightspeed_bots_create",
     "method": "bots/create",
     "group": "bots",
@@ -13270,6 +13345,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "type": "string"
               },
               "type": "array"
+            },
+            "mcpCredentials": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Credentials the bot's sessions use for MCP servers, by server id: a\nGitHub App sub-lease or a static bearer grant, used in place of the\nserver's own credential. Setting them takes the authority to bind\ncredentials to MCP servers (`mcp/servers/put`).",
+              "type": "object"
             },
             "profileId": {
               "$ref": "#/definitions/ProfileId"
@@ -14098,6 +14180,13 @@ export const GENERATED_TOOLS: readonly GeneratedToolDescriptor[] = [
                 "type": "string"
               },
               "type": "array"
+            },
+            "mcpCredentials": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Credentials the bot's sessions use for MCP servers, by server id: a\nGitHub App sub-lease or a static bearer grant, used in place of the\nserver's own credential. Setting them takes the authority to bind\ncredentials to MCP servers (`mcp/servers/put`).",
+              "type": "object"
             },
             "profileId": {
               "$ref": "#/definitions/ProfileId"

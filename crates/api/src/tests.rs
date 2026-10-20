@@ -2855,6 +2855,15 @@ impl AgentApiService for TestService {
         }))
     }
 
+    async fn sublease_auth_grant(
+        &self,
+        _params: AuthGrantSubleaseParams,
+    ) -> Result<AgentApiOutcome<AuthGrantSubleaseResponse>, AgentApiError> {
+        Ok(AgentApiOutcome::new(AuthGrantSubleaseResponse {
+            grant: test_auth_grant("authgrant_sublease".to_owned(), AuthGrantStatus::Active),
+        }))
+    }
+
     async fn create_bot(
         &self,
         _params: BotCreateParams,

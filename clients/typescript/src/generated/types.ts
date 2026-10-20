@@ -3494,6 +3494,21 @@ export interface AuthGrantRevokeResponse {
 }
 /**
  * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AgentApiOutcomeOfAuthGrantSubleaseResponse".
+ */
+export interface AgentApiOutcomeOfAuthGrantSubleaseResponse {
+  notifications?: AgentNotification[];
+  result: AuthGrantSubleaseResponse;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AuthGrantSubleaseResponse".
+ */
+export interface AuthGrantSubleaseResponse {
+  grant: AuthGrantView;
+}
+/**
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
  * via the `definition` "AgentApiOutcomeOfAuthProviderCreateResponse".
  */
 export interface AgentApiOutcomeOfAuthProviderCreateResponse {
@@ -3709,6 +3724,15 @@ export interface BotView {
    * Highest `#N` admitted so far.
    */
   eventSeq: number;
+  /**
+   * Credentials the bot's sessions use for MCP servers, by server id: a
+   * GitHub App sub-lease or a static bearer grant, used in place of the
+   * server's own credential. Setting them takes the authority to bind
+   * credentials to MCP servers (`mcp/servers/put`).
+   */
+  mcpCredentials?: {
+    [k: string]: string;
+  };
   profileId: ProfileId;
   revision: number;
   /**
@@ -4171,6 +4195,15 @@ export interface BotListItem {
    */
   eventSeq: number;
   lastEvent?: BotEventView | null;
+  /**
+   * Credentials the bot's sessions use for MCP servers, by server id: a
+   * GitHub App sub-lease or a static bearer grant, used in place of the
+   * server's own credential. Setting them takes the authority to bind
+   * credentials to MCP servers (`mcp/servers/put`).
+   */
+  mcpCredentials?: {
+    [k: string]: string;
+  };
   /**
    * Events whose delivery has not finished.
    */
@@ -7492,6 +7525,40 @@ export interface AuthGrantRevokeParams {
   grantId: string;
 }
 /**
+ * A sub-lease of a GitHub App grant: a grant whose tokens are narrowed to
+ * some of its parent's repositories and at most its parent's permissions.
+ *
+ * This interface was referenced by `LightspeedAgentAPI`'s JSON-Schema
+ * via the `definition` "AuthGrantSubleaseParams".
+ */
+export interface AuthGrantSubleaseParams {
+  /**
+   * Where the tokens may be sent; defaults to the parent's audience.
+   * A sub-lease for GitHub's MCP server names its URL.
+   */
+  audience?: string | null;
+  displayName?: string | null;
+  exposure?: AuthGrantExposure & string;
+  grantId?: string | null;
+  /**
+   * The GitHub App grant (an installation, or another sub-lease) to narrow.
+   */
+  parentGrantId: string;
+  /**
+   * Permission name to `read`, `write` or `admin`, each at most the
+   * parent's level, e.g. `{"issues": "write"}`.
+   */
+  permissions: {
+    [k: string]: string;
+  };
+  /**
+   * Repository names in the installation's account, without the owner.
+   * At least one: a token request without a list would cover every
+   * repository of the installation.
+   */
+  repositories: string[];
+}
+/**
  * Register an auth provider. `credential` (for GitHub Apps: the private
  * key PEM) is the third deliberate inbound-plaintext path: it is encrypted
  * on receipt and never returned by any method. `Debug` output redacts it;
@@ -7616,6 +7683,15 @@ export interface BotInput {
    * when neither the question nor the event's trigger names anyone.
    */
   escalateTo?: string[];
+  /**
+   * Credentials the bot's sessions use for MCP servers, by server id: a
+   * GitHub App sub-lease or a static bearer grant, used in place of the
+   * server's own credential. Setting them takes the authority to bind
+   * credentials to MCP servers (`mcp/servers/put`).
+   */
+  mcpCredentials?: {
+    [k: string]: string;
+  };
   profileId: ProfileId;
   /**
    * Close routed (`perKey` / `perEvent`) sessions idle longer than this;

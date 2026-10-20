@@ -54,7 +54,8 @@ use environments::{activate_environment_command, deactivate_environment_command}
 use errors::*;
 use github_api::{
     auth_provider_create_draft, auth_provider_view, github_installation_grant_draft,
-    github_installation_view, map_github_app_error, parse_auth_provider_id,
+    github_installation_view, github_sublease_grant_draft, map_github_app_error,
+    parse_auth_provider_id, sublease_audience,
 };
 use input::{context_entry_input_from_api, run_input_from_api};
 use mcp_api::{map_mcp_error, mcp_server_view, parse_mcp_server_id, put_mcp_server_record};
@@ -2487,7 +2488,8 @@ impl AgentApiService for GatewayAgentApi {
         self.admit_attachments(&config.features).await?;
         // Declared MCP links must resolve (catalog record, grant/policy
         // compatibility) before the document enters the session log.
-        self.desired_mcp_tools(&config.features).await?;
+        let held = self.held_mcp_credentials(&session_id).await?;
+        self.desired_mcp_tools(&config.features, &held).await?;
         self.validate_workspace_attachment_targets(&config.features)
             .await?;
         self.validate_subagent_profiles(&config.features).await?;
@@ -4898,6 +4900,65 @@ impl AgentApiService for GatewayAgentApi {
             .await
             .map_err(map_auth_error)?;
         Ok(AgentApiOutcome::new(AuthGitHubInstallationGrantResponse {
+            grant: auth_grant_view(record),
+        }))
+    }
+
+    async fn sublease_auth_grant(
+        &self,
+        params: AuthGrantSubleaseParams,
+    ) -> Result<AgentApiOutcome<AuthGrantSubleaseResponse>, AgentApiError> {
+        self.authorize_method(METHOD_AUTH_GRANTS_SUBLEASE, None)
+            .await?;
+        let parent_id = parse_auth_grant_id(params.parent_grant_id)?;
+        let parent = self
+            .store
+            .read_grant(&parent_id)
+            .await
+            .map_err(map_auth_error)?;
+        let metadata = auth::GitHubInstallationGrantMetadata::sublease(
+            &parent,
+            auth::GitHubTokenScope {
+                repositories: params.repositories,
+                permissions: params.permissions,
+            },
+        )
+        .map_err(map_auth_error)?;
+        let (provider, app_jwt) = self.github_provider_jwt(parent.provider_id.clone()).await?;
+        let auth::AuthProviderConfig::GitHubApp(config) = &provider.config else {
+            return Err(AgentApiError::rejected(format!(
+                "auth provider {} is not a github_app provider",
+                provider.provider_id
+            )));
+        };
+        let audience = sublease_audience(&parent, config, params.audience)?;
+        // GitHub checks the scope now: a repository the installation doesn't
+        // cover, or a permission the app lacks, fails here rather than at
+        // the sub-lease's first use. The token is dropped unused.
+        self.github_api
+            .create_installation_token(
+                &config.api_base_url,
+                &app_jwt,
+                metadata.installation_id,
+                metadata.token_scope.as_ref(),
+            )
+            .await
+            .map_err(map_github_app_error)?;
+        let draft = github_sublease_grant_draft(
+            &parent,
+            metadata,
+            audience,
+            params.grant_id,
+            params.display_name,
+            registry_auth_grant_exposure(params.exposure),
+            now_ms()?,
+        )?;
+        let record = self
+            .store
+            .create_grant(draft)
+            .await
+            .map_err(map_auth_error)?;
+        Ok(AgentApiOutcome::new(AuthGrantSubleaseResponse {
             grant: auth_grant_view(record),
         }))
     }

@@ -288,17 +288,14 @@ impl GatewayAgentApi {
             // Pinned against the session's tools once its configuration is
             // known; see `pin_program_contracts`.
             requires: Vec::new(),
-            approvals: spec
-                .approvals
-                .clone()
-                .map(|approvals| {
-                    Box::new(harness::ProgramApprovals {
-                        assignees: approvals.assignees,
-                        deadline_ms: approvals.deadline_ms,
-                        remind_after_ms: approvals.remind_after_ms,
-                        escalate_to: approvals.escalate_to,
-                    })
-                }),
+            approvals: spec.approvals.clone().map(|approvals| {
+                Box::new(harness::ProgramApprovals {
+                    assignees: approvals.assignees,
+                    deadline_ms: approvals.deadline_ms,
+                    remind_after_ms: approvals.remind_after_ms,
+                    escalate_to: approvals.escalate_to,
+                })
+            }),
         };
         program
             .validate()
@@ -371,7 +368,12 @@ impl GatewayAgentApi {
             }
         }
         let available = self
-            .program_contracts_for(&params.program.requires, &session_config, &[])
+            .program_contracts_for(
+                &params.program.requires,
+                &session_config,
+                &[],
+                &BTreeMap::new(),
+            )
             .await?;
         tools::program::contracts::pin_requirements(
             &available,
@@ -425,7 +427,7 @@ impl GatewayAgentApi {
         let session_config = self.session_config_for_start(params.config).await?;
         let mut contracts = self
             .preparation_service()
-            .program_contracts(&session_config, with_mcp, &[])
+            .program_contracts(&session_config, with_mcp, &[], &BTreeMap::new())
             .await?
             .iter()
             .map(program_contract_view)
@@ -441,6 +443,7 @@ impl GatewayAgentApi {
         requires: &[api::ProgramContractRequirement],
         session_config: &SessionConfig,
         declared: &[harness::ToolSpec],
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<Vec<tools::program::contracts::BoundContract>, AgentApiError> {
         if requires.is_empty() {
             return Ok(Vec::new());
@@ -451,7 +454,7 @@ impl GatewayAgentApi {
                 .starts_with(&format!("{}.", tools::program::contracts::MCP_FAMILY))
         });
         self.preparation_service()
-            .program_contracts(session_config, with_mcp, declared)
+            .program_contracts(session_config, with_mcp, declared, held)
             .await
     }
 
@@ -465,12 +468,13 @@ impl GatewayAgentApi {
         spec: &api::ProgramSpec,
         session_config: &SessionConfig,
         declared: &[harness::ToolSpec],
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<Vec<harness::ContractPin>, AgentApiError> {
         if spec.requires.is_empty() {
             return Ok(Vec::new());
         }
         let available = self
-            .program_contracts_for(&spec.requires, session_config, declared)
+            .program_contracts_for(&spec.requires, session_config, declared, held)
             .await?;
         tools::program::contracts::pin_requirements(
             &available,

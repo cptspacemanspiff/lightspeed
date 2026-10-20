@@ -397,6 +397,10 @@ impl GatewayAgentApi {
         let store = self.store();
         let previous = self.read_bot_record(&input.bot_id).await?;
         self.require_profile(&input.document.profile_id).await?;
+        if input.document.mcp_credentials != previous.document.mcp_credentials {
+            self.admit_bot_mcp_credentials(&input.document.mcp_credentials)
+                .await?;
+        }
         let record = store
             .put_bot(
                 input.bot_id.clone(),
@@ -423,6 +427,30 @@ impl GatewayAgentApi {
             self.reconcile_bot_trigger_schedules(&record).await?;
         }
         Ok(record)
+    }
+
+    /// A bot's sessions use its MCP credentials in place of the servers'
+    /// own, so setting them takes the authority to bind credentials to MCP
+    /// servers, and each must be one the server could take.
+    async fn admit_bot_mcp_credentials(
+        &self,
+        credentials: &BTreeMap<String, String>,
+    ) -> Result<(), AgentApiError> {
+        self.authorize_method(METHOD_MCP_SERVERS_PUT, None).await?;
+        for (server_id, grant_id) in credentials {
+            let record = self
+                .store()
+                .read_server(&parse_mcp_server_id(server_id.clone())?)
+                .await
+                .map_err(map_mcp_error)?;
+            let grant = self
+                .store()
+                .read_grant(&parse_auth_grant_id(grant_id.clone())?)
+                .await
+                .map_err(map_auth_error)?;
+            mcp_api::held_auth_ref(&record, &grant)?;
+        }
+        Ok(())
     }
 
     async fn reconcile_bot_trigger_schedules(&self, bot: &BotRecord) -> Result<(), AgentApiError> {
@@ -833,6 +861,10 @@ impl GatewayAgentApi {
         let store = self.store();
         let BotInput { bot_id, document } = params.bot;
         self.require_profile(&document.profile_id).await?;
+        if !document.mcp_credentials.is_empty() {
+            self.admit_bot_mcp_credentials(&document.mcp_credentials)
+                .await?;
+        }
         let bot = store
             .create_bot(bot_id.clone(), document, bot_now_ms())
             .await

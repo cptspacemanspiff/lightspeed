@@ -196,6 +196,12 @@ pub struct BotDocument {
     /// inbox. Emitting bots are rate-capped.
     #[serde(default)]
     pub emit: bool,
+    /// Credentials the bot's sessions use for MCP servers, by server id: a
+    /// GitHub App sub-lease or a static bearer grant, used in place of the
+    /// server's own credential. Setting them takes the authority to bind
+    /// credentials to MCP servers (`mcp/servers/put`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_credentials: BTreeMap<String, String>,
     /// Reversible pause: sessions and chat context stay, nothing is
     /// delivered.
     #[serde(default = "default_true")]

@@ -370,6 +370,23 @@
       ],
       "type": "object"
     },
+    "AgentApiOutcomeOfAuthGrantSubleaseResponse": {
+      "properties": {
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/AgentNotification"
+          },
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/definitions/AuthGrantSubleaseResponse"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
     "AgentApiOutcomeOfAuthProviderCreateResponse": {
       "properties": {
         "notifications": {
@@ -3647,6 +3664,73 @@
       ],
       "type": "string"
     },
+    "AuthGrantSubleaseParams": {
+      "description": "A sub-lease of a GitHub App grant: a grant whose tokens are narrowed to\nsome of its parent's repositories and at most its parent's permissions.",
+      "properties": {
+        "audience": {
+          "description": "Where the tokens may be sent; defaults to the parent's audience.\nA sub-lease for GitHub's MCP server names its URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exposure": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthGrantExposure"
+            }
+          ],
+          "default": "brokered"
+        },
+        "grantId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentGrantId": {
+          "description": "The GitHub App grant (an installation, or another sub-lease) to narrow.",
+          "type": "string"
+        },
+        "permissions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Permission name to `read`, `write` or `admin`, each at most the\nparent's level, e.g. `{\"issues\": \"write\"}`.",
+          "type": "object"
+        },
+        "repositories": {
+          "description": "Repository names in the installation's account, without the owner.\nAt least one: a token request without a list would cover every\nrepository of the installation.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "parentGrantId",
+        "repositories",
+        "permissions"
+      ],
+      "type": "object"
+    },
+    "AuthGrantSubleaseResponse": {
+      "properties": {
+        "grant": {
+          "$ref": "#/definitions/AuthGrantView"
+        }
+      },
+      "required": [
+        "grant"
+      ],
+      "type": "object"
+    },
     "AuthGrantView": {
       "properties": {
         "audience": {
@@ -5211,6 +5295,13 @@
           },
           "type": "array"
         },
+        "mcpCredentials": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Credentials the bot's sessions use for MCP servers, by server id: a\nGitHub App sub-lease or a static bearer grant, used in place of the\nserver's own credential. Setting them takes the authority to bind\ncredentials to MCP servers (`mcp/servers/put`).",
+          "type": "object"
+        },
         "profileId": {
           "$ref": "#/definitions/ProfileId"
         },
@@ -5343,6 +5434,13 @@
               "type": "null"
             }
           ]
+        },
+        "mcpCredentials": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Credentials the bot's sessions use for MCP servers, by server id: a\nGitHub App sub-lease or a static bearer grant, used in place of the\nserver's own credential. Setting them takes the authority to bind\ncredentials to MCP servers (`mcp/servers/put`).",
+          "type": "object"
         },
         "pendingCount": {
           "description": "Events whose delivery has not finished.",
@@ -6556,6 +6654,13 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "mcpCredentials": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Credentials the bot's sessions use for MCP servers, by server id: a\nGitHub App sub-lease or a static bearer grant, used in place of the\nserver's own credential. Setting them takes the authority to bind\ncredentials to MCP servers (`mcp/servers/put`).",
+          "type": "object"
         },
         "profileId": {
           "$ref": "#/definitions/ProfileId"

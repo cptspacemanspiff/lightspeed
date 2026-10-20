@@ -82,7 +82,10 @@ const MCP_FIND_DETAIL_MAX_NAMES: usize = 5;
 const MCP_FIND_TRUNCATED_NOTE: &str =
     "Call mcp_find_tools with server and names for the full definition.";
 
-type InventoryCacheKey = (String, u64);
+/// A server's tools at a record revision, as one credential sees them: two
+/// sessions holding different credentials for a server can see different
+/// tools.
+type InventoryCacheKey = (String, u64, Option<harness::SecretRef>);
 type InventoryLocks = HashMap<InventoryCacheKey, Arc<Mutex<()>>>;
 
 #[derive(Clone, Debug, Default)]
@@ -1247,7 +1250,11 @@ impl McpInventoryResolver for NativeMcpInventoryResolver {
         &self,
         spec: &RemoteMcpToolSpec,
     ) -> Result<Vec<NativeMcpTool>, McpInventoryError> {
-        let key = (spec.server_id.clone(), spec.record_revision);
+        let key = (
+            spec.server_id.clone(),
+            spec.record_revision,
+            spec.auth_ref.clone(),
+        );
         if let Some(cached) = self.cache.lock().await.get(&key)
             && cached.fetched_at.elapsed() < cached.ttl
         {
@@ -1273,7 +1280,7 @@ impl McpInventoryResolver for NativeMcpInventoryResolver {
             self.ttl
         });
         let mut cache = self.cache.lock().await;
-        cache.retain(|(server_id, revision), _| {
+        cache.retain(|(server_id, revision, _), _| {
             server_id != &spec.server_id || *revision == spec.record_revision
         });
         cache.insert(

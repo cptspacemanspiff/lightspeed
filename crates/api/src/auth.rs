@@ -610,3 +610,35 @@ pub struct AuthGitHubInstallationGrantParams {
 pub struct AuthGitHubInstallationGrantResponse {
     pub grant: AuthGrantView,
 }
+
+/// A sub-lease of a GitHub App grant: a grant whose tokens are narrowed to
+/// some of its parent's repositories and at most its parent's permissions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthGrantSubleaseParams {
+    /// The GitHub App grant (an installation, or another sub-lease) to narrow.
+    pub parent_grant_id: String,
+    /// Repository names in the installation's account, without the owner.
+    /// At least one: a token request without a list would cover every
+    /// repository of the installation.
+    pub repositories: Vec<String>,
+    /// Permission name to `read`, `write` or `admin`, each at most the
+    /// parent's level, e.g. `{"issues": "write"}`.
+    pub permissions: BTreeMap<String, String>,
+    /// Where the tokens may be sent; defaults to the parent's audience.
+    /// A sub-lease for GitHub's MCP server names its URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub exposure: AuthGrantExposure,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthGrantSubleaseResponse {
+    pub grant: AuthGrantView,
+}

@@ -123,9 +123,9 @@ pub use flow::{
 };
 pub use github::{
     DEFAULT_GITHUB_API_BASE_URL, GitHubApiClient, GitHubAppError, GitHubAppRuntime,
-    GitHubInstallation, GitHubInstallationGrantMetadata, GitHubInstallationToken,
-    HttpGitHubApiClient, SECRET_KIND_GITHUB_APP_PRIVATE_KEY, sign_github_app_jwt,
-    validate_github_app_private_key,
+    GitHubInstallation, GitHubInstallationGrantMetadata, GitHubInstallationToken, GitHubTokenScope,
+    HttpGitHubApiClient, MAX_SUBLEASE_REPOSITORIES, SECRET_KIND_GITHUB_APP_PRIVATE_KEY,
+    sign_github_app_jwt, validate_github_app_private_key,
 };
 pub use grants::{
     AuthGrantExposure, AuthGrantRecord, AuthGrantStatus, AuthGrantStore, AuthGrantTokenRefresh,

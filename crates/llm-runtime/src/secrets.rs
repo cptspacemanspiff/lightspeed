@@ -17,6 +17,9 @@ use thiserror::Error;
 
 pub const SECRET_NAMESPACE_ENV: &str = "env";
 pub const SECRET_NAMESPACE_MCP_SERVER: &str = "mcp_server";
+/// A grant named directly: the credential a session holds for an MCP server
+/// (its bot's `mcpCredentials`), used in place of the server's own.
+pub const SECRET_NAMESPACE_AUTH_GRANT: &str = "auth_grant";
 
 /// Placeholder written into persisted provider request blobs where a resolved
 /// auth value was injected into the sent request.

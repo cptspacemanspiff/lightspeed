@@ -33,6 +33,8 @@ export function botInputOf(bot: BotView): BotInput {
     emit: bot.emit ?? false,
     enabled: bot.enabled ?? true,
     escalateTo: bot.escalateTo ?? [],
+    // Not edited here, but a put replaces the whole document.
+    mcpCredentials: bot.mcpCredentials ?? {},
   };
 }
 

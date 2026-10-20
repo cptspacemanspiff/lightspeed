@@ -539,7 +539,7 @@ fn declared_mcp_attachment_materializes_remote_tool() {
         tools: None,
     };
 
-    let tool = mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None)
+    let tool = mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None, None)
         .expect("materialize MCP tool from config attachment");
     let desired = BTreeMap::from([(tool.name.clone(), tool)]);
     let patch = temporal_workflow::session_toolset_patch(&active, &desired);
@@ -574,7 +574,7 @@ fn mcp_attachment_subsets_constrain_every_execution_and_exposure_mode() {
         for allowlist in [record.allowed_tools.clone(), None] {
             record.allowed_tools = allowlist;
             let tool =
-                mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None).unwrap();
+                mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None, None).unwrap();
             let harness::ToolKind::RemoteMcp(spec) = tool.kind else {
                 panic!("expected remote MCP tool");
             };
@@ -583,7 +583,7 @@ fn mcp_attachment_subsets_constrain_every_execution_and_exposure_mode() {
         // Record edits must not let a retained session attachment restore revoked tools.
         record.allowed_tools = Some(vec!["delete_customer".into()]);
         let error =
-            mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None).unwrap_err();
+            mcp_api::mcp_tool_from_config_attachment(&attachment, &record, None, None).unwrap_err();
         assert_eq!(error.kind, AgentApiErrorKind::InvalidRequest);
 
         let unrestricted_attachment = harness::McpServerAttachment {
@@ -591,7 +591,7 @@ fn mcp_attachment_subsets_constrain_every_execution_and_exposure_mode() {
             ..attachment
         };
         let tool =
-            mcp_api::mcp_tool_from_config_attachment(&unrestricted_attachment, &record, None)
+            mcp_api::mcp_tool_from_config_attachment(&unrestricted_attachment, &record, None, None)
                 .unwrap();
         let harness::ToolKind::RemoteMcp(spec) = tool.kind else {
             panic!("expected remote MCP tool");
@@ -680,9 +680,13 @@ fn mcp_attachment_with_grant_materializes_auth_ref_for_bearer_server() {
         Some("https://crm.example.com"),
     );
 
-    let tool =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect("materialize MCP tool with grant");
+    let tool = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect("materialize MCP tool with grant");
 
     let harness::ToolKind::RemoteMcp(spec) = &tool.kind else {
         panic!("expected remote MCP tool");
@@ -693,6 +697,96 @@ fn mcp_attachment_with_grant_materializes_auth_ref_for_bearer_server() {
             namespace: "mcp_server".to_owned(),
             id: "crm".to_owned(),
         })
+    );
+}
+
+#[test]
+fn a_credential_the_session_holds_replaces_the_servers_own() {
+    let mut record = test_mcp_server_record("crm", mcp::McpServerStatus::Active);
+    record.auth_policy = mcp::McpServerAuthPolicy::OptionalBearer;
+    record.auth_grant_id = Some(auth::AuthGrantId::new("authgrant_server"));
+    let server = test_auth_grant_record(
+        "authgrant_server",
+        auth::AuthProviderKind::StaticBearer,
+        auth::AuthGrantStatus::Active,
+        None,
+    );
+    let materialize = |held: &auth::AuthGrantRecord| {
+        mcp_api::mcp_tool_from_config_attachment(
+            &mcp_config_attachment(),
+            &record,
+            Some(&server),
+            Some(held),
+        )
+    };
+    let auth_ref = |tool: harness::ToolSpec| match tool.kind {
+        harness::ToolKind::RemoteMcp(spec) => spec.auth_ref,
+        _ => panic!("expected remote MCP tool"),
+    };
+
+    let bearer = test_auth_grant_record(
+        "authgrant_bot",
+        auth::AuthProviderKind::StaticBearer,
+        auth::AuthGrantStatus::Active,
+        Some("https://crm.example.com/mcp"),
+    );
+    assert_eq!(
+        auth_ref(materialize(&bearer).expect("a held bearer grant")),
+        Some(harness::SecretRef {
+            namespace: "auth_grant".to_owned(),
+            id: "authgrant_bot".to_owned(),
+        })
+    );
+
+    // A GitHub App grant only as a sub-lease: the whole installation would
+    // carry every repository and permission the app has.
+    let mut installation = test_auth_grant_record(
+        "authgrant_install",
+        auth::AuthProviderKind::GitHubApp,
+        auth::AuthGrantStatus::Active,
+        None,
+    );
+    installation.metadata = serde_json::json!({
+        "installation_id": 678,
+        "permissions": {"issues": "write"},
+    });
+    let error = materialize(&installation).expect_err("an installation grant is refused");
+    assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
+    let mut sublease = installation.clone();
+    sublease.grant_id = auth::AuthGrantId::new("authgrant_sublease");
+    sublease.metadata = serde_json::json!({
+        "installation_id": 678,
+        "parent_grant_id": "authgrant_install",
+        "token_scope": {"repositories": ["crm"], "permissions": {"issues": "write"}},
+    });
+    assert_eq!(
+        auth_ref(materialize(&sublease).expect("a sub-lease")),
+        Some(harness::SecretRef {
+            namespace: "auth_grant".to_owned(),
+            id: "authgrant_sublease".to_owned(),
+        })
+    );
+
+    // Its audience must cover the server, and the server must take a bearer.
+    let elsewhere = test_auth_grant_record(
+        "authgrant_elsewhere",
+        auth::AuthProviderKind::StaticBearer,
+        auth::AuthGrantStatus::Active,
+        Some("https://other.example.com"),
+    );
+    assert!(materialize(&elsewhere).is_err());
+    record.auth_policy = mcp::McpServerAuthPolicy::None;
+    record.auth_grant_id = None;
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        None,
+        Some(&bearer),
+    )
+    .expect_err("a server without auth takes no held credential");
+    assert!(
+        error.message.contains("takes no bearer credential"),
+        "{error:?}"
     );
 }
 
@@ -708,9 +802,13 @@ fn mcp_attachment_rejects_revoked_grant() {
         None,
     );
 
-    let error =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect_err("revoked grant must be rejected");
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect_err("revoked grant must be rejected");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
 }
@@ -732,9 +830,13 @@ fn mcp_attachment_rejects_grant_kind_incompatible_with_auth_policy() {
         None,
     );
 
-    let error =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect_err("bearer grant must not satisfy OAuth policy");
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect_err("bearer grant must not satisfy OAuth policy");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
 }
@@ -751,9 +853,13 @@ fn mcp_attachment_rejects_grant_audience_that_does_not_cover_server() {
         Some("https://other.example.com"),
     );
 
-    let error =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect_err("audience mismatch must be rejected");
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect_err("audience mismatch must be rejected");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
 }
@@ -775,9 +881,13 @@ fn mcp_server_rejects_grant_audience_that_does_not_cover_oauth_resource() {
         Some("https://crm.example.com"),
     );
 
-    let error =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect_err("grant audience must cover the OAuth resource as well as the server URL");
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect_err("grant audience must cover the OAuth resource as well as the server URL");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
 }
@@ -811,12 +921,13 @@ fn two_server_ids_can_share_an_endpoint_with_distinct_credentials() {
     let mut personal_attachment = mcp_config_attachment();
     personal_attachment.server_id = "crm_personal".to_owned();
     let work_tool =
-        mcp_api::mcp_tool_from_config_attachment(&work_attachment, &work, Some(&work_grant))
+        mcp_api::mcp_tool_from_config_attachment(&work_attachment, &work, Some(&work_grant), None)
             .expect("work");
     let personal_tool = mcp_api::mcp_tool_from_config_attachment(
         &personal_attachment,
         &personal,
         Some(&personal_grant),
+        None,
     )
     .expect("personal");
     let desired = BTreeMap::from([
@@ -840,9 +951,13 @@ fn mcp_attachment_rejects_grant_for_no_auth_server() {
         None,
     );
 
-    let error =
-        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, Some(&grant))
-            .expect_err("grant on no-auth server must be rejected");
+    let error = mcp_api::mcp_tool_from_config_attachment(
+        &mcp_config_attachment(),
+        &record,
+        Some(&grant),
+        None,
+    )
+    .expect_err("grant on no-auth server must be rejected");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::InvalidRequest);
 }
@@ -852,8 +967,9 @@ fn mcp_attachment_requires_grant_for_required_auth_server() {
     let mut record = test_mcp_server_record("crm", mcp::McpServerStatus::Active);
     record.auth_policy = mcp::McpServerAuthPolicy::RequiredBearer;
 
-    let error = mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, None)
-        .expect_err("missing grant must be rejected for required auth");
+    let error =
+        mcp_api::mcp_tool_from_config_attachment(&mcp_config_attachment(), &record, None, None)
+            .expect_err("missing grant must be rejected for required auth");
 
     assert_eq!(error.kind, api::AgentApiErrorKind::Rejected);
 }

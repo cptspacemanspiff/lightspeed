@@ -534,6 +534,8 @@ api_methods! {
         ["List GitHub App installations", "Uses the registered GitHub App provider credential to query accessible installations and returns account/permission metadata without tokens."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
     METHOD_AUTH_GITHUB_INSTALLATIONS_GRANT => grant_github_installation(AuthGitHubInstallationGrantParams) -> AuthGitHubInstallationGrantResponse =>
         ["Grant access to a GitHub App installation", "Creates or refreshes a universe auth grant for one accessible installation. The installation token is brokered internally and never returned."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
+    METHOD_AUTH_GRANTS_SUBLEASE => sublease_auth_grant(AuthGrantSubleaseParams) -> AuthGrantSubleaseResponse =>
+        ["Create a sub-lease of a GitHub App grant", "Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active."], access: MethodAccess::Universe(UniverseAction::ConfigureResource),
     METHOD_BOTS_CREATE => create_bot(BotCreateParams) -> BotCreateResponse =>
         ["Create a bot", "Creates the bot record, optionally with its triggers, and starts its controller. Fails if the bot id exists; a trigger failure rolls the bot back."], access: MethodAccess::Universe(UniverseAction::CreateBot),
     METHOD_BOTS_PUT => put_bot(BotPutParams) -> BotPutResponse =>

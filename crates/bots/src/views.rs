@@ -763,6 +763,7 @@ mod tests {
                 emit: true,
                 enabled: true,
                 escalate_to: Vec::new(),
+                mcp_credentials: Default::default(),
             },
             event_seq: 17,
             closed_at_ms: None,

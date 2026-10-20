@@ -130,7 +130,9 @@ pub fn validate_escalation(field: &str, people: &[String]) -> Result<(), BotErro
         )));
     }
     if people.iter().any(|person| {
-        person.trim().is_empty() || person.trim() != person || person.len() > MAX_ESCALATION_NAME_LEN
+        person.trim().is_empty()
+            || person.trim() != person
+            || person.len() > MAX_ESCALATION_NAME_LEN
     }) {
         return Err(invalid(format!(
             "{field} entries must be 1..={MAX_ESCALATION_NAME_LEN} bytes without surrounding whitespace"
@@ -627,6 +629,7 @@ mod tests {
             emit: false,
             enabled: true,
             escalate_to: Vec::new(),
+            mcp_credentials: Default::default(),
         };
         assert!(validate_bot_document(&document).is_err());
         document.runs_per_day = Some(5);
@@ -648,7 +651,10 @@ mod tests {
             vec!["x".repeat(MAX_ESCALATION_NAME_LEN + 1)],
             vec!["p".to_owned(); MAX_ESCALATION_PEOPLE + 1],
         ] {
-            assert!(validate_escalation("escalateTo", &people).is_err(), "{people:?}");
+            assert!(
+                validate_escalation("escalateTo", &people).is_err(),
+                "{people:?}"
+            );
         }
     }
 }

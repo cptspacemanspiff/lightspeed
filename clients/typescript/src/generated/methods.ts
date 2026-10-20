@@ -106,6 +106,7 @@ export const METHODS = [
   "auth/providers/delete",
   "auth/github/installations/list",
   "auth/github/installations/grant",
+  "auth/grants/sublease",
   "bots/create",
   "bots/put",
   "bots/read",
@@ -760,6 +761,12 @@ export const METHOD_INFO = {
     access: {"action":"configure_resource","kind":"universe"},
     summary: "Grant access to a GitHub App installation",
     description: "Creates or refreshes a universe auth grant for one accessible installation. The installation token is brokered internally and never returned.",
+  },
+  "auth/grants/sublease": {
+    scope: "universe",
+    access: {"action":"configure_resource","kind":"universe"},
+    summary: "Create a sub-lease of a GitHub App grant",
+    description: "Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.",
   },
   "bots/create": {
     scope: "universe",
@@ -1960,6 +1967,15 @@ export interface MethodMap {
   "auth/github/installations/grant": {
     params: Api.AuthGitHubInstallationGrantParams;
     result: Api.AgentApiOutcomeOfAuthGitHubInstallationGrantResponse;
+  };
+  /**
+   * Create a sub-lease of a GitHub App grant
+   *
+   * Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.
+   */
+  "auth/grants/sublease": {
+    params: Api.AuthGrantSubleaseParams;
+    result: Api.AgentApiOutcomeOfAuthGrantSubleaseResponse;
   };
   /**
    * Create a bot
@@ -3192,6 +3208,14 @@ export const rpc = {
    */
   authGithubInstallationsGrant(client: RpcCaller, params: Api.AuthGitHubInstallationGrantParams): Promise<Api.AgentApiOutcomeOfAuthGitHubInstallationGrantResponse> {
     return client.call("auth/github/installations/grant", params);
+  },
+  /**
+   * Create a sub-lease of a GitHub App grant
+   *
+   * Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.
+   */
+  authGrantsSublease(client: RpcCaller, params: Api.AuthGrantSubleaseParams): Promise<Api.AgentApiOutcomeOfAuthGrantSubleaseResponse> {
+    return client.call("auth/grants/sublease", params);
   },
   /**
    * Create a bot

@@ -2525,6 +2525,31 @@
     },
     {
       "access": {
+        "action": "configure_resource",
+        "kind": "universe"
+      },
+      "description": "Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.",
+      "group": "auth",
+      "method": "auth/grants/sublease",
+      "params": {
+        "schema": {
+          "$ref": "#/definitions/AuthGrantSubleaseParams"
+        },
+        "type": "AuthGrantSubleaseParams"
+      },
+      "result": {
+        "schema": {
+          "$ref": "#/definitions/AgentApiOutcomeOfAuthGrantSubleaseResponse"
+        },
+        "type": "AgentApiOutcome<AuthGrantSubleaseResponse>"
+      },
+      "role": "operator",
+      "scope": "universe",
+      "summary": "Create a sub-lease of a GitHub App grant",
+      "target": null
+    },
+    {
+      "access": {
         "action": "create_bot",
         "kind": "universe"
       },

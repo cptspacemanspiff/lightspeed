@@ -7,6 +7,12 @@
 //! demand by the broker. A grant with kind `github_app` represents the
 //! installation; its non-secret metadata carries the installation id,
 //! account, permissions, and repository selection.
+//!
+//! A sub-lease is a `github_app` grant made from another one (its parent)
+//! that narrows every token minted for it to a list of repositories and a
+//! set of permissions ([`GitHubTokenScope`]). GitHub enforces the narrowing:
+//! the scope goes into the token request. A sub-lease mints only while its
+//! whole parent chain is active.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -29,6 +35,11 @@ pub const DEFAULT_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 /// backdated `iat` to absorb clock skew (per GitHub's own guidance).
 const APP_JWT_BACKDATE_SECS: i64 = 60;
 const APP_JWT_TTL_SECS: i64 = 9 * 60;
+
+/// GitHub takes at most this many repositories in one token request.
+pub const MAX_SUBLEASE_REPOSITORIES: usize = 500;
+/// How many sub-leases deep a chain may go, the installation grant aside.
+const MAX_SUBLEASE_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GitHubAppError {
@@ -73,6 +84,93 @@ pub struct GitHubInstallation {
     pub permissions: serde_json::Value,
 }
 
+/// What a sub-lease narrows its tokens to: the `repositories` and
+/// `permissions` of GitHub's installation token request. Repositories are
+/// names within the installation's account, without the owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GitHubTokenScope {
+    pub repositories: Vec<String>,
+    /// Permission name to level (`read`, `write` or `admin`), e.g.
+    /// `{"issues": "write"}`.
+    pub permissions: BTreeMap<String, String>,
+}
+
+fn permission_rank(level: &str) -> Option<u8> {
+    match level {
+        "read" => Some(1),
+        "write" => Some(2),
+        "admin" => Some(3),
+        _ => None,
+    }
+}
+
+impl GitHubTokenScope {
+    /// A list of repositories is required: without one GitHub grants every
+    /// repository of the installation, which widens as the app is
+    /// installed on more.
+    pub fn validate(&self) -> Result<(), AuthRegistryError> {
+        let invalid = |message: String| AuthRegistryError::InvalidInput { message };
+        if self.repositories.is_empty() {
+            return Err(invalid(
+                "a sub-lease must name at least one repository".to_owned(),
+            ));
+        }
+        if self.repositories.len() > MAX_SUBLEASE_REPOSITORIES {
+            return Err(invalid(format!(
+                "a sub-lease names at most {MAX_SUBLEASE_REPOSITORIES} repositories"
+            )));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for repository in &self.repositories {
+            let valid = !repository.is_empty()
+                && repository.len() <= 100
+                && repository != "."
+                && repository != ".."
+                && repository
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            if !valid {
+                return Err(invalid(format!(
+                    "{repository:?} is not a repository name (name it without the owner)"
+                )));
+            }
+            if !seen.insert(repository.to_ascii_lowercase()) {
+                return Err(invalid(format!("repository {repository} is named twice")));
+            }
+        }
+        if self.permissions.is_empty() {
+            return Err(invalid(
+                "a sub-lease must name at least one permission".to_owned(),
+            ));
+        }
+        for (name, level) in &self.permissions {
+            let valid_name = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+            if !valid_name {
+                return Err(invalid(format!("{name:?} is not a permission name")));
+            }
+            if permission_rank(level).is_none() {
+                return Err(invalid(format!(
+                    "permission {name} has level {level:?}; use read, write or admin"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The body GitHub's token endpoint takes to narrow a token.
+    fn request_body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "repositories": self.repositories,
+            "permissions": self.permissions,
+        })
+    }
+}
+
 /// GitHub REST surface the driver needs. Mocked in tests; the real
 /// implementation is [`HttpGitHubApiClient`].
 #[async_trait]
@@ -83,11 +181,13 @@ pub trait GitHubApiClient: Send + Sync {
         app_jwt: &SecretValue,
     ) -> Result<Vec<GitHubInstallation>, GitHubAppError>;
 
+    /// Mint an installation token, narrowed to `scope` when there is one.
     async fn create_installation_token(
         &self,
         api_base_url: &str,
         app_jwt: &SecretValue,
         installation_id: i64,
+        scope: Option<&GitHubTokenScope>,
     ) -> Result<GitHubInstallationToken, GitHubAppError>;
 }
 
@@ -147,6 +247,12 @@ pub struct GitHubInstallationGrantMetadata {
     pub repository_selection: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub permissions: serde_json::Value,
+    /// Set on a sub-lease: the grant it was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_grant_id: Option<String>,
+    /// Set on a sub-lease: what its tokens are narrowed to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_scope: Option<GitHubTokenScope>,
 }
 
 impl GitHubInstallationGrantMetadata {
@@ -156,6 +262,85 @@ impl GitHubInstallationGrantMetadata {
             account_login: installation.account_login.clone(),
             repository_selection: installation.repository_selection.clone(),
             permissions: installation.permissions.clone(),
+            parent_grant_id: None,
+            token_scope: None,
+        }
+    }
+
+    /// The metadata of a sub-lease of `parent` narrowed to `scope`: the same
+    /// installation, with permissions no higher than the parent's and, when
+    /// the parent is itself a sub-lease, repositories among its own.
+    pub fn sublease(
+        parent: &AuthGrantRecord,
+        scope: GitHubTokenScope,
+    ) -> Result<Self, AuthRegistryError> {
+        let invalid = |message: String| AuthRegistryError::InvalidInput { message };
+        if parent.provider_kind != crate::AuthProviderKind::GitHubApp {
+            return Err(invalid(format!(
+                "grant {} is not a github app grant; only those have sub-leases",
+                parent.grant_id
+            )));
+        }
+        if parent.status != AuthGrantStatus::Active {
+            return Err(invalid(format!(
+                "grant {} is not active: {:?}",
+                parent.grant_id, parent.status
+            )));
+        }
+        scope.validate()?;
+        let parent_metadata = Self::from_grant(parent)?;
+        let held = parent_metadata.effective_permissions();
+        for (name, level) in &scope.permissions {
+            let allowed = held.get(name).and_then(|held| permission_rank(held));
+            if allowed.is_none_or(|allowed| permission_rank(level).unwrap_or(u8::MAX) > allowed) {
+                return Err(invalid(format!(
+                    "grant {} has {name}: {}; a sub-lease can't ask for {level}",
+                    parent.grant_id,
+                    held.get(name).map(String::as_str).unwrap_or("none"),
+                )));
+            }
+        }
+        if let Some(parent_scope) = &parent_metadata.token_scope {
+            let within: std::collections::BTreeSet<String> = parent_scope
+                .repositories
+                .iter()
+                .map(|repository| repository.to_ascii_lowercase())
+                .collect();
+            if let Some(outside) = scope
+                .repositories
+                .iter()
+                .find(|repository| !within.contains(&repository.to_ascii_lowercase()))
+            {
+                return Err(invalid(format!(
+                    "repository {outside} is not among grant {}'s",
+                    parent.grant_id
+                )));
+            }
+        }
+        Ok(Self {
+            parent_grant_id: Some(parent.grant_id.as_str().to_owned()),
+            token_scope: Some(scope),
+            ..parent_metadata
+        })
+    }
+
+    /// The permissions a token from this grant can carry: a sub-lease's
+    /// scope, or the installation's as GitHub reported them.
+    pub fn effective_permissions(&self) -> BTreeMap<String, String> {
+        match &self.token_scope {
+            Some(scope) => scope.permissions.clone(),
+            None => self
+                .permissions
+                .as_object()
+                .map(|permissions| {
+                    permissions
+                        .iter()
+                        .filter_map(|(name, level)| {
+                            Some((name.clone(), level.as_str()?.to_owned()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -184,6 +369,17 @@ impl GitHubInstallationGrantMetadata {
                     grant.grant_id, metadata.installation_id
                 ),
             });
+        }
+        if metadata.parent_grant_id.is_some() != metadata.token_scope.is_some() {
+            return Err(AuthRegistryError::InvalidInput {
+                message: format!(
+                    "grant {} is a sub-lease only in part: it needs both a parent and a scope",
+                    grant.grant_id
+                ),
+            });
+        }
+        if let Some(scope) = &metadata.token_scope {
+            scope.validate()?;
         }
         Ok(metadata)
     }
@@ -256,6 +452,7 @@ impl GitHubAppRuntime {
 
         let metadata = GitHubInstallationGrantMetadata::from_grant(grant)
             .map_err(|error| mint_error(error.to_string()))?;
+        self.check_parent_chain(grant, &metadata).await?;
         let provider_id = AuthProviderId::try_new(grant.provider_id.clone())
             .map_err(|error| mint_error(format!("invalid provider id: {error}")))?;
         let provider = self
@@ -295,7 +492,12 @@ impl GitHubAppRuntime {
 
         match self
             .api
-            .create_installation_token(&config.api_base_url, &app_jwt, metadata.installation_id)
+            .create_installation_token(
+                &config.api_base_url,
+                &app_jwt,
+                metadata.installation_id,
+                metadata.token_scope.as_ref(),
+            )
             .await
         {
             Ok(token) => {
@@ -334,6 +536,58 @@ impl GitHubAppRuntime {
             }
             Err(other) => Err(mint_error(other.to_string())),
         }
+    }
+}
+
+impl GitHubAppRuntime {
+    /// A sub-lease mints only while every grant above it is active and of
+    /// the same app installation. Revoking a parent stops its sub-leases
+    /// without touching them.
+    async fn check_parent_chain(
+        &self,
+        grant: &AuthGrantRecord,
+        metadata: &GitHubInstallationGrantMetadata,
+    ) -> Result<(), AuthBrokerError> {
+        let mut parent_id = metadata.parent_grant_id.clone();
+        let mut depth = 0;
+        while let Some(id) = parent_id {
+            depth += 1;
+            let refuse = |message: String| AuthBrokerError::MintFailed {
+                grant_id: grant.grant_id.clone(),
+                message,
+            };
+            if depth > MAX_SUBLEASE_DEPTH {
+                return Err(refuse(format!(
+                    "sub-lease chain is deeper than {MAX_SUBLEASE_DEPTH}"
+                )));
+            }
+            let id = AuthGrantId::try_new(id)
+                .map_err(|error| refuse(format!("invalid parent grant id: {error}")))?;
+            let parent = self
+                .grants
+                .read_grant(&id)
+                .await
+                .map_err(|error| refuse(format!("load parent grant {id}: {error}")))?;
+            if parent.status != AuthGrantStatus::Active {
+                return Err(AuthBrokerError::GrantNotActive {
+                    grant_id: parent.grant_id,
+                    status: parent.status,
+                });
+            }
+            let parent_metadata = GitHubInstallationGrantMetadata::from_grant(&parent)
+                .map_err(|error| refuse(error.to_string()))?;
+            if parent.provider_kind != grant.provider_kind
+                || parent.provider_id != grant.provider_id
+                || parent_metadata.installation_id != metadata.installation_id
+            {
+                return Err(refuse(format!(
+                    "parent grant {} is not the same app installation",
+                    parent.grant_id
+                )));
+            }
+            parent_id = parent_metadata.parent_grant_id;
+        }
+        Ok(())
     }
 }
 
@@ -428,19 +682,21 @@ impl HttpGitHubApiClient {
         url: &str,
         app_jwt: &SecretValue,
         installation_id: Option<i64>,
+        body: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, GitHubAppError> {
-        let response = self
+        let mut request = self
             .http
             .request(method, url)
             .bearer_auth(app_jwt.expose())
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .map_err(|error| GitHubAppError::Http {
-                status: error.status().map(|status| status.as_u16()),
-                message: format!("github api request failed: {error}"),
-            })?;
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|error| GitHubAppError::Http {
+            status: error.status().map(|status| status.as_u16()),
+            message: format!("github api request failed: {error}"),
+        })?;
         let status = response.status();
         let body = response
             .text()
@@ -524,7 +780,7 @@ impl GitHubApiClient for HttpGitHubApiClient {
             api_base_url.trim_end_matches('/')
         );
         let value = self
-            .request_json(reqwest::Method::GET, &url, app_jwt, None)
+            .request_json(reqwest::Method::GET, &url, app_jwt, None, None)
             .await?;
         let Some(entries) = value.as_array() else {
             return Err(GitHubAppError::InvalidResponse {
@@ -539,13 +795,20 @@ impl GitHubApiClient for HttpGitHubApiClient {
         api_base_url: &str,
         app_jwt: &SecretValue,
         installation_id: i64,
+        scope: Option<&GitHubTokenScope>,
     ) -> Result<GitHubInstallationToken, GitHubAppError> {
         let url = format!(
             "{}/app/installations/{installation_id}/access_tokens",
             api_base_url.trim_end_matches('/')
         );
         let value = self
-            .request_json(reqwest::Method::POST, &url, app_jwt, Some(installation_id))
+            .request_json(
+                reqwest::Method::POST,
+                &url,
+                app_jwt,
+                Some(installation_id),
+                scope.map(GitHubTokenScope::request_body),
+            )
             .await?;
         let Some(token) = value.get("token").and_then(|token| token.as_str()) else {
             return Err(GitHubAppError::InvalidResponse {
@@ -647,6 +910,7 @@ mod tests {
     struct CountingGitHubApi {
         responses: Mutex<Vec<Result<GitHubInstallationToken, GitHubAppError>>>,
         calls: AtomicI64,
+        scopes: Mutex<Vec<Option<GitHubTokenScope>>>,
     }
 
     #[async_trait]
@@ -664,10 +928,12 @@ mod tests {
             _api_base_url: &str,
             app_jwt: &SecretValue,
             installation_id: i64,
+            scope: Option<&GitHubTokenScope>,
         ) -> Result<GitHubInstallationToken, GitHubAppError> {
             assert!(!app_jwt.expose().is_empty(), "app jwt must be signed");
             assert_eq!(installation_id, 678);
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.scopes.lock().expect("lock").push(scope.cloned());
             self.responses.lock().expect("lock").remove(0)
         }
     }
@@ -727,6 +993,7 @@ mod tests {
                 metadata: serde_json::json!({
                     "installation_id": 678,
                     "account_login": "acme",
+                    "permissions": {"issues": "write", "contents": "read", "metadata": "read"},
                 }),
                 created_at_ms: 10,
             })
@@ -735,6 +1002,7 @@ mod tests {
         let api = Arc::new(CountingGitHubApi {
             responses: Mutex::new(responses),
             calls: AtomicI64::new(0),
+            scopes: Mutex::new(Vec::new()),
         });
         let now = Arc::new(AtomicI64::new(1_000_000));
         let now_for_fn = now.clone();
@@ -895,5 +1163,177 @@ mod tests {
             .await
             .expect("grant");
         assert_eq!(grant.status, AuthGrantStatus::Active);
+    }
+
+    fn scope(repositories: &[&str], permissions: &[(&str, &str)]) -> GitHubTokenScope {
+        GitHubTokenScope {
+            repositories: repositories.iter().map(|name| (*name).to_owned()).collect(),
+            permissions: permissions
+                .iter()
+                .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
+                .collect(),
+        }
+    }
+
+    async fn create_sublease(
+        harness: &GitHubHarness,
+        grant_id: &str,
+        parent_id: &str,
+        scope: GitHubTokenScope,
+    ) -> AuthGrantId {
+        let parent = harness
+            .grants
+            .read_grant(&AuthGrantId::new(parent_id))
+            .await
+            .expect("parent grant");
+        let metadata = GitHubInstallationGrantMetadata::sublease(&parent, scope)
+            .expect("a narrower scope")
+            .to_json()
+            .expect("encode metadata");
+        harness
+            .grants
+            .create_grant(CreateAuthGrantRecord {
+                grant_id: AuthGrantId::new(grant_id),
+                provider_id: parent.provider_id.clone(),
+                provider_kind: AuthProviderKind::GitHubApp,
+                exposure: crate::AuthGrantExposure::Brokered,
+                created_by: api::Attribution::Local,
+                display_name: None,
+                subject_hint: parent.subject_hint.clone(),
+                scopes: Vec::new(),
+                audience: parent.audience.clone(),
+                access_token_secret: None,
+                refresh_token_secret: None,
+                oauth_client: None,
+                expires_at_ms: None,
+                status: AuthGrantStatus::Active,
+                metadata,
+                created_at_ms: 20,
+            })
+            .await
+            .expect("create sub-lease");
+        AuthGrantId::new(grant_id)
+    }
+
+    #[tokio::test]
+    async fn a_sublease_mints_tokens_narrowed_to_its_repositories_and_permissions() {
+        let harness = github_harness(vec![
+            Ok(minted("ghs_narrow", 1_000_000 + 3_600_000)),
+            Ok(minted("ghs_wide", 1_000_000 + 3_600_000)),
+        ])
+        .await;
+        let issues = scope(&["ExamGrader3"], &[("issues", "write")]);
+        let sublease = create_sublease(
+            &harness,
+            "authgrant_issues",
+            "authgrant_install",
+            issues.clone(),
+        )
+        .await;
+
+        let narrow = harness
+            .broker
+            .bearer_token(&sublease, &github_audience())
+            .await
+            .expect("sub-lease token");
+        let wide = harness
+            .broker
+            .bearer_token(&install_grant_id(), &github_audience())
+            .await
+            .expect("installation token");
+
+        // Each grant has its own token: the sub-lease's is never the
+        // installation's cached one.
+        assert_eq!(narrow.expose(), "ghs_narrow");
+        assert_eq!(wide.expose(), "ghs_wide");
+        assert_eq!(
+            *harness.api.scopes.lock().expect("lock"),
+            vec![Some(issues), None]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_the_parent_stops_its_subleases() {
+        let harness = github_harness(Vec::new()).await;
+        let sublease = create_sublease(
+            &harness,
+            "authgrant_issues",
+            "authgrant_install",
+            scope(&["ExamGrader3"], &[("issues", "write")]),
+        )
+        .await;
+        let nested = create_sublease(
+            &harness,
+            "authgrant_nested",
+            "authgrant_issues",
+            scope(&["ExamGrader3"], &[("issues", "read")]),
+        )
+        .await;
+        harness
+            .grants
+            .update_grant_status(&install_grant_id(), AuthGrantStatus::Revoked, 30)
+            .await
+            .expect("revoke installation grant");
+
+        for grant_id in [sublease, nested] {
+            let error = harness
+                .broker
+                .bearer_token(&grant_id, &github_audience())
+                .await
+                .expect_err("a revoked parent stops the sub-lease");
+            assert!(matches!(
+                error,
+                AuthBrokerError::GrantNotActive { ref grant_id, status: AuthGrantStatus::Revoked }
+                    if *grant_id == install_grant_id()
+            ));
+        }
+        assert_eq!(harness.api.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_sublease_can_only_narrow_its_parent() {
+        let harness = github_harness(Vec::new()).await;
+        let installation = harness
+            .grants
+            .read_grant(&install_grant_id())
+            .await
+            .expect("installation grant");
+        let refused = |scope: GitHubTokenScope| {
+            GitHubInstallationGrantMetadata::sublease(&installation, scope)
+                .expect_err("a wider or malformed scope is refused")
+                .to_string()
+        };
+
+        assert!(refused(scope(&["a"], &[("issues", "admin")])).contains("can't ask for admin"));
+        assert!(
+            refused(scope(&["a"], &[("pull_requests", "read")])).contains("pull_requests: none")
+        );
+        assert!(refused(scope(&[], &[("issues", "read")])).contains("at least one repository"));
+        assert!(refused(scope(&["acme/a"], &[("issues", "read")])).contains("without the owner"));
+        assert!(refused(scope(&["a"], &[])).contains("at least one permission"));
+        assert!(refused(scope(&["a"], &[("issues", "mighty")])).contains("read, write or admin"));
+        assert!(refused(scope(&["a", "A"], &[("issues", "read")])).contains("named twice"));
+
+        create_sublease(
+            &harness,
+            "authgrant_two",
+            "authgrant_install",
+            scope(&["a", "b"], &[("issues", "write"), ("contents", "read")]),
+        )
+        .await;
+        let two = harness
+            .grants
+            .read_grant(&AuthGrantId::new("authgrant_two"))
+            .await
+            .expect("sub-lease");
+        let outside =
+            GitHubInstallationGrantMetadata::sublease(&two, scope(&["c"], &[("issues", "read")]))
+                .expect_err("a repository outside the parent's");
+        assert!(outside.to_string().contains("repository c is not among"));
+        let nested =
+            GitHubInstallationGrantMetadata::sublease(&two, scope(&["B"], &[("issues", "read")]))
+                .expect("one of the parent's repositories, at a lower level");
+        assert_eq!(nested.parent_grant_id.as_deref(), Some("authgrant_two"));
+        assert_eq!(nested.installation_id, 678);
     }
 }

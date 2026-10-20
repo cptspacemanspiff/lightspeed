@@ -181,8 +181,14 @@ pub(super) fn validate_mcp_grant_for_server(
 
     let kind_compatible = match &record.auth_policy {
         mcp::McpServerAuthPolicy::None => false,
+        // A GitHub App grant serves a bearer server only as a sub-lease: an
+        // installation's tokens would carry every repository and permission
+        // the app has.
         mcp::McpServerAuthPolicy::OptionalBearer | mcp::McpServerAuthPolicy::RequiredBearer => {
             grant.provider_kind == auth::AuthProviderKind::StaticBearer
+                || (grant.provider_kind == auth::AuthProviderKind::GitHubApp
+                    && auth::GitHubInstallationGrantMetadata::from_grant(grant)
+                        .is_ok_and(|metadata| metadata.token_scope.is_some()))
         }
         mcp::McpServerAuthPolicy::OptionalOAuth { .. }
         | mcp::McpServerAuthPolicy::RequiredOAuth { .. } => {

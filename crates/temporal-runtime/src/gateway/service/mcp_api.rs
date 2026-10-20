@@ -137,10 +137,13 @@ pub(super) fn validate_mcp_server_credential(
 /// Resolve one declared config attachment against its catalog record and grant
 /// into the remote MCP tool spec. Shared by put-time validation and toolset
 /// reconciliation, so a config put fails fast when an attachment cannot resolve.
+/// `held` is a credential the session holds for this server (its bot's
+/// `mcpCredentials`), used in place of the server's own.
 pub(super) fn mcp_tool_from_config_attachment(
     attachment: &harness::McpServerAttachment,
     record: &mcp::McpServerRecord,
     grant: Option<&auth::AuthGrantRecord>,
+    held: Option<&auth::AuthGrantRecord>,
 ) -> Result<harness::ToolSpec, AgentApiError> {
     match record.status {
         mcp::McpServerStatus::Disabled => {
@@ -173,7 +176,10 @@ pub(super) fn mcp_tool_from_config_attachment(
         None => record.allowed_tools.clone(),
     };
     let tool_name = default_mcp_tool_name(&record.default_server_label)?;
-    let auth_ref = auth_ref_for_server(record, grant)?;
+    let auth_ref = match held {
+        Some(held) => Some(held_auth_ref(record, held)?),
+        None => auth_ref_for_server(record, grant)?,
+    };
     Ok(harness::ToolSpec {
         name: tool_name,
         execution: harness::ToolExecutionSpec::default(),
@@ -204,9 +210,12 @@ impl super::session_preparation::SessionPreparationService {
     /// Resolve the config's declared MCP attachments into the desired remote tool
     /// specs, loading catalog records and auth grants. Used both to validate
     /// a config document at admission and to reconcile the session toolset.
+    /// `held` maps a server id to the credential the session holds for it
+    /// (see `held_mcp_credentials`).
     pub(crate) async fn desired_mcp_tools(
         &self,
         features: &harness::FeaturesConfig,
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<BTreeMap<ToolName, harness::ToolSpec>, AgentApiError> {
         let Some(mcp) = features.mcp.as_ref() else {
             return Ok(BTreeMap::new());
@@ -229,7 +238,21 @@ impl super::session_preparation::SessionPreparationService {
                 ),
                 None => None,
             };
-            let tool = mcp_tool_from_config_attachment(attachment, &record, grant.as_ref())?;
+            let held = match held.get(server_id.as_str()) {
+                Some(grant_id) => Some(
+                    self.store
+                        .read_grant(grant_id)
+                        .await
+                        .map_err(map_auth_error)?,
+                ),
+                None => None,
+            };
+            let tool = mcp_tool_from_config_attachment(
+                attachment,
+                &record,
+                grant.as_ref(),
+                held.as_ref(),
+            )?;
             if record.execution == mcp::McpExecution::Native
                 && record.exposure == mcp::McpExposure::Search
             {
@@ -460,6 +483,28 @@ fn parse_mcp_tool_name(tool_id: String) -> Result<ToolName, AgentApiError> {
         .map_err(|error| AgentApiError::invalid_request(format!("invalid MCP tool id: {error}")))
 }
 
+/// The credential reference for a grant the session holds for `record`:
+/// valid only for a bearer server, with the grant's audience covering it.
+pub(super) fn held_auth_ref(
+    record: &mcp::McpServerRecord,
+    held: &auth::AuthGrantRecord,
+) -> Result<harness::SecretRef, AgentApiError> {
+    if !matches!(
+        record.auth_policy,
+        mcp::McpServerAuthPolicy::OptionalBearer | mcp::McpServerAuthPolicy::RequiredBearer
+    ) {
+        return Err(AgentApiError::rejected(format!(
+            "MCP server {} takes no bearer credential, so a session can't hold one for it",
+            record.server_id
+        )));
+    }
+    auth_api::validate_mcp_grant_for_server(record, held)?;
+    Ok(harness::SecretRef {
+        namespace: llm_runtime::secrets::SECRET_NAMESPACE_AUTH_GRANT.to_owned(),
+        id: held.grant_id.as_str().to_owned(),
+    })
+}
+
 fn auth_ref_for_server(
     record: &mcp::McpServerRecord,
     grant: Option<&auth::AuthGrantRecord>,
@@ -505,8 +550,20 @@ impl GatewayAgentApi {
     pub(super) async fn desired_mcp_tools(
         &self,
         features: &harness::FeaturesConfig,
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<BTreeMap<ToolName, harness::ToolSpec>, AgentApiError> {
-        self.preparation_service().desired_mcp_tools(features).await
+        self.preparation_service()
+            .desired_mcp_tools(features, held)
+            .await
+    }
+
+    pub(super) async fn held_mcp_credentials(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<BTreeMap<String, auth::AuthGrantId>, AgentApiError> {
+        self.preparation_service()
+            .held_mcp_credentials(Some(session_id))
+            .await
     }
 }
 

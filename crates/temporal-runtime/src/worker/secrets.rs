@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::{
-    AuthBrokerError, AuthProviderConfig, AuthProviderId, AuthProviderStatus, AuthProviderStore,
-    AuthRegistryError, AuthTokenBroker, SecretStore, TokenAudience, model_auth_provider_id,
+    AuthBrokerError, AuthGrantId, AuthProviderConfig, AuthProviderId, AuthProviderStatus,
+    AuthProviderStore, AuthRegistryError, AuthTokenBroker, SecretStore, TokenAudience,
+    model_auth_provider_id,
 };
 use harness::SecretRef;
 use llm_runtime::provider_keys::{
@@ -17,14 +18,16 @@ use llm_runtime::provider_keys::{
     ResolvedProviderAuth,
 };
 use llm_runtime::secrets::{
-    EnvSecretResolver, ResolvedSecretValue, SECRET_NAMESPACE_ENV, SECRET_NAMESPACE_MCP_SERVER,
-    SecretResolveError, SecretResolver,
+    EnvSecretResolver, ResolvedSecretValue, SECRET_NAMESPACE_AUTH_GRANT, SECRET_NAMESPACE_ENV,
+    SECRET_NAMESPACE_MCP_SERVER, SecretResolveError, SecretResolver,
 };
 use mcp::{McpRegistryError, McpRegistryStore, McpServerId, McpServerStatus};
 
 /// Dispatches on `SecretRef.namespace`: `mcp_server` loads the configured
 /// universe server's current grant and resolves it through the token broker;
-/// `env` falls back to environment variables for development.
+/// `auth_grant` resolves the named grant (one a session holds for a server)
+/// through the broker for the server's URL; `env` falls back to environment
+/// variables for development.
 pub struct BrokerSecretResolver {
     broker: Arc<dyn AuthTokenBroker>,
     mcp_servers: Arc<dyn McpRegistryStore>,
@@ -107,6 +110,30 @@ impl SecretResolver for BrokerSecretResolver {
                         id: secret_ref.id.clone(),
                     });
                 };
+                let token = self
+                    .broker
+                    .bearer_token(&grant_id, &TokenAudience::McpResource(audience.to_owned()))
+                    .await
+                    .map_err(|error| broker_error_to_resolve_error(secret_ref, error))?;
+                Ok(ResolvedSecretValue::new(token.expose()))
+            }
+            SECRET_NAMESPACE_AUTH_GRANT => {
+                // The broker refuses a grant that isn't active, or whose
+                // audience doesn't cover the server it is sent to.
+                let Some(audience) = audience else {
+                    return Err(SecretResolveError::Backend {
+                        namespace: secret_ref.namespace.clone(),
+                        id: secret_ref.id.clone(),
+                        message: "auth_grant resolution requires a target audience".to_owned(),
+                    });
+                };
+                let grant_id = AuthGrantId::try_new(secret_ref.id.clone()).map_err(|error| {
+                    SecretResolveError::Backend {
+                        namespace: secret_ref.namespace.clone(),
+                        id: secret_ref.id.clone(),
+                        message: format!("invalid auth grant id: {error}"),
+                    }
+                })?;
                 let token = self
                     .broker
                     .bearer_token(&grant_id, &TokenAudience::McpResource(audience.to_owned()))
@@ -268,7 +295,11 @@ fn broker_error_to_resolve_error(
         AuthBrokerError::GrantNotFound { .. } => SecretResolveError::Backend {
             namespace: secret_ref.namespace.clone(),
             id: secret_ref.id.clone(),
-            message: "MCP server is bound to an auth grant that no longer exists".to_owned(),
+            message: if secret_ref.namespace == SECRET_NAMESPACE_AUTH_GRANT {
+                "the session's credential for this MCP server no longer exists".to_owned()
+            } else {
+                "MCP server is bound to an auth grant that no longer exists".to_owned()
+            },
         },
         other => SecretResolveError::Backend {
             namespace: secret_ref.namespace.clone(),

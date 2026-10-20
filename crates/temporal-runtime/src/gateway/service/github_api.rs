@@ -267,6 +267,79 @@ pub(super) fn github_installation_grant_draft(
     Ok(create)
 }
 
+/// Where a sub-lease's tokens may go: the parent's audience unless one is
+/// named. A named audience must be an `https` URL on GitHub: the app's API
+/// host, `github.com`, or `api.githubcopilot.com` (GitHub's MCP server).
+pub(super) fn sublease_audience(
+    parent: &auth::AuthGrantRecord,
+    config: &auth::GitHubAppConfig,
+    requested: Option<String>,
+) -> Result<String, AgentApiError> {
+    let Some(requested) = requested else {
+        return Ok(parent
+            .audience
+            .clone()
+            .unwrap_or_else(|| config.api_base_url.clone()));
+    };
+    let url = url::Url::parse(&requested).map_err(|error| {
+        AgentApiError::invalid_request(format!("audience {requested:?}: {error}"))
+    })?;
+    let api_host = url::Url::parse(&config.api_base_url)
+        .ok()
+        .and_then(|api| api.host_str().map(str::to_owned));
+    let host = url.host_str().unwrap_or_default();
+    let on_github = Some(host) == api_host.as_deref()
+        || ["github.com", "api.github.com", "api.githubcopilot.com"].contains(&host);
+    if url.scheme() != "https" || !on_github {
+        return Err(AgentApiError::invalid_request(format!(
+            "a sub-lease's audience must be an https URL on GitHub, not {requested}"
+        )));
+    }
+    Ok(requested)
+}
+
+/// Draft a sub-lease of `parent`: a GitHub App grant of the same
+/// installation whose metadata narrows its tokens.
+pub(super) fn github_sublease_grant_draft(
+    parent: &auth::AuthGrantRecord,
+    metadata: auth::GitHubInstallationGrantMetadata,
+    audience: String,
+    grant_id: Option<String>,
+    display_name: Option<String>,
+    exposure: auth::AuthGrantExposure,
+    now_ms: i64,
+) -> Result<auth::CreateAuthGrantRecord, AgentApiError> {
+    let grant_id = match grant_id {
+        Some(grant_id) => parse_auth_grant_id(grant_id)?,
+        None => auth::AuthGrantId::try_new(auth::random_auth_id("authgrant_"))
+            .map_err(|error| AgentApiError::internal(format!("generate auth grant id: {error}")))?,
+    };
+    let create = auth::CreateAuthGrantRecord {
+        grant_id,
+        provider_id: parent.provider_id.clone(),
+        provider_kind: auth::AuthProviderKind::GitHubApp,
+        exposure,
+        created_by: crate::gateway::request_context::request_attribution()?,
+        display_name,
+        subject_hint: parent.subject_hint.clone(),
+        scopes: Vec::new(),
+        audience: Some(audience),
+        access_token_secret: None,
+        refresh_token_secret: None,
+        oauth_client: None,
+        expires_at_ms: None,
+        status: auth::AuthGrantStatus::Active,
+        metadata: metadata.to_json().map_err(map_auth_error)?,
+        created_at_ms: now_ms,
+    };
+    create
+        .clone()
+        .into_record()
+        .validate()
+        .map_err(map_auth_error)?;
+    Ok(create)
+}
+
 pub(super) fn map_github_app_error(error: auth::GitHubAppError) -> AgentApiError {
     match error {
         auth::GitHubAppError::Registry(error) => map_auth_error(error),

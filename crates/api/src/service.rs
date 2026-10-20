@@ -549,6 +549,11 @@ pub trait AgentApiService: Send + Sync {
         &self,
         params: AuthGitHubInstallationGrantParams,
     ) -> Result<AgentApiOutcome<AuthGitHubInstallationGrantResponse>, AgentApiError>;
+
+    async fn sublease_auth_grant(
+        &self,
+        params: AuthGrantSubleaseParams,
+    ) -> Result<AgentApiOutcome<AuthGrantSubleaseResponse>, AgentApiError>;
     // ── Bots ────────────────────────────────────────────────────────────────
 
     async fn create_bot(

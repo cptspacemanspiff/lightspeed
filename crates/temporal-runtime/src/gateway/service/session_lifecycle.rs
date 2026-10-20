@@ -445,6 +445,7 @@ impl GatewayAgentApi {
             config,
         );
         let session_config = self.session_config_for_start(start_config).await?;
+        let held = self.held_mcp_credentials(&session_id).await?;
         if let (harness::SessionDriver::Program { program }, Some(spec)) =
             (&mut driver, program_spec.as_ref())
         {
@@ -458,13 +459,13 @@ impl GatewayAgentApi {
                 .map(|binding| binding.definition.tool.clone())
                 .collect::<Vec<_>>();
             program.requires = self
-                .pin_program_contracts(spec, &session_config, &declared)
+                .pin_program_contracts(spec, &session_config, &declared, &held)
                 .await?;
         }
         let setup_environment = profiles::default_environment_id(&session_config.features)?;
 
         if let Some(admitted) = admitted.as_ref() {
-            self.validate_managed_session_materialization(&session_config, admitted)
+            self.validate_managed_session_materialization(&session_config, admitted, &held)
                 .await?;
         }
         let mut args = self.workflow_args(
@@ -538,6 +539,7 @@ impl GatewayAgentApi {
         &self,
         session_config: &SessionConfig,
         admitted: &AdmittedManagedSessionWorkflowTools,
+        held: &BTreeMap<String, auth::AuthGrantId>,
     ) -> Result<(), AgentApiError> {
         for binding in &admitted.bindings {
             validate_workflow_tool_definition_documents(self.store.as_ref(), &binding.definition)
@@ -588,7 +590,9 @@ impl GatewayAgentApi {
                 AgentApiError::invalid_request(format!("materialize workflow tool tools: {error}"))
             },
         )?;
-        let desired_mcp = self.desired_mcp_tools(&session_config.features).await?;
+        let desired_mcp = self
+            .desired_mcp_tools(&session_config.features, held)
+            .await?;
         if let Some(colliding) = materialized_bindings
             .iter()
             .copied()

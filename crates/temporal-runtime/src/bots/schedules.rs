@@ -320,6 +320,7 @@ mod tests {
                 emit: false,
                 enabled,
                 escalate_to: Vec::new(),
+                mcp_credentials: Default::default(),
             },
             event_seq: 0,
             closed_at_ms: None,

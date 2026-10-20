@@ -1331,6 +1331,19 @@ Creates or refreshes a universe auth grant for one accessible installation. The 
 - Params: `AuthGitHubInstallationGrantParams`
 - Result: `AgentApiOutcome<AuthGitHubInstallationGrantResponse>`
 
+### `auth/grants/sublease`
+
+**Create a sub-lease of a GitHub App grant**
+
+Creates a grant whose installation tokens are narrowed to the named repositories and permissions, which must fit within the parent's; GitHub enforces the narrowing. Mints one token to check GitHub accepts the scope, and never returns it. A sub-lease works only while its parents are active.
+
+- Access: `{"kind":"universe","action":"configure_resource"}`
+- Group: `auth`
+- Role: `operator`
+- Target: `none`
+- Params: `AuthGrantSubleaseParams`
+- Result: `AgentApiOutcome<AuthGrantSubleaseResponse>`
+
 ### `bots/create`
 
 **Create a bot**

@@ -103,6 +103,7 @@ where
                 .with_hosted_tools(tools)
                 .with_workflow_tool_executions(client.clone())
                 .with_program_task_queue(queues.program.clone())
+                .with_native_mcp_from_pg_store(store.clone())?
         }
     };
     let program = matches!(llm, Llm::Program);
@@ -206,6 +207,7 @@ fn bot_document(profile_id: &ProfileId) -> BotDocument {
         emit: false,
         enabled: true,
         escalate_to: Vec::new(),
+        mcp_credentials: Default::default(),
     }
 }
 
@@ -702,6 +704,497 @@ async fn bots_live_program_bot_emits_to_another_bot() -> anyhow::Result<()> {
         )
         .await?;
         assert_eq!(output["notes"], serde_json::json!(["hello"]), "{output}");
+        Ok(())
+    })
+    .await
+}
+
+/// Each request's JSON-RPC method and `Authorization` header.
+type SeenRequests = Arc<tokio::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A Streamable HTTP MCP server on loopback with one tool, `createIssue`,
+/// recording the `Authorization` header of every request it serves.
+struct CredentialFixture {
+    seen: SeenRequests,
+    url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CredentialFixture {
+    async fn start() -> anyhow::Result<Self> {
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::post(credential_fixture_handler))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/mcp", listener.local_addr()?);
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(Self { seen, url, task })
+    }
+
+    /// The `Authorization` headers of the tool calls served so far.
+    async fn call_authorizations(&self) -> Vec<Option<String>> {
+        self.seen
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "tools/call")
+            .map(|(_, authorization)| authorization.clone())
+            .collect()
+    }
+}
+
+impl Drop for CredentialFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn credential_fixture_handler(
+    axum::extract::State(seen): axum::extract::State<SeenRequests>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    seen.lock().await.push((method.clone(), authorization));
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let reply = |result: serde_json::Value| {
+        axum::Json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
+            .into_response()
+    };
+    match method.as_str() {
+        "initialize" => {
+            let mut response = reply(serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "credential-fixture", "version": "1"}
+            }));
+            response.headers_mut().insert(
+                "mcp-session-id",
+                axum::http::HeaderValue::from_static("fixture-session"),
+            );
+            response
+        }
+        "notifications/initialized" => axum::http::StatusCode::ACCEPTED.into_response(),
+        "tools/list" => reply(serde_json::json!({"tools": [{
+            "name": "createIssue",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            },
+        }]})),
+        "tools/call" => reply(serde_json::json!({
+            "content": [{"type": "text", "text": "created"}],
+            "structuredContent": {"number": 7},
+        })),
+        _ => axum::http::StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+async fn import_bearer(
+    api: &GatewayAgentApi,
+    token: &str,
+    audience: &str,
+) -> anyhow::Result<String> {
+    Ok(api
+        .import_auth_grant(api::AuthGrantImportParams {
+            grant_id: None,
+            provider_id: None,
+            exposure: api::AuthGrantExposure::Brokered,
+            token: token.to_owned(),
+            display_name: None,
+            subject_hint: None,
+            scopes: Vec::new(),
+            audience: Some(audience.to_owned()),
+            expires_at_ms: None,
+            metadata: None,
+        })
+        .await?
+        .result
+        .grant
+        .grant_id)
+}
+
+/// A program that files one issue per delivery through the `held` server.
+fn issue_program_input(profile_id: &ProfileId, server_id: &str) -> AgentProfileInput {
+    AgentProfileInput {
+        profile_id: profile_id.clone(),
+        display_name: Some("bots live issue filer".to_owned()),
+        description: None,
+        document: ProfileDocument {
+            program: Some(api::ProgramSpec {
+                source: api::ProgramSource::Text {
+                    text: "export default { async run(input, env) { \
+                           for (const e of input.events) { \
+                           await env.mcp.held.create_issue({ title: e.event.data.note }); } \
+                           return { outcome: \"handled\", summary: \"filed\" }; } };"
+                        .to_owned(),
+                },
+                semantics_version: 1,
+                input_schema: None,
+                output_schema: None,
+                limits: None,
+                requires: vec![api::ProgramContractRequirement {
+                    contract: "mcp.held.create_issue".to_owned(),
+                    digest: None,
+                }],
+                approvals: None,
+            }),
+            config: Some(api::SessionConfig {
+                features: Some(api::FeaturesConfig {
+                    mcp: Some(api::McpFeature {
+                        version: api::CURRENT_FEATURE_VERSION,
+                        servers: vec![api::McpServerAttachment {
+                            server_id: server_id.to_owned(),
+                            tools: None,
+                        }],
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..ProfileDocument::default()
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh), and LIGHTSPEED_MCP_PRIVATE_NETWORKS allowing 127.0.0.1"]
+async fn bots_live_program_bot_calls_an_mcp_server_with_its_own_credential() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, _client| async move {
+        let fixture = CredentialFixture::start().await?;
+        let server_id = unique("held");
+        let server_grant = import_bearer(&api, "server-token", &fixture.url).await?;
+        let bot_grant = import_bearer(&api, "bot-token", &fixture.url).await?;
+        let elsewhere = import_bearer(&api, "elsewhere-token", "https://example.com/mcp").await?;
+        api.put_mcp_server(api::McpServerPutParams {
+            server: api::McpServerInput {
+                server_id: server_id.clone(),
+                display_name: None,
+                server_url: fixture.url.clone(),
+                default_server_label: "held".to_owned(),
+                description: None,
+                allowed_tools: None,
+                execution: api::RemoteMcpExecution::Native,
+                exposure: api::RemoteMcpExposure::Inject,
+                approval: api::RemoteMcpApprovalPolicy::Never,
+                defer_loading: None,
+                allow_private_network: true,
+                auth_policy: api::McpServerAuthPolicy::OptionalBearer,
+                credential: Some(api::McpServerCredential::AuthGrant {
+                    grant_id: server_grant,
+                }),
+                status: api::McpServerStatus::Active,
+            },
+            expected_revision: None,
+        })
+        .await?;
+        let profile_id = ProfileId::new(unique("bots-live-held"));
+        api.create_profile(ProfileCreateParams {
+            profile: issue_program_input(&profile_id, &server_id),
+        })
+        .await?;
+
+        // A credential whose audience doesn't cover the server is refused.
+        let refused = create_bot(
+            &api,
+            &profile_id,
+            |document| {
+                document.mcp_credentials = [(server_id.clone(), elsewhere.clone())].into();
+            },
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("audience")),
+            "{refused:?}"
+        );
+
+        // The bot's session calls the server with the bot's credential.
+        let bot_id = create_bot(
+            &api,
+            &profile_id,
+            |document| {
+                document.mcp_credentials = [(server_id.clone(), bot_grant.clone())].into();
+            },
+            Vec::new(),
+        )
+        .await?;
+        api.admit_bot_event(BotEventAdmitParams {
+            bot_id: bot_id.clone(),
+            event: manual_event("from the bot"),
+        })
+        .await?;
+        let events = wait_for_outcomes(&api, &bot_id, 1).await?;
+        assert_eq!(
+            events[0].outcome,
+            Some(BotEventOutcome::Handled),
+            "{events:#?}"
+        );
+        assert_eq!(
+            fixture.call_authorizations().await,
+            vec![Some("Bearer bot-token".to_owned())]
+        );
+
+        // A session that isn't the bot's uses the server's own.
+        let session_id = unique("held-plain");
+        api.start_session(api::SessionStartParams {
+            session_id: Some(session_id.clone()),
+            display_name: None,
+            metadata: Default::default(),
+            config: None,
+            profile: Some(api::ProfileSource::Named {
+                profile_id: profile_id.clone(),
+            }),
+            delete_after_close_ms: None,
+            access: None,
+        })
+        .await?;
+        let run = api
+            .start_run(api::RunStartParams {
+                session_id: session_id.clone(),
+                source: api::RunStartSource::Program {
+                    input: serde_json::json!({"events": [{"event": {"data": {"note": "plain"}}}]}),
+                    input_defaults: None,
+                },
+                submission_id: None,
+                config: None,
+                notify_on_terminal: None,
+            })
+            .await?
+            .result
+            .run;
+        let run = support::live::wait_for_terminal_run(
+            &api,
+            &harness::SessionId::new(session_id),
+            &run.id,
+        )
+        .await?;
+        assert_eq!(run.status, api::RunStatus::Completed, "{run:?}");
+        assert_eq!(
+            fixture.call_authorizations().await,
+            vec![
+                Some("Bearer bot-token".to_owned()),
+                Some("Bearer server-token".to_owned()),
+            ]
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// GitHub's API for one installation (678, with Issues write and Contents
+/// read), recording the scope of every token it mints. A repository named
+/// `missing` is one the installation doesn't cover.
+#[derive(Default)]
+struct FakeGitHub {
+    scopes: std::sync::Mutex<Vec<Option<auth::GitHubTokenScope>>>,
+}
+
+#[async_trait::async_trait]
+impl auth::GitHubApiClient for FakeGitHub {
+    async fn list_installations(
+        &self,
+        _api_base_url: &str,
+        _app_jwt: &auth::SecretValue,
+    ) -> Result<Vec<auth::GitHubInstallation>, auth::GitHubAppError> {
+        Ok(vec![auth::GitHubInstallation {
+            installation_id: 678,
+            account_login: Some("acme".to_owned()),
+            repository_selection: Some("selected".to_owned()),
+            permissions: serde_json::json!({
+                "issues": "write", "contents": "read", "metadata": "read",
+            }),
+        }])
+    }
+
+    async fn create_installation_token(
+        &self,
+        _api_base_url: &str,
+        _app_jwt: &auth::SecretValue,
+        _installation_id: i64,
+        scope: Option<&auth::GitHubTokenScope>,
+    ) -> Result<auth::GitHubInstallationToken, auth::GitHubAppError> {
+        if scope.is_some_and(|scope| scope.repositories.iter().any(|name| name == "missing")) {
+            return Err(auth::GitHubAppError::Http {
+                status: Some(422),
+                message: "There is at least one repository that does not exist or is not accessible to the parent installation.".to_owned(),
+            });
+        }
+        self.scopes.lock().expect("lock").push(scope.cloned());
+        Ok(auth::GitHubInstallationToken {
+            token: auth::SecretValue::new("ghs_fake"),
+            expires_at_ms: i64::MAX,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the local Temporal + PostgreSQL stack (source scripts/dev/env.sh)"]
+async fn bots_live_a_github_sublease_narrows_and_serves_a_bots_mcp_server() -> anyhow::Result<()> {
+    run_bots_live(Llm::Program, |api, client| async move {
+        let github = Arc::new(FakeGitHub::default());
+        let store = pg_store_from_env().await?;
+        let auth_api = GatewayAgentApi::builder(client, store)
+            .with_github_api_client(github.clone())
+            .build();
+        let provider_id = unique("github-app");
+        auth_api
+            .create_auth_provider(api::AuthProviderCreateParams {
+                provider_id: Some(provider_id.clone()),
+                display_name: None,
+                config: api::AuthProviderConfigInput::GitHubApp {
+                    app_id: "12345".to_owned(),
+                    api_base_url: None,
+                },
+                credential: Some(
+                    include_str!("../../auth/testdata/github_app_test_key.pem").to_owned(),
+                ),
+            })
+            .await?;
+        let installation = auth_api
+            .grant_github_installation(api::AuthGitHubInstallationGrantParams {
+                provider_id,
+                installation_id: 678,
+                grant_id: None,
+                display_name: None,
+                exposure: api::AuthGrantExposure::Brokered,
+            })
+            .await?
+            .result
+            .grant
+            .grant_id;
+        let sublease =
+            |repositories: &[&str], permissions: &[(&str, &str)], audience: Option<&str>| {
+                auth_api.sublease_auth_grant(api::AuthGrantSubleaseParams {
+                    parent_grant_id: installation.clone(),
+                    repositories: repositories.iter().map(|name| (*name).to_owned()).collect(),
+                    permissions: permissions
+                        .iter()
+                        .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
+                        .collect(),
+                    audience: audience.map(str::to_owned),
+                    grant_id: None,
+                    display_name: None,
+                    exposure: api::AuthGrantExposure::Brokered,
+                })
+            };
+        let mcp_audience = Some("https://api.githubcopilot.com/mcp/");
+
+        let issues = sublease(&["ExamGrader3"], &[("issues", "write")], mcp_audience)
+            .await?
+            .result
+            .grant;
+        assert_eq!(issues.audience.as_deref(), mcp_audience);
+        // Creating it minted one token with its scope.
+        assert_eq!(
+            *github.scopes.lock().expect("lock"),
+            vec![Some(auth::GitHubTokenScope {
+                repositories: vec!["ExamGrader3".to_owned()],
+                permissions: [("issues".to_owned(), "write".to_owned())].into(),
+            })]
+        );
+        for (refused, expected) in [
+            (
+                sublease(&["ExamGrader3"], &[("contents", "write")], None).await,
+                "can't ask for write",
+            ),
+            (
+                sublease(&["missing"], &[("issues", "read")], None).await,
+                "not accessible to the parent installation",
+            ),
+            (
+                sublease(&[], &[("issues", "read")], None).await,
+                "at least one repository",
+            ),
+            (
+                sublease(
+                    &["ExamGrader3"],
+                    &[("issues", "read")],
+                    Some("https://example.com/mcp"),
+                )
+                .await,
+                "on GitHub",
+            ),
+        ] {
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains(expected)),
+                "{expected}: {refused:?}"
+            );
+        }
+
+        // A bot can hold the sub-lease for GitHub's MCP server; the whole
+        // installation, which carries everything the app has, it can't.
+        let server_id = unique("github-issues");
+        api.put_mcp_server(api::McpServerPutParams {
+            server: api::McpServerInput {
+                server_id: server_id.clone(),
+                display_name: None,
+                server_url: "https://api.githubcopilot.com/mcp/x/issues".to_owned(),
+                default_server_label: "github".to_owned(),
+                description: None,
+                allowed_tools: None,
+                execution: api::RemoteMcpExecution::Native,
+                exposure: api::RemoteMcpExposure::Inject,
+                approval: api::RemoteMcpApprovalPolicy::Never,
+                defer_loading: None,
+                allow_private_network: false,
+                auth_policy: api::McpServerAuthPolicy::OptionalBearer,
+                credential: None,
+                status: api::McpServerStatus::Active,
+            },
+            expected_revision: None,
+        })
+        .await?;
+        let profile_id = create_profile(&api, "You are a live-test bot.").await?;
+        let whole = create_bot(
+            &api,
+            &profile_id,
+            |document| {
+                document.mcp_credentials = [(server_id.clone(), installation.clone())].into();
+            },
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            whole
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("not compatible")),
+            "{whole:?}"
+        );
+        let bot_id = create_bot(
+            &api,
+            &profile_id,
+            |document| {
+                document.mcp_credentials = [(server_id.clone(), issues.grant_id.clone())].into();
+            },
+            Vec::new(),
+        )
+        .await?;
+        let bot = api.read_bot(BotReadParams { bot_id }).await?.result.bot;
+        assert_eq!(
+            bot.document.mcp_credentials,
+            [(server_id, issues.grant_id)].into()
+        );
         Ok(())
     })
     .await
@@ -1589,7 +2082,9 @@ async fn bots_live_program_waiting_on_people_defers_its_delivery() -> anyhow::Re
         .await?;
         // While the program waits for its answer, the delivery is deferred.
         let events = wait_for_events(&api, &bot_id, "a deferred delivery", |events| {
-            events.iter().any(|event| event.outcome == Some(BotEventOutcome::Deferred))
+            events
+                .iter()
+                .any(|event| event.outcome == Some(BotEventOutcome::Deferred))
         })
         .await?;
         let first = event_seq(&events, 1);
@@ -1620,9 +2115,9 @@ async fn bots_live_program_waiting_on_people_defers_its_delivery() -> anyhow::Re
         })
         .await?;
         let events = wait_for_events(&api, &bot_id, "the first verdict", |events| {
-            events.iter().any(|event| {
-                event.seq == 1 && event.outcome == Some(BotEventOutcome::Ignored)
-            })
+            events
+                .iter()
+                .any(|event| event.seq == 1 && event.outcome == Some(BotEventOutcome::Ignored))
         })
         .await?;
         let first = event_seq(&events, 1);
@@ -1639,12 +2134,15 @@ async fn bots_live_program_waiting_on_people_defers_its_delivery() -> anyhow::Re
         })
         .await?;
         let events = wait_for_events(&api, &bot_id, "the second verdict", |events| {
-            events.iter().any(|event| {
-                event.seq == 2 && event.outcome == Some(BotEventOutcome::Handled)
-            })
+            events
+                .iter()
+                .any(|event| event.seq == 2 && event.outcome == Some(BotEventOutcome::Handled))
         })
         .await?;
-        assert_eq!(event_seq(&events, 2).outcome_detail.as_deref(), Some("second"));
+        assert_eq!(
+            event_seq(&events, 2).outcome_detail.as_deref(),
+            Some("second")
+        );
         Ok(())
     })
     .await

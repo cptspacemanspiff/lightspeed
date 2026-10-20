@@ -63,6 +63,7 @@ fn bot_document(profile: &str) -> BotDocument {
         emit: false,
         enabled: true,
         escalate_to: Vec::new(),
+        mcp_credentials: Default::default(),
     }
 }
 

@@ -124,6 +124,35 @@ pub fn is_bot_session(bot_id: &BotId, session_id: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(':') || rest.starts_with("-g"))
 }
 
+/// The bots whose session `session_id` could be. A routed id names its bot
+/// up to the first `:`; a main session's `-g{n}` suffix makes
+/// `bot:v1:x-g2` both bot `x`'s second generation and bot `x-g2`'s first,
+/// so that id gives both. Not a bot session id: none.
+pub fn bot_id_candidates(session_id: &str) -> Vec<BotId> {
+    let Some(rest) = session_id.strip_prefix(BOT_SESSION_PREFIX) else {
+        return Vec::new();
+    };
+    // A routed session's generation suffix comes after its route, so only a
+    // main session (no route) reads two ways.
+    let (head, routed) = match rest.split_once(':') {
+        Some((head, _)) => (head, true),
+        None => (rest, false),
+    };
+    let mut names = vec![head];
+    if !routed
+        && let Some((base, generation)) = head.rsplit_once("-g")
+        && !generation.is_empty()
+        && generation.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        names.push(base);
+    }
+    names
+        .into_iter()
+        .filter_map(|name| BotId::try_new(name.to_owned()).ok())
+        .filter(|bot_id| is_bot_session(bot_id, session_id))
+        .collect()
+}
+
 fn slugify(value: &str, max_len: usize) -> String {
     let mut slug = String::with_capacity(value.len());
     let mut pending_dash = false;
@@ -293,6 +322,30 @@ mod tests {
 
     fn bot(id: &str) -> BotId {
         BotId::new(id)
+    }
+
+    #[test]
+    fn a_session_id_names_the_bots_it_could_belong_to() {
+        let candidates = |session_id: &str| {
+            bot_id_candidates(session_id)
+                .into_iter()
+                .map(|bot_id| bot_id.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(candidates("bot:v1:triage"), ["triage"]);
+        assert_eq!(
+            candidates(&bot_per_event_session_id(&bot("triage"), "e1")),
+            ["triage"]
+        );
+        assert_eq!(candidates("bot:v1:triage:e-0123456789ab-g2"), ["triage"]);
+        assert_eq!(
+            candidates(&bot_keyed_session_id(&bot("x-g2"), "k")),
+            ["x-g2"]
+        );
+        // A main session's generation suffix reads two ways.
+        assert_eq!(candidates("bot:v1:x-g2"), ["x-g2", "x"]);
+        assert!(candidates("agent_123").is_empty());
+        assert!(candidates("triage").is_empty());
     }
 
     #[test]

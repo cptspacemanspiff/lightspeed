@@ -319,6 +319,7 @@ async fn create_bot_with_chat(
                     emit: false,
                     enabled: true,
                     escalate_to: Vec::new(),
+                    mcp_credentials: Default::default(),
                 },
             },
             triggers: vec![BotTriggerInput {

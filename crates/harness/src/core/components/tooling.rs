@@ -489,9 +489,15 @@ impl RemoteMcpToolSpec {
         }
         if let Some(auth_ref) = &self.auth_ref {
             auth_ref.validate()?;
-            if auth_ref.namespace != "mcp_server" || auth_ref.id != self.server_id {
+            // The server's own credential, or a grant the session holds for
+            // it (a bot's `mcpCredentials`), which the gateway names when it
+            // prepares the session's tools.
+            let server_credential =
+                auth_ref.namespace == "mcp_server" && auth_ref.id == self.server_id;
+            if !server_credential && auth_ref.namespace != "auth_grant" {
                 return Err(DomainError::InvariantViolation(
-                    "remote MCP auth refs must identify the configured mcp_server".to_owned(),
+                    "remote MCP auth refs must identify the configured mcp_server or an auth_grant"
+                        .to_owned(),
                 ));
             }
         } else if self.auth_required {
@@ -533,7 +539,7 @@ pub enum RemoteMcpApprovalPolicy {
     Always,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SecretRef {
     pub namespace: String,
     pub id: String,

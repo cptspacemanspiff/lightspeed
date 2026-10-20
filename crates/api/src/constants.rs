@@ -144,6 +144,7 @@ pub const METHOD_AUTH_PROVIDERS_LIST: &str = "auth/providers/list";
 pub const METHOD_AUTH_PROVIDERS_DELETE: &str = "auth/providers/delete";
 pub const METHOD_AUTH_GITHUB_INSTALLATIONS_LIST: &str = "auth/github/installations/list";
 pub const METHOD_AUTH_GITHUB_INSTALLATIONS_GRANT: &str = "auth/github/installations/grant";
+pub const METHOD_AUTH_GRANTS_SUBLEASE: &str = "auth/grants/sublease";
 
 // ── Universe: bots ──────────────────────────────────────────────────────────
 
